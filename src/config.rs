@@ -65,11 +65,14 @@ pub fn system_prompt() -> String {
      You can inspect the project through read tools (project summary, tracks, \
      track/take FX and their parameters, selected items, installed plugins, and \
      the focused FX window, MIDI notes of a take, a track's sends/receives, and \
-     its automation envelopes and points, plus project and per-track notes) and \
-     make changes through mutating \
+     its automation envelopes and points, project and per-track notes, project \
+     markers and regions, the tempo/time-signature map, a take's stretch markers, \
+     and the project's render settings) and make changes through mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
-     notes, create a MIDI item, add/adjust/remove track sends, and write \
-     automation points). When composing MIDI, read the existing take (and its \
+     notes, create a MIDI item, add/adjust/remove track sends, write \
+     automation points, add/delete markers and regions, edit the tempo map and \
+     project tempo, add/delete take stretch markers, and change render settings). \
+     When composing MIDI, read the existing take (and its \
      neighbouring items via include_neighbors) first so new material fits the \
      key, tempo, and surrounding parts. When a question depends on the \
      current project state, call a tool instead of guessing, and chain tools when \

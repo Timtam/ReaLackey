@@ -28,13 +28,15 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 | **Phase 3:** safe mutations (confirm + Undo) + undo tools | ✅ code complete |
 | **Phase 4:** MIDI composition + track routing | ✅ code complete |
 | **+ Automation:** envelopes read/write + automation items | ✅ code complete |
+| **+ Arrangement:** markers/regions, tempo map, stretch markers, render settings | ✅ code complete |
 
 **Read tools** (main thread, results fed back to the model): `get_project_summary`,
 `get_tracks`, `get_track_fx`, `get_fx_params`, `get_selected_items`,
 `get_take_fx`, `get_take_fx_params`, `list_installed_fx`, `get_focused_fx`,
 `get_take_midi` (notes, optionally incl. neighbouring items), `get_track_sends`,
 `get_track_envelopes`, `get_envelope_points`, `get_automation_items`,
-`get_project_notes`, `get_track_notes`, `get_project_memory`.
+`get_project_notes`, `get_track_notes`, `get_project_memory`,
+`get_markers`, `get_tempo_markers`, `get_stretch_markers`, `get_render_settings`.
 
 **Per-project notes & memory:** the assistant can read/append the project's Notes
 and per-track notes (undo-wrapped), and keeps a **persistent per-project memory**
@@ -45,7 +47,10 @@ confirmation-gated), so the assistant can track progress freely.
 
 **Mutating tools** — FX: `add_fx`, `set_fx_param`, `set_fx_enabled`; MIDI:
 `insert_midi_notes` (quarter-note timing), `create_midi_item`; routing:
-`add_send`, `set_send_param`, `remove_send`; automation: `insert_envelope_point`.
+`add_send`, `set_send_param`, `remove_send`; automation: `insert_envelope_point`;
+markers/regions: `add_marker`, `add_region`, `delete_marker`; tempo map:
+`add_tempo_marker`, `delete_tempo_marker`, `set_project_tempo`; stretch markers:
+`add_stretch_marker`, `delete_stretch_marker`; render: `set_render_setting`.
 Every change is shown to the user
 for confirmation (a native, screen-reader-accessible Yes/No box) and wrapped in
 a **labelled Undo block** (`AI: …`) so both the user and the assistant can revert

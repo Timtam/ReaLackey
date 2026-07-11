@@ -444,6 +444,168 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["key"]),
             ),
         },
+        // --- markers & regions ---
+        ToolDef {
+            name: "get_markers".into(),
+            description: "List all project markers and regions: kind (marker/region), the \
+                          user-facing index number, position (seconds), region end (for regions), \
+                          name, and color (native integer, 0 = default)."
+                .into(),
+            input_schema: empty(),
+        },
+        ToolDef {
+            name: "add_marker".into(),
+            description: "Add a project marker at a position (seconds). CHANGES the project \
+                          (confirmed + undo-wrapped). Returns the new marker's index number."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "position": { "type": "number", "description": "position in seconds" },
+                    "name": { "type": "string", "description": "marker name (optional)" },
+                    "index_number": { "type": "integer", "description": "desired display number, or -1 to auto-assign (default)" }
+                }),
+                json!(["position"]),
+            ),
+        },
+        ToolDef {
+            name: "add_region".into(),
+            description: "Add a region spanning start..end (seconds). CHANGES the project \
+                          (confirmed + undo-wrapped). Returns the new region's index number."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "start": { "type": "number", "description": "region start in seconds" },
+                    "end": { "type": "number", "description": "region end in seconds" },
+                    "name": { "type": "string", "description": "region name (optional)" },
+                    "index_number": { "type": "integer", "description": "desired display number, or -1 to auto-assign (default)" }
+                }),
+                json!(["start", "end"]),
+            ),
+        },
+        ToolDef {
+            name: "delete_marker".into(),
+            description: "Delete a marker or region by its display index number (as reported by \
+                          get_markers). CHANGES the project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "index_number": { "type": "integer", "description": "the marker/region display index number" },
+                    "is_region": { "type": "boolean", "description": "true to delete a region, false (default) for a marker" }
+                }),
+                json!(["index_number"]),
+            ),
+        },
+        // --- tempo / time-signature map ---
+        ToolDef {
+            name: "get_tempo_markers".into(),
+            description: "List the tempo/time-signature markers: index, time (seconds), measure, \
+                          beat, BPM, time signature (numerator/denominator), and whether the tempo \
+                          transition is linear."
+                .into(),
+            input_schema: empty(),
+        },
+        ToolDef {
+            name: "add_tempo_marker".into(),
+            description: "Add a tempo and/or time-signature marker at a time (seconds). CHANGES the \
+                          project (confirmed + undo-wrapped). Pass timesig 0/0 (default) for a \
+                          tempo-only marker."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "time": { "type": "number", "description": "position in seconds" },
+                    "bpm": { "type": "number", "description": "tempo in BPM" },
+                    "timesig_num": { "type": "integer", "description": "time-signature numerator, 0 = no change (default)" },
+                    "timesig_denom": { "type": "integer", "description": "time-signature denominator, 0 = no change (default)" },
+                    "linear": { "type": "boolean", "description": "linear tempo transition to the next marker (default false)" }
+                }),
+                json!(["time", "bpm"]),
+            ),
+        },
+        ToolDef {
+            name: "delete_tempo_marker".into(),
+            description: "Delete a tempo/time-signature marker by index (as reported by \
+                          get_tempo_markers). CHANGES the project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({ "index": { "type": "integer", "description": "0-based tempo marker index" } }),
+                json!(["index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_project_tempo".into(),
+            description: "Set the project's (master) tempo in BPM. CHANGES the project (confirmed + \
+                          undo-wrapped). For tempo changes at a specific time, use add_tempo_marker."
+                .into(),
+            input_schema: obj(
+                json!({ "bpm": { "type": "number", "description": "tempo in BPM" } }),
+                json!(["bpm"]),
+            ),
+        },
+        // --- stretch markers (per take) ---
+        ToolDef {
+            name: "get_stretch_markers".into(),
+            description: "List the stretch markers of an item's active take: index, position in the \
+                          take (seconds), source-media position (seconds), and slope."
+                .into(),
+            input_schema: obj(
+                json!({ "item_index": { "type": "integer", "description": "0-based project media item index" } }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "add_stretch_marker".into(),
+            description: "Add a stretch marker to an item's active take at a position (seconds \
+                          within the take). CHANGES the project (confirmed + undo-wrapped). \
+                          Optionally pin it to a source-media position."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "position": { "type": "number", "description": "position within the take, in seconds" },
+                    "src_position": { "type": "number", "description": "source-media position in seconds (optional)" }
+                }),
+                json!(["item_index", "position"]),
+            ),
+        },
+        ToolDef {
+            name: "delete_stretch_marker".into(),
+            description: "Delete stretch marker(s) from an item's active take, starting at \
+                          marker_index. CHANGES the project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "marker_index": { "type": "integer", "description": "0-based stretch marker index" },
+                    "count": { "type": "integer", "description": "how many to remove (default 1)" }
+                }),
+                json!(["item_index", "marker_index"]),
+            ),
+        },
+        // --- render settings ---
+        ToolDef {
+            name: "get_render_settings".into(),
+            description: "Read the project's render settings: mode bitmask, bounds flag, channel \
+                          count, sample rate, custom start/end, tail, add-to-project, dither, and \
+                          the output directory and file-name pattern."
+                .into(),
+            input_schema: empty(),
+        },
+        ToolDef {
+            name: "set_render_setting".into(),
+            description: "Set one render setting by key. CHANGES the project (confirmed + \
+                          undo-wrapped). Provide 'value' for numeric keys (e.g. RENDER_SRATE, \
+                          RENDER_CHANNELS, RENDER_BOUNDSFLAG, RENDER_SETTINGS, RENDER_STARTPOS, \
+                          RENDER_ENDPOS) or 'text' for string keys (RENDER_FILE, RENDER_PATTERN)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "key": { "type": "string", "description": "GetSetProjectInfo key, e.g. \"RENDER_SRATE\" or \"RENDER_FILE\"" },
+                    "value": { "type": "number", "description": "numeric value (for numeric keys)" },
+                    "text": { "type": "string", "description": "string value (for string keys)" }
+                }),
+                json!(["key"]),
+            ),
+        },
     ]
 }
 
@@ -576,6 +738,62 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             input.get("value").and_then(|v| v.as_str()).unwrap_or(""),
         ),
         "delete_project_memory" => delete_project_memory(reaper, req_str(input, "key")?),
+        // markers & regions
+        "get_markers" => Ok(get_markers(reaper)),
+        "add_marker" => add_marker(
+            reaper,
+            req_f64(input, "position")?,
+            opt_str(input, "name").unwrap_or(""),
+            input.get("index_number").and_then(|v| v.as_i64()).unwrap_or(-1) as c_int,
+        ),
+        "add_region" => add_region(
+            reaper,
+            req_f64(input, "start")?,
+            req_f64(input, "end")?,
+            opt_str(input, "name").unwrap_or(""),
+            input.get("index_number").and_then(|v| v.as_i64()).unwrap_or(-1) as c_int,
+        ),
+        "delete_marker" => delete_marker(
+            reaper,
+            req_i64(input, "index_number")? as c_int,
+            opt_bool(input, "is_region").unwrap_or(false),
+        ),
+        // tempo / time-signature map
+        "get_tempo_markers" => Ok(get_tempo_markers(reaper)),
+        "add_tempo_marker" => add_tempo_marker(
+            reaper,
+            req_f64(input, "time")?,
+            req_f64(input, "bpm")?,
+            input.get("timesig_num").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
+            input.get("timesig_denom").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
+            opt_bool(input, "linear").unwrap_or(false),
+        ),
+        "delete_tempo_marker" => {
+            delete_tempo_marker(reaper, req_i64(input, "index")? as c_int)
+        }
+        "set_project_tempo" => set_project_tempo(reaper, req_f64(input, "bpm")?),
+        // stretch markers
+        "get_stretch_markers" => get_stretch_markers(reaper, req_u32(input, "item_index")?),
+        "add_stretch_marker" => add_stretch_marker(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_f64(input, "position")?,
+            input.get("src_position").and_then(|v| v.as_f64()),
+        ),
+        "delete_stretch_marker" => delete_stretch_marker(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_i64(input, "marker_index")? as c_int,
+            input.get("count").and_then(|v| v.as_i64()).map(|c| c as c_int),
+        ),
+        // render settings
+        "get_render_settings" => Ok(get_render_settings(reaper)),
+        "set_render_setting" => set_render_setting(
+            reaper,
+            req_str(input, "key")?,
+            input.get("value").and_then(|v| v.as_f64()),
+            opt_str(input, "text"),
+        ),
         // undo / history
         "undo" => Ok(undo(reaper)),
         "redo" => Ok(redo(reaper)),
@@ -649,6 +867,61 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("envelope_index"),
             show("time"),
             show("value"),
+        )),
+        "add_marker" => Some(format!(
+            "Add marker {} at {} s",
+            input
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "(unnamed)".into()),
+            show("position"),
+        )),
+        "add_region" => Some(format!(
+            "Add region {} from {} s to {} s",
+            input
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "(unnamed)".into()),
+            show("start"),
+            show("end"),
+        )),
+        "delete_marker" => Some(format!(
+            "Delete {} number {}",
+            if input.get("is_region").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "region"
+            } else {
+                "marker"
+            },
+            show("index_number"),
+        )),
+        "add_tempo_marker" => Some(format!(
+            "Add tempo marker at {} s = {} BPM",
+            show("time"),
+            show("bpm"),
+        )),
+        "delete_tempo_marker" => Some(format!("Delete tempo marker {}", show("index"))),
+        "set_project_tempo" => Some(format!("Set project tempo to {} BPM", show("bpm"))),
+        "add_stretch_marker" => Some(format!(
+            "Add stretch marker to item {} at {} s",
+            show("item_index"),
+            show("position"),
+        )),
+        "delete_stretch_marker" => Some(format!(
+            "Delete stretch marker {} from item {}",
+            show("marker_index"),
+            show("item_index"),
+        )),
+        "set_render_setting" => Some(format!(
+            "Set render setting {} to {}",
+            input.get("key").and_then(|v| v.as_str()).unwrap_or("?"),
+            input
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .or_else(|| input.get("value").map(|v| v.to_string()))
+                .unwrap_or_else(|| "?".into()),
         )),
         _ => None,
     }
@@ -1635,6 +1908,385 @@ fn buf_to_string(buf: &[u8]) -> String {
     reaper_string(&buf[..end])
 }
 
+// ---- markers, regions, tempo, stretch markers, render settings --------------
+
+/// The null project pointer denotes the current project for the low-level API,
+/// matching how the notes/memory tools address the active project.
+const CUR_PROJ: *mut reaper_low::raw::ReaProject = std::ptr::null_mut();
+
+fn get_markers(reaper: &Reaper<MainThreadScope>) -> Value {
+    let low = reaper.low();
+    let mut out = Vec::new();
+    let mut i: c_int = 0;
+    loop {
+        let mut is_rgn = false;
+        let mut pos = 0.0f64;
+        let mut rgn_end = 0.0f64;
+        let mut name_ptr: *const c_char = std::ptr::null();
+        let mut index_number: c_int = 0;
+        let mut color: c_int = 0;
+        let next = unsafe {
+            low.EnumProjectMarkers3(
+                CUR_PROJ,
+                i,
+                &mut is_rgn,
+                &mut pos,
+                &mut rgn_end,
+                &mut name_ptr,
+                &mut index_number,
+                &mut color,
+            )
+        };
+        if next == 0 {
+            break; // no marker/region at index i
+        }
+        let name = unsafe { cstr_to_string(name_ptr) };
+        let mut entry = json!({
+            "kind": if is_rgn { "region" } else { "marker" },
+            "index_number": index_number,
+            "position": pos,
+            "name": name,
+            "color": color,
+        });
+        if is_rgn {
+            entry["region_end"] = json!(rgn_end);
+        }
+        out.push(entry);
+        i += 1;
+        if i > 1_000_000 {
+            break; // safety bound
+        }
+    }
+    json!({ "markers": out })
+}
+
+fn add_marker(
+    reaper: &Reaper<MainThreadScope>,
+    position: f64,
+    name: &str,
+    want_index: c_int,
+) -> Result<Value, String> {
+    let name_c = CString::new(name).map_err(|_| "name contains a NUL byte".to_string())?;
+    let low = reaper.low();
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    let id = unsafe {
+        low.AddProjectMarker2(CUR_PROJ, false, position, 0.0, name_c.as_ptr(), want_index, 0)
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: add marker at {position:.3}s"),
+        UndoScope::All,
+    );
+    Ok(json!({ "added": id >= 0, "index_number": id, "position": position }))
+}
+
+fn add_region(
+    reaper: &Reaper<MainThreadScope>,
+    start: f64,
+    end: f64,
+    name: &str,
+    want_index: c_int,
+) -> Result<Value, String> {
+    let name_c = CString::new(name).map_err(|_| "name contains a NUL byte".to_string())?;
+    let low = reaper.low();
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    let id = unsafe {
+        low.AddProjectMarker2(CUR_PROJ, true, start, end, name_c.as_ptr(), want_index, 0)
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: add region {start:.3}s..{end:.3}s"),
+        UndoScope::All,
+    );
+    Ok(json!({ "added": id >= 0, "index_number": id, "start": start, "end": end }))
+}
+
+fn delete_marker(
+    reaper: &Reaper<MainThreadScope>,
+    index_number: c_int,
+    is_region: bool,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.DeleteProjectMarker(CUR_PROJ, index_number, is_region) };
+    reaper.undo_end_block_2(
+        project,
+        format!(
+            "AI: delete {} {index_number}",
+            if is_region { "region" } else { "marker" }
+        ),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "deleted": true, "index_number": index_number, "is_region": is_region }))
+    } else {
+        Err(format!(
+            "no {} with index number {index_number}",
+            if is_region { "region" } else { "marker" }
+        ))
+    }
+}
+
+fn get_tempo_markers(reaper: &Reaper<MainThreadScope>) -> Value {
+    let low = reaper.low();
+    let count = unsafe { low.CountTempoTimeSigMarkers(CUR_PROJ) };
+    let mut markers = Vec::new();
+    for i in 0..count {
+        let mut timepos = 0.0f64;
+        let mut measurepos: c_int = 0;
+        let mut beatpos = 0.0f64;
+        let mut bpm = 0.0f64;
+        let mut num: c_int = 0;
+        let mut denom: c_int = 0;
+        let mut linear = false;
+        let ok = unsafe {
+            low.GetTempoTimeSigMarker(
+                CUR_PROJ,
+                i,
+                &mut timepos,
+                &mut measurepos,
+                &mut beatpos,
+                &mut bpm,
+                &mut num,
+                &mut denom,
+                &mut linear,
+            )
+        };
+        if !ok {
+            continue;
+        }
+        markers.push(json!({
+            "index": i,
+            "time": timepos,
+            "measure": measurepos,
+            "beat": beatpos,
+            "bpm": bpm,
+            "timesig_num": num,
+            "timesig_denom": denom,
+            "linear": linear,
+        }));
+    }
+    json!({ "tempo_markers": markers })
+}
+
+fn add_tempo_marker(
+    reaper: &Reaper<MainThreadScope>,
+    time: f64,
+    bpm: f64,
+    timesig_num: c_int,
+    timesig_denom: c_int,
+    linear: bool,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe {
+        low.AddTempoTimeSigMarker(CUR_PROJ, time, bpm, timesig_num, timesig_denom, linear)
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: add tempo marker at {time:.3}s ({bpm:.3} BPM)"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "added": true, "time": time, "bpm": bpm }))
+    } else {
+        Err("failed to add tempo marker".to_string())
+    }
+}
+
+fn delete_tempo_marker(reaper: &Reaper<MainThreadScope>, index: c_int) -> Result<Value, String> {
+    let low = reaper.low();
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.DeleteTempoTimeSigMarker(CUR_PROJ, index) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete tempo marker {index}"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "deleted": true, "index": index }))
+    } else {
+        Err(format!("no tempo marker at index {index}"))
+    }
+}
+
+fn set_project_tempo(reaper: &Reaper<MainThreadScope>, bpm: f64) -> Result<Value, String> {
+    if !(bpm.is_finite() && bpm > 0.0) {
+        return Err("bpm must be a positive number".to_string());
+    }
+    let low = reaper.low();
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    // want_undo=false: our own block already records the undo point.
+    unsafe { low.SetCurrentBPM(CUR_PROJ, bpm, false) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set project tempo to {bpm:.3} BPM"),
+        UndoScope::All,
+    );
+    Ok(json!({ "set": true, "bpm": bpm }))
+}
+
+fn get_stretch_markers(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+) -> Result<Value, String> {
+    let item = reaper
+        .get_media_item(ProjectContext::CurrentProject, item_index)
+        .ok_or_else(|| format!("no media item at index {item_index}"))?;
+    let take = unsafe { reaper.get_active_take(item) }.ok_or("item has no active take")?;
+    let t = take.as_ptr();
+    let low = reaper.low();
+    let count = unsafe { low.GetTakeNumStretchMarkers(t) };
+    let mut markers = Vec::new();
+    for i in 0..count {
+        let mut pos = 0.0f64;
+        let mut srcpos = 0.0f64;
+        let ret = unsafe { low.GetTakeStretchMarker(t, i, &mut pos, &mut srcpos) };
+        if ret < 0 {
+            continue;
+        }
+        let slope = unsafe { low.GetTakeStretchMarkerSlope(t, i) };
+        markers.push(json!({
+            "index": i,
+            "position": pos,
+            "src_position": srcpos,
+            "slope": slope,
+        }));
+    }
+    Ok(json!({ "item_index": item_index, "stretch_markers": markers }))
+}
+
+fn add_stretch_marker(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    position: f64,
+    src_position: Option<f64>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = reaper
+        .get_media_item(project, item_index)
+        .ok_or_else(|| format!("no media item at index {item_index}"))?;
+    let take = unsafe { reaper.get_active_take(item) }.ok_or("item has no active take")?;
+    let t = take.as_ptr();
+    let low = reaper.low();
+    reaper.undo_begin_block_2(project);
+    // idx = -1 adds a new marker.
+    let idx = match src_position {
+        Some(s) => unsafe { low.SetTakeStretchMarker(t, -1, position, &s) },
+        None => unsafe { low.SetTakeStretchMarker(t, -1, position, std::ptr::null()) },
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: add stretch marker to item {item_index} at {position:.3}s"),
+        UndoScope::All,
+    );
+    Ok(json!({ "added": idx >= 0, "index": idx, "item_index": item_index, "position": position }))
+}
+
+fn delete_stretch_marker(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    marker_index: c_int,
+    count: Option<c_int>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = reaper
+        .get_media_item(project, item_index)
+        .ok_or_else(|| format!("no media item at index {item_index}"))?;
+    let take = unsafe { reaper.get_active_take(item) }.ok_or("item has no active take")?;
+    let t = take.as_ptr();
+    let low = reaper.low();
+    reaper.undo_begin_block_2(project);
+    let removed = match count {
+        Some(c) => unsafe { low.DeleteTakeStretchMarkers(t, marker_index, &c) },
+        None => unsafe { low.DeleteTakeStretchMarkers(t, marker_index, std::ptr::null()) },
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete {removed} stretch marker(s) from item {item_index}"),
+        UndoScope::All,
+    );
+    Ok(json!({ "removed": removed, "item_index": item_index, "marker_index": marker_index }))
+}
+
+/// Buffer for render string values (paths / patterns). GetSetProjectInfo_String
+/// takes no size argument, so the buffer just needs to be comfortably large.
+const RENDER_STR_BUF: usize = 8192;
+
+fn get_render_settings(reaper: &Reaper<MainThreadScope>) -> Value {
+    let low = reaper.low();
+    let num = |key: &CStr| unsafe { low.GetSetProjectInfo(CUR_PROJ, key.as_ptr(), 0.0, false) };
+    let text = |key: &CStr| {
+        read_string(RENDER_STR_BUF, |b, _s| unsafe {
+            low.GetSetProjectInfo_String(CUR_PROJ, key.as_ptr(), b, false)
+        })
+        .unwrap_or_default()
+    };
+    json!({
+        "render_settings": num(c"RENDER_SETTINGS"),
+        "bounds_flag": num(c"RENDER_BOUNDSFLAG"),
+        "channels": num(c"RENDER_CHANNELS"),
+        "sample_rate": num(c"RENDER_SRATE"),
+        "start_position": num(c"RENDER_STARTPOS"),
+        "end_position": num(c"RENDER_ENDPOS"),
+        "tail_flag": num(c"RENDER_TAILFLAG"),
+        "tail_ms": num(c"RENDER_TAILMS"),
+        "add_to_project": num(c"RENDER_ADDTOPROJ"),
+        "dither": num(c"RENDER_DITHER"),
+        "render_file": text(c"RENDER_FILE"),
+        "render_pattern": text(c"RENDER_PATTERN"),
+    })
+}
+
+fn set_render_setting(
+    reaper: &Reaper<MainThreadScope>,
+    key: &str,
+    value: Option<f64>,
+    text: Option<&str>,
+) -> Result<Value, String> {
+    let key_c = CString::new(key).map_err(|_| "key contains a NUL byte".to_string())?;
+    let low = reaper.low();
+    let project = ProjectContext::CurrentProject;
+    // Validate before opening the undo block so it always stays balanced.
+    let result = if let Some(t) = text {
+        let mut bytes = t.as_bytes().to_vec();
+        bytes.push(0); // NUL terminator
+        reaper.undo_begin_block_2(project);
+        let ok = unsafe {
+            low.GetSetProjectInfo_String(
+                CUR_PROJ,
+                key_c.as_ptr(),
+                bytes.as_mut_ptr() as *mut c_char,
+                true,
+            )
+        };
+        reaper.undo_end_block_2(
+            project,
+            format!("AI: set render setting {key}"),
+            UndoScope::All,
+        );
+        json!({ "set": ok, "key": key, "text": t })
+    } else if let Some(v) = value {
+        reaper.undo_begin_block_2(project);
+        unsafe { low.GetSetProjectInfo(CUR_PROJ, key_c.as_ptr(), v, true) };
+        reaper.undo_end_block_2(
+            project,
+            format!("AI: set render setting {key}"),
+            UndoScope::All,
+        );
+        json!({ "set": true, "key": key, "value": v })
+    } else {
+        return Err("provide 'value' (number) or 'text' (string)".to_string());
+    };
+    Ok(result)
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 fn selected_track_set(reaper: &Reaper<MainThreadScope>) -> std::collections::HashSet<MediaTrack> {
@@ -1729,6 +2381,13 @@ fn req_u32(input: &Value, key: &str) -> Result<u32, String> {
         .and_then(|v| v.as_u64())
         .map(|n| n as u32)
         .ok_or_else(|| format!("missing or invalid '{key}' (expected a non-negative integer)"))
+}
+
+fn req_i64(input: &Value, key: &str) -> Result<i64, String> {
+    input
+        .get(key)
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("missing or invalid '{key}' (expected an integer)"))
 }
 
 fn opt_usize(input: &Value, key: &str) -> Option<usize> {
