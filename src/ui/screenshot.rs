@@ -39,8 +39,8 @@ mod imp {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP,
-        HDC, HGDIOBJ, SRCCOPY,
+        GetDIBits, ReleaseDC, SelectObject, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
+        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
@@ -85,6 +85,11 @@ mod imp {
         }
 
         unsafe {
+            // Force a synchronous repaint first: a plugin window we just opened
+            // as floating (to capture an embedded FX) may not have painted yet,
+            // which would otherwise yield a blank grab. No-op for painted windows.
+            let _ = UpdateWindow(hwnd);
+
             let mut rect = RECT::default();
             GetWindowRect(hwnd, &mut rect).map_err(|e| format!("GetWindowRect failed: {e}"))?;
             let width = rect.right - rect.left;

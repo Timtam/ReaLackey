@@ -11,11 +11,11 @@ use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
 
 use reaper_medium::{
-    AddFxBehavior, FxLocation, ItemAttributeKey, MainThreadScope, MasterTrackBehavior, MediaItem,
-    MediaItemTake, MediaTrack, PositionInSeconds, ProjectContext, Reaper,
-    ReaperNormalizedFxParamValue, ReaperStr, SendTarget, TrackDefaultsBehavior, TrackFxChainType,
-    TrackFxLocation, TrackLocation, TrackSendAttributeKey, TrackSendCategory, TrackSendDirection,
-    UndoScope,
+    AddFxBehavior, FxLocation, FxShowInstruction, ItemAttributeKey, MainThreadScope,
+    MasterTrackBehavior, MediaItem, MediaItemTake, MediaTrack, PositionInSeconds, ProjectContext,
+    Reaper, ReaperNormalizedFxParamValue, ReaperStr, SendTarget, TrackDefaultsBehavior,
+    TrackFxChainType, TrackFxLocation, TrackLocation, TrackSendAttributeKey, TrackSendCategory,
+    TrackSendDirection, UndoScope,
 };
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -984,15 +984,16 @@ pub fn definitions() -> Vec<ToolDef> {
                           explicit user consent (the screenshot is sent to the cloud AI provider), \
                           so only call this when seeing the screen genuinely helps. Seeing and \
                           acting are separate: to CHANGE anything, use the parameter tools (e.g. \
-                          set_fx_param), never this tool. Currently supports target 'reaper_main' \
-                          (the REAPER main window)."
+                          set_fx_param), never this tool. target 'focused_plugin' captures the \
+                          window of the plugin the user currently has focused (it is opened as a \
+                          floating window if needed); 'reaper_main' captures the REAPER main window."
                 .into(),
             input_schema: obj(
                 json!({
                     "target": {
                         "type": "string",
-                        "enum": ["reaper_main"],
-                        "description": "what to capture (currently only the REAPER main window)"
+                        "enum": ["focused_plugin", "reaper_main"],
+                        "description": "what to capture: the focused plugin window, or the REAPER main window"
                     }
                 }),
                 json!(["target"]),
@@ -1016,8 +1017,8 @@ pub fn execute(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> T
 
 /// Capture a screenshot and return it to the model as an image (Phase 7 vision).
 /// The user has already consented by the time this runs (see [`consent_prompt`]).
-/// M0: only the REAPER main window; focused-plugin/full-screen land in later
-/// milestones.
+/// Supports the REAPER main window and the focused plugin's window (full-screen
+/// lands with the robustness pass).
 fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome {
     let target = input
         .get("target")
@@ -1026,11 +1027,15 @@ fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome 
 
     let hwnd: isize = match target {
         "reaper_main" => reaper.get_main_hwnd().as_ptr() as isize,
+        "focused_plugin" => match resolve_focused_fx_hwnd(reaper) {
+            Ok(h) => h,
+            Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+        },
         other => {
             return ToolOutcome::error(
                 json!({
                     "error": format!(
-                        "capture target '{other}' is not supported yet; only 'reaper_main' is available"
+                        "capture target '{other}' is not supported; use 'reaper_main' or 'focused_plugin'"
                     )
                 })
                 .to_string(),
@@ -1059,6 +1064,80 @@ fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome 
         Err(e) => {
             ToolOutcome::error(json!({ "error": format!("screenshot failed: {e}") }).to_string())
         }
+    }
+}
+
+/// Resolve the currently/last focused FX to its floating-window `HWND` (as an
+/// `isize`), so it can be screenshotted. Embedded (in-chain) FX have no window
+/// of their own, so we force a floating window first. Covers track FX and take
+/// FX; the master track is handled via `TrackLocation::MasterTrack`.
+fn resolve_focused_fx_hwnd(reaper: &Reaper<MainThreadScope>) -> Result<isize, String> {
+    let res = reaper
+        .get_touched_or_focused_fx_currently_focused_fx()
+        .ok_or("no plugin is focused — open or click a plugin window first")?;
+
+    match res.fx {
+        FxLocation::TrackFx {
+            track_location,
+            fx_location,
+        } => {
+            let project = ProjectContext::CurrentProject;
+            let track = track_from_location(reaper, project, track_location)?;
+            // SAFETY: track is a live pointer from the medium API; main thread.
+            // If it already has a floating window, use it; otherwise force one.
+            if let Some(h) = unsafe { reaper.track_fx_get_floating_window(track, fx_location) } {
+                return Ok(h.as_ptr() as isize);
+            }
+            unsafe {
+                reaper.track_fx_show(track, FxShowInstruction::ShowFloatingWindow(fx_location));
+            }
+            unsafe { reaper.track_fx_get_floating_window(track, fx_location) }
+                .map(|h| h.as_ptr() as isize)
+                .ok_or_else(|| "could not open the plugin's floating window".to_string())
+        }
+        FxLocation::TakeFx {
+            item_index,
+            take_index,
+            fx_index,
+            ..
+        } => {
+            let item = reaper
+                .get_media_item(ProjectContext::CurrentProject, item_index)
+                .ok_or_else(|| format!("no media item at index {item_index}"))?;
+            let low = reaper.low();
+            // SAFETY: main thread; item is a live pointer from the medium API.
+            let take = unsafe { low.GetMediaItemTake(item.as_ptr(), take_index as c_int) };
+            if take.is_null() {
+                return Err(format!("no take at index {take_index}"));
+            }
+            let idx = fx_index as c_int;
+            // SAFETY: take valid, main thread.
+            let existing = unsafe { low.TakeFX_GetFloatingWindow(take, idx) };
+            if !existing.is_null() {
+                return Ok(existing as isize);
+            }
+            unsafe { low.TakeFX_Show(take, idx, 3) }; // 3 = show floating window
+            let h = unsafe { low.TakeFX_GetFloatingWindow(take, idx) };
+            if h.is_null() {
+                Err("could not open the take FX floating window".to_string())
+            } else {
+                Ok(h as isize)
+            }
+        }
+    }
+}
+
+/// The `MediaTrack` for a focused-FX track location (master or a normal track).
+fn track_from_location(
+    reaper: &Reaper<MainThreadScope>,
+    project: ProjectContext,
+    loc: TrackLocation,
+) -> Result<MediaTrack, String> {
+    match loc {
+        TrackLocation::MasterTrack => Ok(reaper.get_master_track(project)),
+        TrackLocation::NormalTrack(index) => reaper
+            .get_track(project, index)
+            .ok_or_else(|| format!("no track at index {index}")),
     }
 }
 
