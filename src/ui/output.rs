@@ -232,12 +232,13 @@ pub fn error(text: &str) {
 #[cfg(windows)]
 mod webview_impl {
     use std::num::NonZeroIsize;
+    use std::path::PathBuf;
 
     use raw_window_handle::{
         HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
     };
     use wry::dpi::{PhysicalPosition, PhysicalSize};
-    use wry::{Rect, WebView, WebViewBuilder};
+    use wry::{Rect, WebContext, WebView, WebViewBuilder};
 
     use crate::ui::ffi;
 
@@ -299,12 +300,28 @@ function setToolResult(h){var l=document.querySelectorAll('#log details.tool');i
         let host = Host(NonZeroIsize::new(hwnd).ok_or("dialog window handle is null")?);
         let (x, y, w, h) = ffi::output_bounds().ok_or("output area bounds unavailable")?;
         unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
-        WebViewBuilder::new()
+
+        // WebView2's default user-data folder sits next to the host exe
+        // (reaper.exe, in read-only Program Files) -> E_ACCESSDENIED. Point it at
+        // a writable per-user folder instead. `web_context` only needs to live
+        // until build_as_child returns.
+        let data_dir = user_data_dir()?;
+        let _ = std::fs::create_dir_all(&data_dir);
+        let mut web_context = WebContext::new(Some(data_dir));
+
+        WebViewBuilder::new_with_web_context(&mut web_context)
             .with_bounds(bounds(x, y, w, h))
             .with_html(BASE_HTML)
             .with_transparent(false)
             .build_as_child(&host)
             .map_err(|e| e.to_string())
+    }
+
+    fn user_data_dir() -> Result<PathBuf, String> {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok_or("LOCALAPPDATA is not set")?;
+        Ok(base.join("REAPER-AI-Assistant").join("WebView2"))
     }
 
     pub fn set_bounds(webview: &WebView, x: i32, y: i32, w: i32, h: i32) {
