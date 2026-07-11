@@ -1017,14 +1017,15 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
                           acting are separate: to CHANGE anything, use the parameter tools (e.g. \
                           set_fx_param), never this tool. target 'focused_plugin' captures the \
                           window of the plugin the user currently has focused (it is opened as a \
-                          floating window if needed); 'reaper_main' captures the REAPER main window."
+                          floating window if needed); 'reaper_main' captures the REAPER main window; \
+                          'full_screen' captures the whole screen."
                 .into(),
             input_schema: obj(
                 json!({
                     "target": {
                         "type": "string",
-                        "enum": ["focused_plugin", "reaper_main"],
-                        "description": "what to capture: the focused plugin window, or the REAPER main window"
+                        "enum": ["focused_plugin", "reaper_main", "full_screen"],
+                        "description": "what to capture: the focused plugin window, the REAPER main window, or the full screen"
                     }
                 }),
                 json!(["target"]),
@@ -1139,17 +1140,28 @@ fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome 
         .and_then(|v| v.as_str())
         .unwrap_or("reaper_main");
 
-    let hwnd: isize = match target {
-        "reaper_main" => reaper.get_main_hwnd().as_ptr() as isize,
-        "focused_plugin" => match resolve_focused_fx_hwnd(reaper) {
-            Ok(h) => h,
-            Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
-        },
+    // Description-only targets (main window / full screen) can be huge, so cap
+    // their long edge to stay under the vision API's size limit. The focused
+    // plugin is left 1:1 so Tier-B click coordinates map exactly to the window.
+    const MAX_EDGE: u32 = 1280;
+    let shot = match target {
+        "focused_plugin" => {
+            let hwnd = match resolve_focused_fx_hwnd(reaper) {
+                Ok(h) => h,
+                Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+            };
+            crate::ui::screenshot::capture_hwnd(hwnd, true, None)
+        }
+        "reaper_main" => {
+            let hwnd = reaper.get_main_hwnd().as_ptr() as isize;
+            crate::ui::screenshot::capture_hwnd(hwnd, false, Some(MAX_EDGE))
+        }
+        "full_screen" => crate::ui::screenshot::capture_screen(Some(MAX_EDGE)),
         other => {
             return ToolOutcome::error(
                 json!({
                     "error": format!(
-                        "capture target '{other}' is not supported; use 'reaper_main' or 'focused_plugin'"
+                        "capture target '{other}' is not supported; use 'focused_plugin', 'reaper_main', or 'full_screen'"
                     )
                 })
                 .to_string(),
@@ -1157,7 +1169,7 @@ fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome 
         }
     };
 
-    match crate::ui::screenshot::capture_hwnd(hwnd) {
+    match shot {
         Ok(shot) => {
             let summary = json!({
                 "captured": true,
