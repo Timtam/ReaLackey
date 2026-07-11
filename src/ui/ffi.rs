@@ -20,6 +20,8 @@ extern "C" {
     fn ui_set_status(utf8: *const c_char);
     fn ui_close();
     fn ui_add_menu_item(hmenu: *mut c_void, label: *const c_char, command_id: c_int);
+    fn ui_create_submenu() -> *mut c_void;
+    fn ui_attach_submenu(parent_hmenu: *mut c_void, submenu: *mut c_void, title: *const c_char);
 }
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
@@ -57,6 +59,18 @@ pub fn close() {
 pub fn add_menu_item(hmenu: *mut c_void, label: &str, command_id: c_int) {
     if let Some(c) = to_cstring(label) {
         unsafe { ui_add_menu_item(hmenu, c.as_ptr(), command_id) }
+    }
+}
+
+/// Create an empty popup submenu (returns its `HMENU`).
+pub fn create_submenu() -> *mut c_void {
+    unsafe { ui_create_submenu() }
+}
+
+/// Attach `submenu` to `parent_hmenu` under `title`.
+pub fn attach_submenu(parent_hmenu: *mut c_void, submenu: *mut c_void, title: &str) {
+    if let Some(c) = to_cstring(title) {
+        unsafe { ui_attach_submenu(parent_hmenu, submenu, c.as_ptr()) }
     }
 }
 

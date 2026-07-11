@@ -190,3 +190,17 @@ extern "C" void ui_add_menu_item(void* hmenu, const char* label, int command_id)
   AppendMenu(m, MF_STRING, (UINT_PTR)command_id, label);
 #endif
 }
+
+extern "C" void* ui_create_submenu(void) {
+  return (void*)CreatePopupMenu();
+}
+
+extern "C" void ui_attach_submenu(void* parent_hmenu, void* submenu, const char* title) {
+  if (!parent_hmenu || !submenu || !title) return;
+  HMENU parent = (HMENU)parent_hmenu;
+#ifdef _WIN32
+  AppendMenuW(parent, MF_POPUP, (UINT_PTR)submenu, to_wide(title).c_str());
+#else
+  AppendMenu(parent, MF_POPUP, (UINT_PTR)submenu, title);
+#endif
+}

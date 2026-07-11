@@ -70,8 +70,8 @@ fn prompt_and_store_key() {
     }
 }
 
-/// Adds the extension's entries to REAPER's Extensions menu, wired to the same
-/// command ids as the actions.
+/// Adds a "REAPER AI Assistant" submenu (holding all our entries) to REAPER's
+/// Extensions menu, wired to the same command ids as the actions.
 struct ExtMenu;
 
 impl HookCustomMenu for ExtMenu {
@@ -80,13 +80,18 @@ impl HookCustomMenu for ExtMenu {
         if flag != MenuHookFlag::Init || menuidstr.as_c_str() != c"Main extensions" {
             return;
         }
-        let hmenu: *mut c_void = menu.as_ptr().cast();
+        let parent: *mut c_void = menu.as_ptr().cast();
+        let submenu = ui::ffi::create_submenu();
+        if submenu.is_null() {
+            return;
+        }
         if let Some(id) = CMD_OPEN.get().copied() {
-            ui::ffi::add_menu_item(hmenu, "REAPER AI Assistant: Open window", id as i32);
+            ui::ffi::add_menu_item(submenu, "Open window", id as i32);
         }
         if let Some(id) = CMD_SETKEY.get().copied() {
-            ui::ffi::add_menu_item(hmenu, "REAPER AI Assistant: Set Anthropic API key", id as i32);
+            ui::ffi::add_menu_item(submenu, "Set Anthropic API key", id as i32);
         }
+        ui::ffi::attach_submenu(parent, submenu, "REAPER AI Assistant");
     }
 }
 

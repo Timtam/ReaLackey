@@ -37,6 +37,11 @@ void ui_close(void);                       // destroy the dialog
 // REAPER's Extensions menu from a hookcustommenu callback (main thread only).
 void ui_add_menu_item(void* hmenu, const char* label, int command_id);
 
+// Create a popup submenu (returns its HMENU), and attach a submenu to a parent
+// menu under a title. Used to group the extension's entries under one submenu.
+void* ui_create_submenu(void);
+void ui_attach_submenu(void* parent_hmenu, void* submenu, const char* title);
+
 #ifdef __cplusplus
 }
 #endif
