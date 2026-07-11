@@ -841,6 +841,62 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["src_item_index", "dest_item_index"]),
             ),
         },
+        // --- audio analysis (Phase 6) ---
+        ToolDef {
+            name: "analyze_item_audio".into(),
+            description: "Analyse the audio of a media item's take (the source audio, PRE-FX): \
+                          peak and RMS dBFS, crest factor, DC offset, clipping, integrated \
+                          loudness (LUFS, BS.1770), and a rough spectral profile — centroid, \
+                          dominant frequency, and low/mid/high energy balance. Reads up to 30 s. \
+                          Defaults to the active take."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer", "description": "0-based project media item index" },
+                    "take_index": { "type": "integer", "description": "0-based take index; omit for the active take" }
+                }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "analyze_track_audio".into(),
+            description: "Analyse a track's audio (its summed item output, PRE-FX and pre-fader): \
+                          peak/RMS dBFS, crest factor, clipping, integrated loudness (LUFS), and a \
+                          rough spectral profile. Optionally restrict to a start/length in seconds; \
+                          reads up to 30 s. Note this is the source material BEFORE the track's FX \
+                          chain and fader, not the processed output."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "start": { "type": "number", "description": "start in seconds (default: track start)" },
+                    "length": { "type": "number", "description": "seconds to analyse (default: whole track, capped at 30 s)" }
+                }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "analyze_processed_audio".into(),
+            description: "Analyse PROCESSED (post-FX) audio by doing a short offline render and \
+                          measuring the result — the same metrics as analyze_track_audio (peak/RMS, \
+                          loudness LUFS, clipping, spectral profile) but WITH the FX applied. \
+                          target 'master' renders the full mix (all track FX + master FX); target \
+                          'track' (with track_index) renders that track through its FX and the \
+                          master. This performs a brief offline render (it may momentarily show a \
+                          progress bar), is capped at 30 s, and saves/restores your render settings \
+                          and track selection. Use this when the user asks about the processed or \
+                          final sound; use analyze_track_audio for the raw pre-FX source."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "target": { "type": "string", "enum": ["master", "track"], "description": "'master' for the full mix, 'track' for one track's processed output" },
+                    "track_index": { "type": "integer", "description": "required when target is 'track'" },
+                    "start": { "type": "number", "description": "start in seconds (default: time selection or 0)" },
+                    "length": { "type": "number", "description": "seconds to render (default: content/selection, capped at 30 s)" }
+                }),
+                json!(["target"]),
+            ),
+        },
     ]
 }
 
@@ -1105,6 +1161,23 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "src_item_index")?,
             req_u32(input, "dest_item_index")?,
             opt_u32(input, "take_index"),
+        ),
+        // audio analysis
+        "analyze_item_audio" => {
+            analyze_item_audio(reaper, req_u32(input, "item_index")?, opt_u32(input, "take_index"))
+        }
+        "analyze_track_audio" => analyze_track_audio(
+            reaper,
+            req_u32(input, "track_index")?,
+            input.get("start").and_then(|v| v.as_f64()),
+            input.get("length").and_then(|v| v.as_f64()),
+        ),
+        "analyze_processed_audio" => analyze_processed_audio(
+            reaper,
+            req_str(input, "target")?,
+            opt_u32(input, "track_index"),
+            input.get("start").and_then(|v| v.as_f64()),
+            input.get("length").and_then(|v| v.as_f64()),
         ),
         // undo / history
         "undo" => Ok(undo(reaper)),
@@ -3413,6 +3486,386 @@ fn copy_take(
         "dest_item_index": dest_item_index,
         "new_take_index": new_take_index,
     }))
+}
+
+// ---- audio analysis (Phase 6) ----------------------------------------------
+
+/// Fixed analysis sample rate; the accessor resamples to this, and it matches
+/// the BS.1770 K-weighting coefficients in `crate::dsp`.
+const ANALYZE_SR: c_int = 48_000;
+/// Cap on how much audio one call reads/analyses, to bound the main-thread cost
+/// (accessor reads must run on the main thread).
+const MAX_ANALYZE_SECONDS: f64 = 30.0;
+/// Read the accessor in blocks of this many frames so no single call is huge.
+const READ_BLOCK_FRAMES: usize = ANALYZE_SR as usize; // 1 second
+
+/// Read interleaved f64 samples from an audio accessor over `[start, start+len)`
+/// at [`ANALYZE_SR`] / `channels`, block by block. Generic over the opaque
+/// accessor pointer type (which reaper-low does not export a nameable alias for).
+/// Reads samples and reports whether any block failed (GetAudioAccessorSamples
+/// returns -1 on error), so a read failure isn't silently reported as silence.
+fn read_accessor_samples<A>(
+    low: &reaper_low::Reaper,
+    accessor: *mut A,
+    channels: c_int,
+    start: f64,
+    length: f64,
+) -> (Vec<f64>, bool) {
+    let ch = channels.max(1) as usize;
+    let total = (length * ANALYZE_SR as f64).round().max(0.0) as usize;
+    let mut out: Vec<f64> = Vec::with_capacity(total * ch);
+    let mut had_error = false;
+    let mut done = 0usize;
+    while done < total {
+        let n = READ_BLOCK_FRAMES.min(total - done);
+        let t = start + done as f64 / ANALYZE_SR as f64;
+        let mut buf = vec![0.0f64; n * ch];
+        let ret = unsafe {
+            low.GetAudioAccessorSamples(
+                accessor as *mut _,
+                ANALYZE_SR,
+                channels,
+                t,
+                n as c_int,
+                buf.as_mut_ptr(),
+            )
+        };
+        if ret < 0 {
+            had_error = true;
+        }
+        out.extend_from_slice(&buf);
+        done += n;
+    }
+    (out, had_error)
+}
+
+fn audio_result_json(
+    mut base: Value,
+    start: f64,
+    length: f64,
+    truncated: bool,
+    pre_fx: bool,
+    read_error: bool,
+    features: crate::dsp::AudioFeatures,
+) -> Value {
+    base["analysis_start"] = json!(start);
+    base["analysis_length"] = json!(length);
+    base["truncated"] = json!(truncated);
+    base["pre_fx"] = json!(pre_fx);
+    if read_error {
+        base["read_error"] = json!(true);
+    }
+    base["features"] = serde_json::to_value(features).unwrap_or(Value::Null);
+    base
+}
+
+fn analyze_item_audio(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, take_index)?;
+    let low = reaper.low();
+    // Channel count from the take's source (mono vs. stereo), clamped to 2.
+    let source = unsafe { low.GetMediaItemTake_Source(take.as_ptr()) };
+    let channels = if source.is_null() {
+        2
+    } else {
+        unsafe { low.GetMediaSourceNumChannels(source) }.clamp(1, 2)
+    };
+    let acc = unsafe { low.CreateTakeAudioAccessor(take.as_ptr()) };
+    if acc.is_null() {
+        return Err("could not create an audio accessor for the take".to_string());
+    }
+    let acc_start = unsafe { low.GetAudioAccessorStartTime(acc) };
+    let acc_end = unsafe { low.GetAudioAccessorEndTime(acc) };
+    let available = (acc_end - acc_start).max(0.0);
+    let length = available.min(MAX_ANALYZE_SECONDS);
+    let (samples, read_error) = read_accessor_samples(low, acc, channels, acc_start, length);
+    unsafe { low.DestroyAudioAccessor(acc) };
+    let features = crate::dsp::analyze(&samples, channels as usize, ANALYZE_SR as f64);
+    Ok(audio_result_json(
+        json!({ "item_index": item_index, "take_index": take_index }),
+        acc_start,
+        length,
+        available > MAX_ANALYZE_SECONDS,
+        true,
+        read_error,
+        features,
+    ))
+}
+
+fn analyze_track_audio(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    param_start: Option<f64>,
+    param_length: Option<f64>,
+) -> Result<Value, String> {
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    let channels =
+        (unsafe { low.GetMediaTrackInfo_Value(track.as_ptr(), c"I_NCHAN".as_ptr()) } as c_int)
+            .clamp(1, 2);
+    let acc = unsafe { low.CreateTrackAudioAccessor(track.as_ptr()) };
+    if acc.is_null() {
+        return Err("could not create an audio accessor for the track".to_string());
+    }
+    let acc_start = unsafe { low.GetAudioAccessorStartTime(acc) };
+    let acc_end = unsafe { low.GetAudioAccessorEndTime(acc) };
+    let start = param_start.unwrap_or(acc_start).max(acc_start);
+    let available = (acc_end - start).max(0.0);
+    let requested = param_length.unwrap_or(available).clamp(0.0, available);
+    let length = requested.min(MAX_ANALYZE_SECONDS);
+    let (samples, read_error) = read_accessor_samples(low, acc, channels, start, length);
+    unsafe { low.DestroyAudioAccessor(acc) };
+    let features = crate::dsp::analyze(&samples, channels as usize, ANALYZE_SR as f64);
+    Ok(audio_result_json(
+        json!({ "track_index": track_index }),
+        start,
+        length,
+        requested > MAX_ANALYZE_SECONDS,
+        true,
+        read_error,
+        features,
+    ))
+}
+
+// ---- processed (post-FX) audio via an offline render ------------------------
+
+/// Default render window (seconds) when no time selection or explicit range.
+const PROCESSED_DEFAULT_SECONDS: f64 = 20.0;
+/// Numeric render settings we override and must restore afterwards.
+const RENDER_NUM_KEYS: &[&CStr] = &[
+    c"RENDER_SETTINGS",
+    c"RENDER_BOUNDSFLAG",
+    c"RENDER_STARTPOS",
+    c"RENDER_ENDPOS",
+    c"RENDER_SRATE",
+    c"RENDER_CHANNELS",
+    c"RENDER_TAILFLAG",
+    c"RENDER_ADDTOPROJ",
+    c"RENDER_NORMALIZE",
+    c"RENDER_DITHER",
+];
+/// String render settings we override and must restore afterwards. RENDER_FORMAT2
+/// is included so any secondary render the user had configured is disabled during
+/// the probe (one output file) and restored after.
+const RENDER_STR_KEYS: &[&CStr] = &[
+    c"RENDER_FORMAT",
+    c"RENDER_FORMAT2",
+    c"RENDER_FILE",
+    c"RENDER_PATTERN",
+];
+
+fn proj_info_get(low: &reaper_low::Reaper, key: &CStr) -> f64 {
+    unsafe { low.GetSetProjectInfo(CUR_PROJ, key.as_ptr(), 0.0, false) }
+}
+
+fn proj_info_set(low: &reaper_low::Reaper, key: &CStr, value: f64) {
+    unsafe { low.GetSetProjectInfo(CUR_PROJ, key.as_ptr(), value, true) };
+}
+
+fn proj_info_str_get(low: &reaper_low::Reaper, key: &CStr) -> String {
+    read_string(RENDER_STR_BUF, |b, _s| unsafe {
+        low.GetSetProjectInfo_String(CUR_PROJ, key.as_ptr(), b, false)
+    })
+    .unwrap_or_default()
+}
+
+/// Snapshot a string render setting for later restore. Returns None when the get
+/// fails, so restore can skip it rather than clobber the live value with "".
+/// Uses a large buffer — RENDER_FORMAT is a base64 sink config that can be KBs.
+fn proj_info_str_snapshot(low: &reaper_low::Reaper, key: &CStr) -> Option<String> {
+    read_string(256 * 1024, |b, _s| unsafe {
+        low.GetSetProjectInfo_String(CUR_PROJ, key.as_ptr(), b, false)
+    })
+}
+
+fn proj_info_str_set(low: &reaper_low::Reaper, key: &CStr, value: &str) {
+    let mut bytes = value.as_bytes().to_vec();
+    bytes.push(0);
+    unsafe {
+        low.GetSetProjectInfo_String(CUR_PROJ, key.as_ptr(), bytes.as_mut_ptr() as *mut c_char, true)
+    };
+}
+
+/// RAII guard that restores the render settings (and, for a track probe, the
+/// track selection) and deletes the temp render file when it drops — so an early
+/// return or a panic can never leave the user's project reconfigured.
+struct RenderStateGuard<'a> {
+    reaper: &'a Reaper<MainThreadScope>,
+    num: Vec<f64>,
+    strs: Vec<Option<String>>,
+    /// (selected non-master tracks, was the master track selected) — track probe only.
+    selection: Option<(std::collections::HashSet<MediaTrack>, bool)>,
+    path: Option<String>,
+}
+
+impl Drop for RenderStateGuard<'_> {
+    fn drop(&mut self) {
+        let low = self.reaper.low();
+        if let Some((selected, master_selected)) = &self.selection {
+            let project = ProjectContext::CurrentProject;
+            for i in 0..self.reaper.count_tracks(project) {
+                if let Some(t) = self.reaper.get_track(project, i) {
+                    unsafe { low.SetTrackSelected(t.as_ptr(), selected.contains(&t)) };
+                }
+            }
+            let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
+            if !master.is_null() {
+                unsafe { low.SetTrackSelected(master, *master_selected) };
+            }
+        }
+        for (k, v) in RENDER_NUM_KEYS.iter().zip(&self.num) {
+            proj_info_set(low, k, *v);
+        }
+        for (k, v) in RENDER_STR_KEYS.iter().zip(&self.strs) {
+            if let Some(s) = v {
+                proj_info_str_set(low, k, s);
+            }
+        }
+        if let Some(p) = &self.path {
+            if !p.is_empty() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+}
+
+/// Analyse PROCESSED (post-FX) audio: briefly render the master mix or a track's
+/// processed output to a temp WAV, decode + analyse it. All settings/selection
+/// changes are undone (and the temp file removed) by a Drop guard on every path.
+fn analyze_processed_audio(
+    reaper: &Reaper<MainThreadScope>,
+    target: &str,
+    track_index: Option<u32>,
+    param_start: Option<f64>,
+    param_length: Option<f64>,
+) -> Result<Value, String> {
+    let track = match target {
+        "master" => None,
+        "track" => {
+            let ti = track_index.ok_or_else(|| "target 'track' requires track_index".to_string())?;
+            Some(track_at(reaper, ti)?)
+        }
+        other => return Err(format!("unknown target '{other}' (use 'master' or 'track')")),
+    };
+    let low = reaper.low();
+
+    // Work out the render window: explicit range, else the time selection, else
+    // from 0 for the project's content length — all capped at the analysis limit.
+    let (mut sel_start, mut sel_end) = (0.0f64, 0.0f64);
+    unsafe { low.GetSet_LoopTimeRange(false, false, &mut sel_start, &mut sel_end, false) };
+    let has_selection = sel_end > sel_start;
+    let rstart = param_start
+        .unwrap_or(if has_selection { sel_start } else { 0.0 })
+        .max(0.0);
+    let default_len = if has_selection && param_start.is_none() {
+        sel_end - sel_start
+    } else {
+        // Bound the default to the project's content length (master accessor end).
+        let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
+        let acc = unsafe { low.CreateTrackAudioAccessor(master) };
+        if acc.is_null() {
+            PROCESSED_DEFAULT_SECONDS
+        } else {
+            let end = unsafe { low.GetAudioAccessorEndTime(acc) };
+            unsafe { low.DestroyAudioAccessor(acc) };
+            let content = (end - rstart).max(0.0);
+            if content > 0.0 {
+                content
+            } else {
+                PROCESSED_DEFAULT_SECONDS
+            }
+        }
+    };
+    let requested_len = param_length.unwrap_or(default_len);
+    let rlen = requested_len.clamp(0.0, MAX_ANALYZE_SECONDS);
+    if !rstart.is_finite() || !rlen.is_finite() || rlen <= 0.0 {
+        return Err("invalid or empty render window".to_string());
+    }
+    let rend = rstart + rlen;
+    let truncated = requested_len.is_finite() && requested_len > MAX_ANALYZE_SECONDS;
+
+    // Snapshot BEFORE mutating; the guard restores everything on drop.
+    let selection_snapshot = track.map(|_| {
+        let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
+        let master_selected = !master.is_null()
+            && unsafe { low.GetMediaTrackInfo_Value(master, c"I_SELECTED".as_ptr()) } != 0.0;
+        (selected_track_set(reaper), master_selected)
+    });
+    let mut guard = RenderStateGuard {
+        reaper,
+        num: RENDER_NUM_KEYS.iter().map(|k| proj_info_get(low, k)).collect(),
+        strs: RENDER_STR_KEYS.iter().map(|k| proj_info_str_snapshot(low, k)).collect(),
+        selection: selection_snapshot,
+        path: None,
+    };
+
+    // Configure the render: WAV, 48 kHz stereo, no tail/normalize/dither/secondary,
+    // custom bounds, don't add to project. RENDER_SETTINGS 0 = master mix; 128 =
+    // selected tracks routed through the master.
+    let tmp_dir = std::env::temp_dir().to_string_lossy().to_string();
+    let base = format!("raai_render_probe_{}", std::process::id());
+    proj_info_str_set(low, c"RENDER_FORMAT", "evaw");
+    proj_info_str_set(low, c"RENDER_FORMAT2", "");
+    proj_info_set(low, c"RENDER_SETTINGS", if track.is_some() { 128.0 } else { 0.0 });
+    proj_info_set(low, c"RENDER_BOUNDSFLAG", 0.0);
+    proj_info_set(low, c"RENDER_STARTPOS", rstart);
+    proj_info_set(low, c"RENDER_ENDPOS", rend);
+    proj_info_set(low, c"RENDER_SRATE", ANALYZE_SR as f64);
+    proj_info_set(low, c"RENDER_CHANNELS", 2.0);
+    proj_info_set(low, c"RENDER_TAILFLAG", 0.0);
+    proj_info_set(low, c"RENDER_ADDTOPROJ", 0.0);
+    proj_info_set(low, c"RENDER_NORMALIZE", 0.0);
+    proj_info_set(low, c"RENDER_DITHER", 0.0);
+    proj_info_str_set(low, c"RENDER_FILE", &tmp_dir);
+    proj_info_str_set(low, c"RENDER_PATTERN", &base);
+    if let Some(t) = track {
+        unsafe { low.SetOnlyTrackSelected(t.as_ptr()) };
+    }
+
+    // The target path reflects the settings we just applied; hand it to the guard
+    // so the file is cleaned up on any path.
+    let path = proj_info_str_get(low, c"RENDER_TARGETS")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    guard.path = Some(path.clone());
+
+    let outcome: Result<(Vec<f64>, usize, f64), String> = if path.is_empty() {
+        Err("REAPER reported no render target path".to_string())
+    } else {
+        // Pre-delete so an existing file can't trigger a modal overwrite prompt
+        // (which would block Main_OnCommand and freeze the host).
+        let _ = std::fs::remove_file(&path);
+        // 42230 = File: Render project, using the most recent render settings.
+        low.Main_OnCommand(42230, 0);
+        std::fs::read(&path)
+            .map_err(|e| format!("could not read the rendered file: {e}"))
+            .and_then(|bytes| crate::dsp::parse_wav(&bytes))
+    };
+
+    // `?` here drops `guard`, which restores settings/selection and deletes the file.
+    let (samples, channels, sr) = outcome?;
+    let features = crate::dsp::analyze(&samples, channels, sr);
+    let chain = if track.is_some() {
+        "track FX + master FX"
+    } else {
+        "full mix including master FX"
+    };
+    Ok(audio_result_json(
+        json!({ "target": target, "track_index": track_index, "chain": chain }),
+        rstart,
+        rlen,
+        truncated,
+        false,
+        false,
+        features,
+    ))
 }
 
 // ---- helpers ----------------------------------------------------------------

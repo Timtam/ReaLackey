@@ -6,7 +6,8 @@
 //!   * `ai`        — provider-agnostic agent loop, worker thread (tokio).
 //!   * `providers` — LLM adapters (native Anthropic in Phase 0).
 //!   * `ui`        — Rust side of the C++/SWELL dialog shim.
-//!   * `tools`,`dsp` — reserved for later phases.
+//!   * `tools`     — the tool/function catalog the model drives.
+//!   * `dsp`       — pure-Rust audio feature extraction (loudness/spectral).
 //!
 //! Phase 0 scope: the extension loads, the shim shows the modeless dialog,
 //! OSARA is detected, and a hello-world streaming round-trip with Claude runs

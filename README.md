@@ -30,6 +30,7 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 | **+ Automation:** envelopes read/write + automation items | ✅ code complete |
 | **+ Arrangement:** markers/regions, tempo map, stretch markers, render settings | ✅ code complete |
 | **+ Editing:** item/take/track properties, grouping, copy/move/delete | ✅ code complete |
+| **Phase 6:** DSP audio analysis (loudness/spectral) via audio accessors | ✅ code complete |
 
 **Read tools** (main thread, results fed back to the model): `get_project_summary`,
 `get_tracks`, `get_track_fx`, `get_fx_params`, `get_selected_items`,
@@ -39,7 +40,8 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 `get_project_notes`, `get_track_notes`, `get_project_memory`,
 `get_markers`, `get_tempo_markers`, `get_stretch_markers`, `get_render_settings`,
 `get_item_properties`, `get_take_properties`, `get_track_properties`,
-`get_track_group_membership`.
+`get_track_group_membership`, `analyze_item_audio`, `analyze_track_audio`,
+`analyze_processed_audio`.
 
 **Per-project notes & memory:** the assistant can read/append the project's Notes
 and per-track notes (undo-wrapped), and keeps a **persistent per-project memory**
@@ -66,8 +68,27 @@ can also `undo`/`redo`, and `get_undo_history` returns the next undo/redo labels
 plus a rolling log of recent actions (sampled from `Undo_CanUndo2`) so it can
 comment on the user's workflow.
 
-Later: shared OpenAI-compatible provider adapter (P5), audio analysis via JSFX
-probe + Rust DSP (P6), screen vision (P7), docking + distribution (P8).
+**Audio analysis (Phase 6):** `analyze_item_audio` / `analyze_track_audio` read
+samples through a REAPER audio accessor (main thread) and run a pure-Rust DSP
+pass (`src/dsp/`) — sample peak & RMS (dBFS), crest factor, DC offset, clipping,
+**integrated loudness (LUFS, ITU-R BS.1770 gated)**, and a rough spectral profile
+(centroid, dominant frequency, low/mid/high balance) via a hand-rolled FFT. The
+DSP is host-independent and **unit-tested** (FFT vs. DFT, loudness, spectral
+centroid). Note the accessor returns the **pre-FX, pre-fader source audio**, and
+reads are capped at 30 s.
+
+**Processed (post-FX) audio** — `analyze_processed_audio` returns the same metrics
+for audio *with* the FX applied, via a short offline render: `target: "master"`
+renders the full mix (all track FX + master FX); `target: "track"` renders one
+track through its FX and the master. It forces a temp WAV (`RENDER_FORMAT="evaw"`),
+reads the exact output path from `RENDER_TARGETS`, renders with the "most recent
+render settings" action, decodes the WAV in Rust (a unit-tested parser), analyses
+it, deletes the temp file, and **saves/restores every render setting and the
+track selection** it touches. Capped at 30 s.
+
+Later: shared OpenAI-compatible provider adapter (P5), the real-time JSFX
+measurement-probe path (the second Phase-6 mechanism, for live/streaming metering),
+screen vision (P7), docking + distribution (P8).
 
 ## Architecture
 
@@ -90,7 +111,8 @@ src/
   ui/               Rust side of the C++ shim
     ffi.rs            extern "C" decls + panic-guarded callback thunks
     bridge.rs         routes dialog callbacks -> worker
-  tools/ dsp/       reserved for later phases
+  tools/            tool/function catalog the model drives (read + mutating)
+  dsp/              pure-Rust audio feature extraction (loudness, spectral)
 cpp/
   resource.h        control IDs (shared by rc.exe AND swell_resgen.php)
   assistant.rc      ONE Win32 DIALOGEX resource (all platforms)
