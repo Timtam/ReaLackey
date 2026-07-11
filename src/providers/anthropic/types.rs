@@ -8,7 +8,7 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::providers::{ChatRequest, Content, Role};
+use crate::providers::{ChatRequest, Content, ResultBlock, Role};
 
 // ---- Request ----------------------------------------------------------------
 
@@ -59,16 +59,43 @@ fn content_to_json(c: &Content) -> Value {
             content,
             is_error,
         } => {
+            // Backward-compatible: a single text block serializes to the plain
+            // string form (byte-identical to before image support). Only emit an
+            // array of blocks when there is an image (or multiple blocks).
+            let content_json = match content.as_slice() {
+                // Defensive: an empty result would otherwise emit `[]`, which the
+                // API rejects. Can't happen today (tools always add ≥1 block).
+                [] => json!(""),
+                [ResultBlock::Text(t)] => json!(t),
+                blocks => json!(blocks.iter().map(result_block_to_json).collect::<Vec<_>>()),
+            };
             let mut v = json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": content,
+                "content": content_json,
             });
             if *is_error {
                 v["is_error"] = json!(true);
             }
             v
         }
+    }
+}
+
+fn result_block_to_json(b: &ResultBlock) -> Value {
+    match b {
+        ResultBlock::Text(text) => json!({ "type": "text", "text": text }),
+        ResultBlock::Image {
+            media_type,
+            data_base64,
+        } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data_base64,
+            }
+        }),
     }
 }
 
@@ -194,4 +221,81 @@ pub struct ApiError {
     pub kind: String,
     #[serde(default)]
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::ResultBlock;
+
+    #[test]
+    fn text_only_tool_result_serializes_as_a_plain_string() {
+        // Adding image support must NOT change the wire shape of ordinary
+        // (text-only) tool results: `content` stays a string, not an array.
+        let c = Content::tool_result_text("toolu_1", "the answer is 42", false);
+        let v = content_to_json(&c);
+        assert_eq!(v["type"], json!("tool_result"));
+        assert_eq!(v["tool_use_id"], json!("toolu_1"));
+        assert_eq!(v["content"], json!("the answer is 42"));
+        assert!(v["content"].is_string());
+        assert!(v.get("is_error").is_none());
+    }
+
+    #[test]
+    fn error_tool_result_sets_is_error() {
+        let c = Content::tool_result_text("toolu_2", "boom", true);
+        let v = content_to_json(&c);
+        assert_eq!(v["is_error"], json!(true));
+    }
+
+    #[test]
+    fn image_tool_result_serializes_as_a_block_array() {
+        let c = Content::ToolResult {
+            tool_use_id: "toolu_3".into(),
+            content: vec![
+                ResultBlock::Text("screenshot attached".into()),
+                ResultBlock::Image {
+                    media_type: "image/png".into(),
+                    data_base64: "AAAA".into(),
+                },
+            ],
+            is_error: false,
+        };
+        let v = content_to_json(&c);
+        let blocks = v["content"].as_array().expect("content should be an array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "screenshot attached" }));
+        assert_eq!(
+            blocks[1],
+            json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" }
+            })
+        );
+    }
+
+    #[test]
+    fn image_tool_result_with_error_keeps_is_error_at_top_level() {
+        let c = Content::ToolResult {
+            tool_use_id: "toolu_4".into(),
+            content: vec![ResultBlock::Text("failed but here is context".into())],
+            is_error: true,
+        };
+        let v = content_to_json(&c);
+        // Single text block still serializes as a string, and is_error is set.
+        assert!(v["content"].is_string());
+        assert_eq!(v["is_error"], json!(true));
+    }
+
+    #[test]
+    fn empty_tool_result_does_not_emit_an_empty_array() {
+        let c = Content::ToolResult {
+            tool_use_id: "toolu_5".into(),
+            content: vec![],
+            is_error: false,
+        };
+        let v = content_to_json(&c);
+        // An empty array would be rejected by the API; we emit an empty string.
+        assert_eq!(v["content"], json!(""));
+    }
 }

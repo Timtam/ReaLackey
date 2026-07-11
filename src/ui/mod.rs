@@ -4,3 +4,4 @@
 pub mod bridge;
 pub mod ffi;
 pub mod output;
+pub mod screenshot;

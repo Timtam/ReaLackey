@@ -15,7 +15,7 @@ use crate::ai::protocol::{MainTask, UiEvent};
 use crate::config;
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::{
-    ChatEvent, ChatMessage, ChatRequest, Content, LlmProvider, Role, StopReason,
+    ChatEvent, ChatMessage, ChatRequest, Content, LlmProvider, ResultBlock, Role, StopReason,
 };
 use crate::tools::{self, ReaperOp, ToolOutcome};
 
@@ -156,11 +156,28 @@ async fn handle_prompt(
                     is_error: outcome.is_error,
                     summary: truncate_summary(&outcome.content),
                 });
-                results.push(Content::ToolResult {
-                    tool_use_id: id,
-                    content: outcome.content,
-                    is_error: outcome.is_error,
-                });
+                let ToolOutcome {
+                    content,
+                    is_error,
+                    image,
+                } = outcome;
+                let result = match image {
+                    // Common case: a text-only result (byte-identical wire form).
+                    None => Content::tool_result_text(id, content, is_error),
+                    // Vision: text + an image block the model can see.
+                    Some(img) => Content::ToolResult {
+                        tool_use_id: id,
+                        content: vec![
+                            ResultBlock::Text(content),
+                            ResultBlock::Image {
+                                media_type: img.media_type,
+                                data_base64: img.data_base64,
+                            },
+                        ],
+                        is_error,
+                    },
+                };
+                results.push(result);
             }
             history.push(ChatMessage {
                 role: Role::User,
@@ -259,6 +276,27 @@ async fn run_tool(
     name: &str,
     input: Value,
 ) -> ToolOutcome {
+    // Screen capture sends pixels to the cloud, so it is ALWAYS consent-gated
+    // (data protection), independent of the mutation-confirm toggle, and asked
+    // before the tool runs. capture_view is not a mutation, so the preview path
+    // below never applies to it.
+    if let Some(consent) = tools::consent_prompt(name, &input) {
+        let _ = ui_tx.send(UiEvent::Notice(format!("{consent}?")));
+        let _ = ui_tx.send(UiEvent::Announce(format!("{consent}. Allow?")));
+        let approved = confirm(
+            op_tx,
+            format!("{consent}?\n\nThe screenshot will be sent to the cloud AI provider."),
+        )
+        .await;
+        if !approved {
+            let _ = ui_tx.send(UiEvent::Notice("Screenshot declined.".into()));
+            return ToolOutcome::ok(
+                json!({ "captured": false, "reason": "user declined the screenshot" }).to_string(),
+            );
+        }
+        return exec_tool(op_tx, name.to_string(), input).await;
+    }
+
     // `preview` returns Some only for mutating tools; those require confirmation.
     if let Some(preview) = tools::preview(name, &input) {
         if config::confirmation_required() {
@@ -271,11 +309,9 @@ async fn run_tool(
             .await;
             if !confirmed {
                 let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
-                return ToolOutcome {
-                    content: json!({ "applied": false, "reason": "user declined the change" })
-                        .to_string(),
-                    is_error: false,
-                };
+                return ToolOutcome::ok(
+                    json!({ "applied": false, "reason": "user declined the change" }).to_string(),
+                );
             }
             let outcome = exec_tool(op_tx, name.to_string(), input).await;
             let _ = ui_tx.send(UiEvent::Notice("Applied.".into()));
@@ -316,13 +352,9 @@ async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> To
         })
         .is_err()
     {
-        return ToolOutcome {
-            content: "{\"error\":\"main thread unavailable\"}".into(),
-            is_error: true,
-        };
+        return ToolOutcome::error("{\"error\":\"main thread unavailable\"}");
     }
-    reply_rx.await.unwrap_or(ToolOutcome {
-        content: "{\"error\":\"no reply from main thread\"}".into(),
-        is_error: true,
-    })
+    reply_rx
+        .await
+        .unwrap_or_else(|_| ToolOutcome::error("{\"error\":\"no reply from main thread\"}"))
 }

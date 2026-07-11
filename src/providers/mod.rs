@@ -24,6 +24,18 @@ pub enum Role {
     Assistant,
 }
 
+/// One block inside a tool result. Anthropic allows `tool_result.content` to be
+/// an array of text and image blocks; a plain text result stays a single Text.
+#[derive(Clone, Debug)]
+pub enum ResultBlock {
+    Text(String),
+    /// An image the model can see (vision), e.g. a plugin-GUI screenshot.
+    Image {
+        media_type: String,
+        data_base64: String,
+    },
+}
+
 /// A single content block within a message (mirrors the Anthropic content model).
 #[derive(Clone, Debug)]
 pub enum Content {
@@ -35,9 +47,24 @@ pub enum Content {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: Vec<ResultBlock>,
         is_error: bool,
     },
+}
+
+impl Content {
+    /// Build a text-only tool result (the common case; keeps call sites terse).
+    pub fn tool_result_text(
+        tool_use_id: impl Into<String>,
+        text: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        Content::ToolResult {
+            tool_use_id: tool_use_id.into(),
+            content: vec![ResultBlock::Text(text.into())],
+            is_error,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

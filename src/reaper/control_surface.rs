@@ -64,10 +64,7 @@ impl PumpSurface {
         match op {
             ReaperOp::Tool { name, input, reply } => {
                 let outcome = api::with(|reaper| tools::execute(reaper, &name, &input))
-                    .unwrap_or_else(|| ToolOutcome {
-                        content: "{\"error\":\"REAPER API unavailable\"}".into(),
-                        is_error: true,
-                    });
+                    .unwrap_or_else(|| ToolOutcome::error("{\"error\":\"REAPER API unavailable\"}"));
                 let _ = reply.send(outcome);
             }
             ReaperOp::Confirm { message, reply } => {

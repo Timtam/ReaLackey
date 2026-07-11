@@ -40,10 +40,50 @@ pub enum ReaperOp {
     },
 }
 
+/// An image produced by a tool (a screenshot), returned to the model as an
+/// Anthropic image content block so it can see visual-only UI.
+pub struct CapturedImage {
+    pub media_type: String,
+    pub data_base64: String,
+}
+
 /// The result of running a tool.
 pub struct ToolOutcome {
+    /// JSON (or plain text) summary fed back to the model as the tool result.
     pub content: String,
     pub is_error: bool,
+    /// An optional image attached to the tool result (vision tools only).
+    pub image: Option<CapturedImage>,
+}
+
+impl ToolOutcome {
+    /// A text result (no image).
+    pub fn text(content: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            content: content.into(),
+            is_error,
+            image: None,
+        }
+    }
+
+    /// A successful text result.
+    pub fn ok(content: impl Into<String>) -> Self {
+        Self::text(content, false)
+    }
+
+    /// An error result.
+    pub fn error(content: impl Into<String>) -> Self {
+        Self::text(content, true)
+    }
+
+    /// A successful result carrying an image for the model to see.
+    pub fn with_image(content: impl Into<String>, image: CapturedImage) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            image: Some(image),
+        }
+    }
 }
 
 /// Tool definitions advertised to the model.
@@ -935,20 +975,90 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["item_index"]),
             ),
         },
+        // --- vision (Phase 7) ---
+        ToolDef {
+            name: "capture_view".into(),
+            description: "Take a screenshot so you can SEE visual-only UI that the REAPER API \
+                          cannot express — custom-drawn plugin GUIs, meters, waveforms. The image \
+                          is returned to you as a picture to reason about. Each capture needs \
+                          explicit user consent (the screenshot is sent to the cloud AI provider), \
+                          so only call this when seeing the screen genuinely helps. Seeing and \
+                          acting are separate: to CHANGE anything, use the parameter tools (e.g. \
+                          set_fx_param), never this tool. Currently supports target 'reaper_main' \
+                          (the REAPER main window)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "target": {
+                        "type": "string",
+                        "enum": ["reaper_main"],
+                        "description": "what to capture (currently only the REAPER main window)"
+                    }
+                }),
+                json!(["target"]),
+            ),
+        },
     ]
 }
 
 /// Execute a tool by name on the main thread. Never panics.
 pub fn execute(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> ToolOutcome {
+    // Vision tools return an image alongside their text, so they bypass the
+    // plain `dispatch` (which only yields JSON) and build their own outcome.
+    if name == "capture_view" {
+        return capture_view(reaper, input);
+    }
     match dispatch(reaper, name, input) {
-        Ok(v) => ToolOutcome {
-            content: v.to_string(),
-            is_error: false,
-        },
-        Err(e) => ToolOutcome {
-            content: json!({ "error": e }).to_string(),
-            is_error: true,
-        },
+        Ok(v) => ToolOutcome::ok(v.to_string()),
+        Err(e) => ToolOutcome::error(json!({ "error": e }).to_string()),
+    }
+}
+
+/// Capture a screenshot and return it to the model as an image (Phase 7 vision).
+/// The user has already consented by the time this runs (see [`consent_prompt`]).
+/// M0: only the REAPER main window; focused-plugin/full-screen land in later
+/// milestones.
+fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome {
+    let target = input
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("reaper_main");
+
+    let hwnd: isize = match target {
+        "reaper_main" => reaper.get_main_hwnd().as_ptr() as isize,
+        other => {
+            return ToolOutcome::error(
+                json!({
+                    "error": format!(
+                        "capture target '{other}' is not supported yet; only 'reaper_main' is available"
+                    )
+                })
+                .to_string(),
+            );
+        }
+    };
+
+    match crate::ui::screenshot::capture_hwnd(hwnd) {
+        Ok(shot) => {
+            let summary = json!({
+                "captured": true,
+                "target": target,
+                "width": shot.width,
+                "height": shot.height,
+                "note": "The screenshot is attached as an image for you to view.",
+            })
+            .to_string();
+            ToolOutcome::with_image(
+                summary,
+                CapturedImage {
+                    media_type: "image/png".into(),
+                    data_base64: shot.png_base64,
+                },
+            )
+        }
+        Err(e) => {
+            ToolOutcome::error(json!({ "error": format!("screenshot failed: {e}") }).to_string())
+        }
     }
 }
 
@@ -1238,6 +1348,29 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
 
 /// Human-readable preview for a mutating tool call, or None for read/undo tools.
 /// Returning `Some` marks the tool as requiring confirmation.
+/// A mandatory consent gate for tools that send data off the machine (Phase 7
+/// screen capture). Returns `Some(description-of-what-is-captured)` for such
+/// tools, or `None`. Unlike mutation confirmation, this gate is ALWAYS enforced
+/// (data protection) and is independent of the mutation-confirm toggle.
+pub fn consent_prompt(name: &str, input: &Value) -> Option<String> {
+    match name {
+        "capture_view" => {
+            let target = input
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("reaper_main");
+            let what = match target {
+                "reaper_main" => "the REAPER main window",
+                "focused_plugin" => "the focused plugin window",
+                "full_screen" => "the entire screen",
+                _ => "a window",
+            };
+            Some(format!("The assistant wants to take a screenshot of {what}"))
+        }
+        _ => None,
+    }
+}
+
 pub fn preview(name: &str, input: &Value) -> Option<String> {
     let show = |k: &str| input.get(k).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
     match name {

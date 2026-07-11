@@ -56,6 +56,15 @@ raw-window-handle = "0.6"
 # types are identical (no cross-version type-identity mismatch).
 webview2-com = "0.38"
 windows-core = "0.61"
+# Phase 7 vision: GDI window capture (screenshot of plugin GUIs / main window),
+# PNG-encoded and base64'd for the Anthropic image content block.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+png = "0.17"
+base64 = "0.22"
 
 [build-dependencies]
 cc             = "1"    # compiles the C++/SWELL shim
