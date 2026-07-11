@@ -37,6 +37,10 @@ pub fn get_user_input(title: &str, caption: &str) -> Option<String> {
 
     const CAP: usize = 4096;
     let mut buf = vec![0u8; CAP];
+    // This modal pumps REAPER's message loop; mark the main thread busy so our
+    // other callbacks (the pump, hook commands) skip re-entrant REAPER API calls
+    // while it is up.
+    let _busy = crate::reaper::reentry::enter();
     let ok = unsafe {
         f(
             title_c.as_ptr(),

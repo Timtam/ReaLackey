@@ -9,7 +9,7 @@ use crossbeam_channel::Receiver;
 use reaper_medium::{ControlSurface, MessageBoxResult, MessageBoxType};
 
 use crate::ai::protocol::UiEvent;
-use crate::reaper::{api, history, osara};
+use crate::reaper::{api, history, osara, reentry};
 use crate::tools::{self, ReaperOp, ToolOutcome};
 use crate::ui;
 
@@ -101,6 +101,14 @@ impl PumpSurface {
 
 impl ControlSurface for PumpSurface {
     fn run(&mut self) {
+        // If a tool is pumping the message loop (e.g. an offline render), REAPER
+        // may re-enter run() — skip it, so we never call the REAPER API while it
+        // is mid-operation (which crashes the host). This same flag also blocks
+        // our hook-command actions (see action.rs) from re-entering.
+        let Some(_guard) = reentry::enter() else {
+            return;
+        };
+
         // Bounded drains so a burst never starves REAPER's main loop.
         for _ in 0..512 {
             match self.ui_rx.try_recv() {

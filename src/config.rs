@@ -62,12 +62,13 @@ pub fn max_output_tokens() -> u32 {
 }
 
 /// Whether the offline post-FX render (`analyze_processed_audio`) is allowed.
-/// OFF by default: rendering via `Main_OnCommand` from the control-surface tick
-/// re-enters REAPER's message loop and has crashed the host. Opt in with
-/// `RAAI_ENABLE_PROCESSED_RENDER=1` only to test a safe render path.
+/// ON by default now that the main-thread callbacks (the pump AND our hook
+/// commands) share a re-entrancy guard, so the render no longer re-enters the
+/// REAPER API mid-operation (the previous crash cause). Force it off with
+/// `RAAI_DISABLE_PROCESSED_RENDER=1` if it ever misbehaves.
 pub fn processed_render_enabled() -> bool {
-    matches!(
-        std::env::var("RAAI_ENABLE_PROCESSED_RENDER").as_deref(),
+    !matches!(
+        std::env::var("RAAI_DISABLE_PROCESSED_RENDER").as_deref(),
         Ok("1") | Ok("true") | Ok("on") | Ok("yes")
     )
 }
