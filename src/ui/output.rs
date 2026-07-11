@@ -66,10 +66,8 @@ impl Output {
     fn user_message(&mut self, text: &str) {
         self.assistant_md.clear();
         if self.active() {
-            let html = format!(
-                "<div class=\"msg user\"><span class=\"who\">You</span>{}</div>",
-                html_escape(text)
-            );
+            // A heading so a screen reader can jump straight to each question (h).
+            let html = format!("<h2 class=\"turn user\">You: {}</h2>", html_escape(text));
             self.call_js("addBlock", &html);
         } else {
             ffi::append_output(&format!("\r\nYou: {text}\r\n"));
@@ -274,14 +272,17 @@ mod webview_impl {
 html,body{margin:0;padding:0;height:100%;font:13px/1.55 "Segoe UI",system-ui,sans-serif;background:#1e1e1e;color:#e6e6e6;}
 #log{padding:10px;}
 .msg{margin:0 0 12px;word-wrap:break-word;overflow-wrap:anywhere;}
-.msg .who{font-weight:600;margin-right:6px;color:#569cd6;}
-.msg.user{color:#9cdcfe;}
+/* Each turn starts with a heading so a screen reader can jump between them (h). */
+h2.turn{font-size:13px;font-weight:700;margin:16px 0 4px;line-height:1.4;}
+h2.turn.user{color:#9cdcfe;}
+h2.turn.assistant{color:#569cd6;}
+.body{margin:0 0 12px;}
 .msg.notice{color:#c9a227;font-style:italic;}
 .msg.error{color:#f48771;white-space:pre-wrap;}
-.msg.assistant p{margin:.4em 0;}
-.msg.assistant pre{background:#111;padding:8px;border-radius:5px;overflow:auto;}
-.msg.assistant code{background:#111;padding:0 3px;border-radius:3px;}
-.msg.assistant a{color:#4ea1ff;}
+.body p{margin:.4em 0;}
+.body pre{background:#111;padding:8px;border-radius:5px;overflow:auto;}
+.body code{background:#111;padding:0 3px;border-radius:3px;}
+.body a{color:#4ea1ff;}
 details.tool{border:1px solid #3a3a3a;border-radius:6px;margin:8px 0;background:#232323;}
 details.tool>summary{cursor:pointer;padding:5px 9px;list-style:none;color:#b5cea8;}
 details.tool>summary::-webkit-details-marker{display:none;}
@@ -292,13 +293,13 @@ details.tool pre{margin:0;padding:8px;background:#151515;overflow:auto;font-size
 .sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;}
 </style></head><body>
 <div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
-<div id="log" role="log"></div><script>
+<div id="log"></div><script>
 function sd(){window.scrollTo(0,document.body.scrollHeight);}
 function addBlock(h){var l=document.getElementById('log');if(l){l.insertAdjacentHTML('beforeend',h);sd();}}
-function startAssistant(){var o=document.getElementById('cur');if(o)o.removeAttribute('id');addBlock('<div class="msg assistant" id="cur"></div>');}
+function startAssistant(){var o=document.getElementById('cur');if(o)o.removeAttribute('id');addBlock('<h2 class="turn assistant">Assistant</h2><div class="body" id="cur"></div>');}
 function updateAssistant(h){var c=document.getElementById('cur');if(c){c.innerHTML=h;sd();}}
 function setToolResult(h){var l=document.querySelectorAll('#log details.tool');if(l.length){var t=l[l.length-1].querySelector('.tres');if(t){t.innerHTML=h;sd();}}}
-function liveAnnounce(t){var l=document.getElementById('live');if(l){l.textContent='';setTimeout(function(){l.textContent=t;},60);}}
+function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.textContent='';setTimeout(function(){l.textContent=t;setTimeout(function(){l.textContent='';},2500);},60);}
 </script></body></html>"#;
 
     // WebView2 is COM and requires the calling (UI) thread to be in a
