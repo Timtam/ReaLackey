@@ -10,14 +10,17 @@ use reaper_medium::ReaperSession;
 use crate::ai::protocol::{MainTask, UiEvent};
 use crate::ai::worker;
 use crate::reaper::action;
+use crate::reaper::api;
 use crate::reaper::control_surface::PumpSurface;
 use crate::reaper::osara::Osara;
+use crate::tools::ReaperOp;
 use crate::ui;
 
 /// Owns the session (whose Drop would unregister everything) + the task sender.
-/// Deliberately leaked so registrations persist for the plug-in's lifetime.
+/// Deliberately leaked so registrations persist for the plug-in's lifetime and
+/// the session sits at a stable address (see `api::set`).
 struct AppState {
-    _session: ReaperSession,
+    session: ReaperSession,
     _task_tx: tokio::sync::mpsc::UnboundedSender<MainTask>,
 }
 
@@ -51,17 +54,20 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     ui::ffi::init(hinst, get_func);
     ui::ffi::install_callbacks();
 
-    // Channels: worker -> main (crossbeam), main/UI -> worker (tokio mpsc).
+    // Channels: worker -> main (crossbeam) for UI events and tool ops;
+    // main/UI -> worker (tokio mpsc) for user intents.
     let (ui_tx, ui_rx) = crossbeam_channel::unbounded::<UiEvent>();
+    let (op_tx, op_rx) = crossbeam_channel::unbounded::<ReaperOp>();
     let (task_tx, task_rx) = tokio::sync::mpsc::unbounded_channel::<MainTask>();
     ui::bridge::set_task_sender(task_tx.clone());
     ui::bridge::set_ui_sender(ui_tx.clone());
 
-    // Worker thread: agent loop + HTTP/SSE.
-    worker::spawn(task_rx, ui_tx);
+    // Worker thread: agent loop + HTTP/SSE + tool orchestration.
+    worker::spawn(task_rx, ui_tx, op_tx);
 
-    // Main-thread pump drains UiEvents ~30x/s and updates the dialog / OSARA.
-    session.plugin_register_add_csurf_inst(Box::new(PumpSurface::new(ui_rx, osara)))?;
+    // Main-thread pump: drains UiEvents (output/status) and ReaperOps (tool
+    // executions) ~30x/s — the only place the dialog / OSARA / REAPER API run.
+    session.plugin_register_add_csurf_inst(Box::new(PumpSurface::new(ui_rx, op_rx, osara)))?;
 
     // "Open Assistant" action.
     action::register(&mut session)?;
@@ -74,10 +80,13 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
         osara.announce("REAPER AI Assistant loaded.");
     }
 
-    // Keep the session (and thus all registrations) alive forever.
-    std::mem::forget(AppState {
-        _session: session,
+    // Leak the app state so the session (and all registrations) live at a stable
+    // address for the process lifetime, then publish the main-thread REAPER
+    // handle for the pump's tool execution.
+    let app: &'static AppState = Box::leak(Box::new(AppState {
+        session,
         _task_tx: task_tx,
-    });
+    }));
+    api::set(app.session.reaper());
     Ok(())
 }

@@ -1,26 +1,33 @@
 //! Main-thread pump. Registered as a `ControlSurface`, whose `run()` REAPER
 //! calls ~30x/second on the main thread — the one place it is safe to touch the
-//! dialog and OSARA. It drains `UiEvent`s produced by the worker thread.
+//! dialog, OSARA, and the REAPER API. It drains two worker->main channels:
+//! `UiEvent`s (streamed output/status) and `ReaperOp`s (tool executions).
 
 use crossbeam_channel::Receiver;
 use reaper_medium::ControlSurface;
 
 use crate::ai::protocol::UiEvent;
-use crate::reaper::osara::Osara;
+use crate::reaper::{api, osara::Osara};
+use crate::tools::{self, ReaperOp, ToolOutcome};
 use crate::ui;
 
 #[derive(Debug)]
 pub struct PumpSurface {
-    rx: Receiver<UiEvent>,
+    ui_rx: Receiver<UiEvent>,
+    op_rx: Receiver<ReaperOp>,
     osara: Osara,
 }
 
 impl PumpSurface {
-    pub fn new(rx: Receiver<UiEvent>, osara: Osara) -> Self {
-        Self { rx, osara }
+    pub fn new(ui_rx: Receiver<UiEvent>, op_rx: Receiver<ReaperOp>, osara: Osara) -> Self {
+        Self {
+            ui_rx,
+            op_rx,
+            osara,
+        }
     }
 
-    fn handle(&self, ev: UiEvent) {
+    fn handle_ui(&self, ev: UiEvent) {
         match ev {
             UiEvent::AssistantDelta(s) => ui::ffi::append_output(&s),
             UiEvent::Status(s) => ui::ffi::set_status(&s),
@@ -33,14 +40,29 @@ impl PumpSurface {
             }
         }
     }
+
+    fn handle_op(&self, op: ReaperOp) {
+        let outcome = api::with(|reaper| tools::execute(reaper, &op.name, &op.input))
+            .unwrap_or_else(|| ToolOutcome {
+                content: "{\"error\":\"REAPER API unavailable\"}".into(),
+                is_error: true,
+            });
+        let _ = op.reply.send(outcome);
+    }
 }
 
 impl ControlSurface for PumpSurface {
     fn run(&mut self) {
-        // Bounded drain so a burst never starves REAPER's main loop.
+        // Bounded drains so a burst never starves REAPER's main loop.
         for _ in 0..512 {
-            match self.rx.try_recv() {
-                Ok(ev) => self.handle(ev),
+            match self.ui_rx.try_recv() {
+                Ok(ev) => self.handle_ui(ev),
+                Err(_) => break,
+            }
+        }
+        for _ in 0..64 {
+            match self.op_rx.try_recv() {
+                Ok(op) => self.handle_op(op),
                 Err(_) => break,
             }
         }

@@ -4,16 +4,19 @@
 mod stream;
 pub mod types;
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 use crate::config;
 use crate::providers::{
-    Capabilities, ChatEvent, ChatRequest, LlmProvider, ProviderError,
+    Capabilities, ChatEvent, ChatRequest, LlmProvider, ProviderError, StopReason,
 };
-use types::{build_request, Delta, StreamEvent};
+use types::{build_request, ContentBlock, Delta, StreamEvent};
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -37,6 +40,13 @@ impl Default for AnthropicProvider {
     }
 }
 
+/// Per-content-block state while streaming.
+enum Block {
+    Text,
+    ToolUse { id: String, name: String, json: String },
+    Ignore,
+}
+
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     fn id(&self) -> &'static str {
@@ -44,7 +54,6 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Claude accepts images (Phase 7 vision) but not audio.
         Capabilities {
             supports_images: true,
             supports_audio: false,
@@ -85,6 +94,8 @@ impl LlmProvider for AnthropicProvider {
 
         let mut byte_stream = resp.bytes_stream();
         let mut parser = stream::SseParser::new();
+        let mut blocks: HashMap<u32, Block> = HashMap::new();
+        let mut stop_reason = StopReason::EndTurn;
         let mut usage: Option<crate::providers::Usage> = None;
 
         loop {
@@ -93,7 +104,7 @@ impl LlmProvider for AnthropicProvider {
                 c = byte_stream.next() => c,
             };
             match chunk {
-                None => break, // stream ended
+                None => break,
                 Some(Err(e)) => {
                     let _ = tx.send(ChatEvent::Error(e.to_string())).await;
                     return Err(ProviderError::Http(e.to_string()));
@@ -101,21 +112,59 @@ impl LlmProvider for AnthropicProvider {
                 Some(Ok(bytes)) => {
                     for ev in parser.feed(&bytes) {
                         match ev {
-                            StreamEvent::ContentBlockDelta {
-                                delta: Delta::TextDelta { text },
-                                ..
+                            StreamEvent::ContentBlockStart {
+                                index,
+                                content_block,
                             } => {
-                                // Receiver gone -> stop quietly.
-                                if tx.send(ChatEvent::TextDelta(text)).await.is_err() {
-                                    return Ok(());
+                                let block = match content_block {
+                                    ContentBlock::ToolUse { id, name } => Block::ToolUse {
+                                        id,
+                                        name,
+                                        json: String::new(),
+                                    },
+                                    ContentBlock::Text { .. } => Block::Text,
+                                    ContentBlock::Other => Block::Ignore,
+                                };
+                                blocks.insert(index, block);
+                            }
+                            StreamEvent::ContentBlockDelta { index, delta } => match delta {
+                                Delta::TextDelta { text } => {
+                                    if tx.send(ChatEvent::TextDelta(text)).await.is_err() {
+                                        return Ok(());
+                                    }
+                                }
+                                Delta::InputJsonDelta { partial_json } => {
+                                    if let Some(Block::ToolUse { json, .. }) =
+                                        blocks.get_mut(&index)
+                                    {
+                                        json.push_str(&partial_json);
+                                    }
+                                }
+                                _ => {}
+                            },
+                            StreamEvent::ContentBlockStop { index } => {
+                                if let Some(Block::ToolUse { id, name, json }) =
+                                    blocks.remove(&index)
+                                {
+                                    let input: Value =
+                                        serde_json::from_str(&json).unwrap_or_else(|_| json!({}));
+                                    if tx
+                                        .send(ChatEvent::ToolCall { id, name, input })
+                                        .await
+                                        .is_err()
+                                    {
+                                        return Ok(());
+                                    }
                                 }
                             }
-                            StreamEvent::MessageDelta {
-                                usage: Some(u), ..
-                            } => {
-                                usage = Some(u.into());
+                            StreamEvent::MessageDelta { delta, usage: u } => {
+                                if let Some(sr) = delta.stop_reason {
+                                    stop_reason = StopReason::from_wire(&sr);
+                                }
+                                if let Some(u) = u {
+                                    usage = Some(u.into());
+                                }
                             }
-                            // Mid-stream error arrives even on HTTP 200.
                             StreamEvent::Error { error } => {
                                 let _ = tx
                                     .send(ChatEvent::Error(format!(
@@ -131,7 +180,9 @@ impl LlmProvider for AnthropicProvider {
             }
         }
 
-        let _ = tx.send(ChatEvent::Done { usage }).await;
+        let _ = tx
+            .send(ChatEvent::Done { stop_reason, usage })
+            .await;
         Ok(())
     }
 }

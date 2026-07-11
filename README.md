@@ -12,22 +12,28 @@ on-demand. Accessibility is designed in from the start via native controls and
 
 ## Status: Phase 0 (skeleton) — complete
 
-The roadmap runs Phase 0 → Phase 8. Phase 0 is implemented and building:
+The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 
 | Piece | State |
 |---|---|
 | Loads as a REAPER extension (`reaper-rs`, `#[reaper_extension_plugin]`) | ✅ compiles/links |
-| "Open Assistant" action registered (Actions list / shortcut) | ✅ |
+| Actions + Extensions submenu ("Open window", "Set Anthropic API key") | ✅ |
 | Modeless native dialog via a thin C++ shim (Win32 now; SWELL for mac/linux) | ✅ Windows |
 | OSARA detected (`GetFunc("osara_outputMessage")`) with graceful degradation | ✅ |
 | tokio worker thread + main-thread pump (channels) | ✅ |
 | Native Anthropic Messages adapter, streaming SSE (`reqwest`+`serde`) | ✅ (parser unit-tested) |
-| Hello-world round-trip with Claude, **no tools yet** | ✅ code complete |
+| API key entry (native input box) + OS credential-store storage | ✅ |
+| **Phase 1:** tool-use agent loop + read-only context tools | ✅ code complete |
 
-Later phases add: reading context tools (P1), plugin advice (P2), safe
-Undo-wrapped mutations (P3), MIDI composition (P4), the shared OpenAI-compatible
-provider adapter (P5), audio analysis via JSFX probe + Rust DSP (P6), screen
-vision (P7), docking + distribution (P8).
+**Phase 1 tools** (read-only, executed on the main thread and fed back to the
+model): `get_project_summary` (tempo, track/selection counts, cursor) and
+`get_tracks` (index, name, selected). Ask e.g. "how many tracks are in this
+project and which are selected?"
+
+Later phases add: plugin advice (P2), safe Undo-wrapped mutations (P3), MIDI
+composition (P4), the shared OpenAI-compatible provider adapter (P5), audio
+analysis via JSFX probe + Rust DSP (P6), screen vision (P7), docking +
+distribution (P8).
 
 ## Architecture
 

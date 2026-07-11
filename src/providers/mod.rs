@@ -1,9 +1,11 @@
-//! LLM provider abstraction. Phase 0 ships one adapter (native Anthropic).
-//! Later phases add a shared OpenAI-compatible adapter (design §kap-llm).
+//! LLM provider abstraction. Phase 0 shipped one adapter (native Anthropic);
+//! Phase 1 adds tool use. Later phases add a shared OpenAI-compatible adapter
+//! (design §kap-llm).
 
 pub mod anthropic;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
@@ -22,10 +24,43 @@ pub enum Role {
     Assistant,
 }
 
+/// A single content block within a message (mirrors the Anthropic content model).
+#[derive(Clone, Debug)]
+pub enum Content {
+    Text(String),
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub role: Role,
-    pub content: String,
+    pub content: Vec<Content>,
+}
+
+impl ChatMessage {
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![Content::Text(text.into())],
+        }
+    }
+}
+
+/// A tool definition sent to the model (JSON-Schema `input_schema`).
+#[derive(Clone, Debug)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -34,22 +69,51 @@ pub struct ChatRequest {
     pub system: Option<String>,
     pub max_tokens: u32,
     pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolDef>,
 }
 
-#[allow(dead_code)] // token accounting: surfaced in a later phase
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // token accounting: surfaced in a later phase
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
 }
 
-/// Provider-neutral streaming event. The worker maps these onto `UiEvent`s.
+/// Why a model turn ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopReason {
+    EndTurn,
+    ToolUse,
+    MaxTokens,
+    Other,
+}
+
+impl StopReason {
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "tool_use" => StopReason::ToolUse,
+            "end_turn" => StopReason::EndTurn,
+            "max_tokens" => StopReason::MaxTokens,
+            _ => StopReason::Other,
+        }
+    }
+}
+
+/// Provider-neutral streaming event. The worker maps these onto `UiEvent`s and
+/// drives the tool loop.
 #[allow(dead_code)] // `Done.usage` consumed once token display lands
 #[derive(Debug)]
 pub enum ChatEvent {
     TextDelta(String),
-    // ToolCall { .. }  // Phase 1+
-    Done { usage: Option<Usage> },
+    ToolCall {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    Done {
+        stop_reason: StopReason,
+        usage: Option<Usage>,
+    },
     Error(String),
 }
 
@@ -68,14 +132,13 @@ pub enum ProviderError {
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    // `id`/`capabilities` are the extensibility surface used from Phase 5
-    // (provider/model switching + capability signalling in the UI).
+    // `id`/`capabilities` are the extensibility surface used from Phase 5.
     #[allow(dead_code)]
     fn id(&self) -> &'static str;
     #[allow(dead_code)]
     fn capabilities(&self) -> Capabilities;
 
-    /// Stream a completion, emitting `ChatEvent`s on `tx` until done. Must
+    /// Stream one model turn, emitting `ChatEvent`s on `tx` until done. Must
     /// observe `cancel` promptly and stop.
     async fn chat(
         &self,

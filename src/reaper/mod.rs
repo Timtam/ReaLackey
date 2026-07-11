@@ -2,6 +2,7 @@
 //! REAPER API / OSARA / the native dialog.
 
 pub mod action;
+pub mod api;
 pub mod control_surface;
 pub mod osara;
 pub mod prompt;
