@@ -55,7 +55,8 @@ pub fn definitions() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "get_project_summary".into(),
-            description: "Lightweight snapshot of the current REAPER project: tempo (BPM), \
+            description: "Lightweight snapshot of the current REAPER project: project name and \
+                          file path (the name often hints at the project's intent), tempo (BPM), \
                           total track count, number of selected tracks and items, and the \
                           edit cursor position in seconds."
                 .into(),
@@ -1382,7 +1383,21 @@ fn get_project_summary(reaper: &Reaper<MainThreadScope>) -> Value {
         .get_cursor_position_ex(project)
         .map(|p| p.get())
         .unwrap_or(0.0);
+    let low = reaper.low();
+    // Project file name (e.g. "song.rpp") and full path; empty when unsaved.
+    let name = read_string(1024, |b, s| {
+        unsafe { low.GetProjectName(CUR_PROJ, b, s) };
+        true
+    })
+    .unwrap_or_default();
+    let path = read_string(4096, |b, s| {
+        unsafe { low.EnumProjects(-1, b, s) };
+        true
+    })
+    .unwrap_or_default();
     json!({
+        "project_name": if name.is_empty() { "(unsaved)".to_string() } else { name },
+        "project_path": path,
         "tempo": reaper.master_get_tempo().get(),
         "track_count": reaper.count_tracks(project),
         "selected_tracks": reaper.count_selected_tracks_2(project, MasterTrackBehavior::ExcludeMasterTrack),

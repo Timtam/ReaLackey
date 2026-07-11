@@ -19,6 +19,7 @@ mod config;
 mod dsp;
 mod providers;
 mod reaper;
+mod text;
 mod tools;
 mod ui;
 

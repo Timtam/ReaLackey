@@ -43,6 +43,8 @@ keyring = { version = "3", features = ["windows-native"] }
 
 # --- Misc --------------------------------------------------------------------
 thiserror = "2"
+# Markdown -> clean prose (OSARA announcements) and, later, -> HTML (output pane).
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
 [build-dependencies]
 cc             = "1"    # compiles the C++/SWELL shim

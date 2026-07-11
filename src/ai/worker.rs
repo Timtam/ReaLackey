@@ -171,8 +171,12 @@ async fn handle_prompt(
 
     if !final_answer.is_empty() {
         let _ = ui_tx.send(UiEvent::AssistantDelta("\r\n".into()));
-        // Announce the final answer as one sense-unit (design §kap-a11y).
-        let _ = ui_tx.send(UiEvent::Announce(final_answer));
+        // Announce the final answer as one sense-unit (design §kap-a11y), with
+        // Markdown stripped so the screen reader speaks prose, not "hash"/"star".
+        let spoken = crate::text::strip_markdown(&final_answer);
+        if !spoken.trim().is_empty() {
+            let _ = ui_tx.send(UiEvent::Announce(spoken));
+        }
     }
     let _ = ui_tx.send(UiEvent::Status("Ready.".into()));
     let _ = ui_tx.send(UiEvent::Done);

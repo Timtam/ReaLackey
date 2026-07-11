@@ -117,14 +117,14 @@ static RAAI_DLGRET DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case ID_CONFIRM_BTN:
           if (g_on_confirm) g_on_confirm(0);
           return TRUE;
-        case IDCANCEL:            // modeless: DestroyWindow, never EndDialog
-          DestroyWindow(hwnd);
-          return TRUE;
+        case IDCANCEL:            // "Close" / Esc: HIDE, don't destroy, so the
+          ShowWindow(hwnd, SW_HIDE);   // conversation history survives and the
+          return TRUE;                 // action can re-show it (side-by-side use).
       }
       return FALSE;
 
-    case WM_CLOSE:
-      DestroyWindow(hwnd);
+    case WM_CLOSE:                 // window [x]: hide, keep the window + history.
+      ShowWindow(hwnd, SW_HIDE);
       return TRUE;
 
     case WM_DESTROY:

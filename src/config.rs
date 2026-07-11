@@ -62,7 +62,9 @@ pub fn confirmation_required() -> bool {
 /// (design §kap-llm). Grows as more capabilities land.
 pub fn system_prompt() -> String {
     "You are an AI assistant embedded in the REAPER digital audio workstation. \
-     You can inspect the project through read tools (project summary, tracks, \
+     You can inspect the project through read tools (project summary — including \
+     the project name and file path, which often hint at the project's intent — \
+     tracks, \
      track/take FX and their parameters, selected items, installed plugins, and \
      the focused FX window, MIDI notes of a take, a track's sends/receives, and \
      its automation envelopes and points, project and per-track notes, project \
