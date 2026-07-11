@@ -975,6 +975,29 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["item_index"]),
             ),
         },
+        ToolDef {
+            name: "set_fx_param_by_steps".into(),
+            description: "Nudge a track-FX parameter UP or DOWN by a relative amount, instead of \
+                          setting an absolute 0..1 value. Use this when you can SEE a knob/slider \
+                          (e.g. via capture_view) and want to move it 'a little' without computing \
+                          the exact normalized value — it reads the current value, steps it, and \
+                          reports the new display value so you can judge the effect and repeat. \
+                          CHANGES the project (confirmed + undo-wrapped). direction is 'up' or \
+                          'down'; step_count is how many steps (default 1); step_size is the \
+                          normalized amount per step in 0..1 (default 0.01)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "fx_index": { "type": "integer", "description": "0-based FX index in the track chain" },
+                    "param_index": { "type": "integer" },
+                    "direction": { "type": "string", "enum": ["up", "down"], "description": "nudge direction" },
+                    "step_count": { "type": "integer", "description": "number of steps to move (default 1)" },
+                    "step_size": { "type": "number", "description": "normalized amount per step, 0..1 (default 0.01)" }
+                }),
+                json!(["track_index", "fx_index", "param_index", "direction"]),
+            ),
+        },
         // --- vision (Phase 7) ---
         ToolDef {
             name: "capture_view".into(),
@@ -1174,6 +1197,15 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "fx_index")?,
             req_u32(input, "param_index")?,
             req_f64(input, "value")?,
+        ),
+        "set_fx_param_by_steps" => set_fx_param_by_steps(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+            req_u32(input, "param_index")?,
+            req_str(input, "direction")?,
+            opt_u32(input, "step_count").unwrap_or(1),
+            input.get("step_size").and_then(|v| v.as_f64()).unwrap_or(0.01),
         ),
         "set_fx_enabled" => set_fx_enabled(
             reaper,
@@ -1468,6 +1500,14 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("fx_index"),
             show("param_index"),
             show("value"),
+        )),
+        "set_fx_param_by_steps" => Some(format!(
+            "Nudge track {} FX {} parameter {} {} by {} step(s)",
+            show("track_index"),
+            show("fx_index"),
+            show("param_index"),
+            input.get("direction").and_then(|v| v.as_str()).unwrap_or("?"),
+            input.get("step_count").map(|v| v.to_string()).unwrap_or_else(|| "1".into()),
         )),
         "set_fx_enabled" => Some(format!(
             "{} track {} FX {}",
@@ -1976,6 +2016,76 @@ fn set_fx_param(
             "set": true, "track_index": track_index, "fx_index": fx_index,
             "param_index": param_index, "normalized": v, "display_value": display
         }))
+        .map_err(|_| "failed to set parameter".to_string())
+}
+
+/// Nudge a track-FX parameter by a relative number of normalized steps (Phase 7:
+/// lets the model act on a knob it can only SEE, without display-value math —
+/// REAPER exposes no display→normalized conversion). Reads the current value,
+/// applies `direction * step_count * step_size`, clamps to 0..1, and reports the
+/// new display value. Undo-wrapped, mirroring `set_fx_param`.
+fn set_fx_param_by_steps(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+    param_index: u32,
+    direction: &str,
+    step_count: u32,
+    step_size: f64,
+) -> Result<Value, String> {
+    let sign = match direction.trim().to_lowercase().as_str() {
+        "up" | "increase" | "+" => 1.0,
+        "down" | "decrease" | "-" => -1.0,
+        other => return Err(format!("direction must be 'up' or 'down' (got '{other}')")),
+    };
+    // Sanitize step size: finite, positive, at most a full sweep.
+    let step = if step_size.is_finite() && step_size > 0.0 {
+        step_size.min(1.0)
+    } else {
+        0.01
+    };
+    let steps = step_count.max(1);
+    let delta = sign * (steps as f64) * step;
+
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let loc = TrackFxLocation::NormalFxChain(fx_index);
+
+    // SAFETY: track valid, main thread.
+    let current = unsafe { reaper.track_fx_get_param_normalized(track, loc, param_index) }.get();
+    let target = (current + delta).clamp(0.0, 1.0);
+
+    reaper.undo_begin_block_2(project);
+    let result = unsafe {
+        reaper.track_fx_set_param_normalized(
+            track,
+            loc,
+            param_index,
+            ReaperNormalizedFxParamValue::new(target),
+        )
+    };
+    let display = unsafe {
+        reaper.track_fx_get_formatted_param_value(track, loc, param_index, NAME_BUF)
+    }
+    .ok()
+    .map(|s| reaper_string(s.as_c_str().to_bytes()))
+    .unwrap_or_default();
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: nudge track {track_index} FX {fx_index} param {param_index} {direction} by {steps}x{step:.4}"),
+        UndoScope::All,
+    );
+    result
+        .map(|_| {
+            json!({
+                "set": true, "track_index": track_index, "fx_index": fx_index,
+                "param_index": param_index, "direction": direction, "steps": steps,
+                "step_size": step, "previous_normalized": current, "normalized": target,
+                "display_value": display
+            })
+        })
         .map_err(|_| "failed to set parameter".to_string())
 }
 
