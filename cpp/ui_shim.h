@@ -17,6 +17,7 @@ typedef void (*on_confirm_cb)(int confirm_id);        // "Confirm" (Phase 3)
 typedef void (*on_cancel_cb)(void);                   // dialog closed / "Stopp"
 typedef void (*on_resize_cb)(void);                   // dialog resized (reflow webview)
 typedef void (*on_destroy_cb)(void);                  // dialog HWND destroyed (drop webview)
+typedef void (*on_webview_focus_cb)(void);            // webview host gained focus (enter content)
 
 // One-time init. On non-Windows, `reaper_get_func` (REAPER's rec->GetFunc) is
 // forwarded to SWELL so it can resolve the host's SWELL API. On Windows,
@@ -47,9 +48,15 @@ void ui_set_resize_cb(on_resize_cb on_resize);
 // Register a callback fired (main thread) when the dialog HWND is destroyed, so
 // Rust can drop the embedded webview before its parent window goes away.
 void ui_set_destroy_cb(on_destroy_cb on_destroy);
-// Give the embedded webview's host window WS_TABSTOP so keyboard focus (Tab)
-// can reach it and the screen reader can enter the conversation content.
+// Give the embedded webview's host window WS_TABSTOP (so Tab reaches it) and
+// subclass it so a WM_SETFOCUS fires `on_webview_focus` — letting Rust move
+// focus into the web content on the first Tab (no silent stop).
 void ui_enable_webview_tabstop(void);
+// Register the "webview host focused" callback.
+void ui_set_webview_focus_cb(on_webview_focus_cb on_focus);
+// Move keyboard focus to the native control after (forward=1) or before
+// (forward=0) the webview — used when the user Tabs out of the web content.
+void ui_focus_after_webview(int forward);
 
 // Append a menu item wired to a REAPER command id. Used to add an entry to
 // REAPER's Extensions menu from a hookcustommenu callback (main thread only).

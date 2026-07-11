@@ -37,6 +37,19 @@ static on_confirm_cb g_on_confirm = NULL;
 static on_cancel_cb  g_on_cancel  = NULL;
 static on_resize_cb  g_on_resize  = NULL;
 static on_destroy_cb g_on_destroy = NULL;
+static on_webview_focus_cb g_on_webview_focus = NULL;
+
+// Classic subclass of the webview host so focus entering it (Tab) is forwarded
+// into the web content via Rust (WebView2 MoveFocus). Windows-only.
+#ifdef _WIN32
+static WNDPROC g_webview_prev_proc = NULL;
+static LRESULT CALLBACK WebviewSubclassProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
+  LRESULT r = g_webview_prev_proc ? CallWindowProc(g_webview_prev_proc, h, msg, w, l)
+                                  : DefWindowProc(h, msg, w, l);
+  if (msg == WM_SETFOCUS && g_on_webview_focus) g_on_webview_focus();
+  return r;
+}
+#endif
 
 // Reflow the dialog's controls to fill the client area, so the window (and the
 // embedded webview, which tracks the output rect) is comfortably resizable.
@@ -251,9 +264,9 @@ extern "C" void ui_set_destroy_cb(on_destroy_cb on_destroy) {
 
 extern "C" void ui_enable_webview_tabstop(void) {
   if (!g_dlg) return;
-  // The webview is hosted as one or more child windows of the dialog that are
-  // NOT our known controls; give them WS_TABSTOP so the dialog's Tab cycle can
-  // land on the webview (which then hands keyboard focus to its web content).
+  // The webview's host window is the first direct child of the dialog that is
+  // NOT one of our known controls. Give it WS_TABSTOP (so the Tab cycle lands on
+  // it) and subclass it so focus is forwarded into the web content.
   for (HWND child = GetWindow(g_dlg, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
     int id = GetDlgCtrlID(child);
     if (id == ID_OUTPUT_EDIT || id == ID_STATUS_TEXT || id == ID_INPUT_EDIT ||
@@ -262,6 +275,27 @@ extern "C" void ui_enable_webview_tabstop(void) {
     }
     LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
     SetWindowLongPtr(child, GWL_STYLE, style | WS_TABSTOP);
+#ifdef _WIN32
+    if (!g_webview_prev_proc) {
+      g_webview_prev_proc =
+          (WNDPROC)SetWindowLongPtr(child, GWLP_WNDPROC, (LONG_PTR)WebviewSubclassProc);
+    }
+#endif
+    break; // one host window is enough
+  }
+}
+
+extern "C" void ui_set_webview_focus_cb(on_webview_focus_cb on_focus) {
+  g_on_webview_focus = on_focus;
+}
+
+extern "C" void ui_focus_after_webview(int forward) {
+  if (!g_dlg) return;
+  // Forward tab-out -> the input box (next control); backward -> the Close
+  // button (the control before the output area in the cycle).
+  HWND target = GetDlgItem(g_dlg, forward ? ID_INPUT_EDIT : IDCANCEL);
+  if (target) {
+    SendMessage(g_dlg, WM_NEXTDLGCTL, (WPARAM)target, TRUE);
   }
 }
 

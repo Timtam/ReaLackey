@@ -1922,6 +1922,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "webview2-com",
+ "windows-core",
  "wry",
 ]
 

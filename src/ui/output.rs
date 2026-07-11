@@ -167,6 +167,9 @@ pub fn ensure_created() {
                 STATE.with(|c| c.borrow_mut().webview = Some(webview));
                 ffi::set_output_edit_visible(false);
                 ffi::enable_webview_tabstop();
+                ffi::install_webview_focus_cb();
+                #[cfg(windows)]
+                webview_impl::install_focus_out_handler();
                 console("REAPER AI Assistant: HTML output pane active.\n");
             }
             Err(e) => {
@@ -237,6 +240,24 @@ pub fn announce(text: &str) {
     STATE.with(|c| c.borrow().announce(text));
 }
 
+/// The webview host window just gained keyboard focus (the user Tabbed onto it).
+/// Push focus straight into the web content so the very first Tab lands there
+/// instead of stopping silently on the empty host window. Fired from the C++
+/// subclass on `WM_SETFOCUS`.
+pub fn on_webview_focus() {
+    #[cfg(windows)]
+    {
+        // Clone the controller out from under the borrow before touching COM.
+        let controller = STATE.with(|c| {
+            use wry::WebViewExtWindows;
+            c.borrow().webview.as_ref().map(|wv| wv.controller())
+        });
+        if let Some(controller) = controller {
+            webview_impl::move_focus_into_content(&controller);
+        }
+    }
+}
+
 // ---- Windows: the wry hosting ----------------------------------------------
 
 #[cfg(windows)]
@@ -247,6 +268,12 @@ mod webview_impl {
     use raw_window_handle::{
         HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
     };
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Controller, ICoreWebView2MoveFocusRequestedEventArgs,
+        COREWEBVIEW2_MOVE_FOCUS_REASON, COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT,
+        COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+    };
+    use webview2_com::MoveFocusRequestedEventHandler;
     use wry::dpi::{PhysicalPosition, PhysicalSize};
     use wry::{Rect, WebContext, WebView, WebViewBuilder};
 
@@ -349,6 +376,57 @@ function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.te
         Rect {
             position: PhysicalPosition::new(x, y).into(),
             size: PhysicalSize::new(w.max(1) as u32, h.max(1) as u32).into(),
+        }
+    }
+
+    /// Move keyboard focus from the (empty) host window into the web content.
+    /// Called when the host gains focus via Tab.
+    ///
+    /// We use PROGRAMMATIC, not NEXT: the pane is a read-only log with no
+    /// tab-stops, so NEXT would find nothing to land on and immediately fire
+    /// MoveFocusRequested, bouncing focus straight back out. PROGRAMMATIC gives
+    /// the document itself focus so the user can actually read/scroll it; a
+    /// subsequent Tab then exits cleanly via the MoveFocusRequested handler.
+    pub fn move_focus_into_content(controller: &ICoreWebView2Controller) {
+        // SAFETY: called on the main (UI) thread that owns the controller.
+        unsafe {
+            let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+    }
+
+    /// Register a MoveFocusRequested handler so that when Tab walks off the last
+    /// (or first) element of the web content, we hand focus to the native control
+    /// after/before the webview instead of letting WebView2 trap it inside.
+    pub fn install_focus_out_handler() {
+        use wry::WebViewExtWindows;
+        let controller = super::STATE.with(|c| c.borrow().webview.as_ref().map(|wv| wv.controller()));
+        let Some(controller) = controller else {
+            return;
+        };
+
+        let handler = MoveFocusRequestedEventHandler::create(Box::new(
+            move |_ctrl: Option<ICoreWebView2Controller>,
+                  args: Option<ICoreWebView2MoveFocusRequestedEventArgs>|
+                  -> windows_core::Result<()> {
+                if let Some(args) = args {
+                    // SAFETY: fires on the UI thread; `args` is a live COM pointer.
+                    let mut reason = COREWEBVIEW2_MOVE_FOCUS_REASON(0);
+                    unsafe { args.Reason(&mut reason)? };
+                    let forward = reason == COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT;
+                    ffi::focus_after_webview(forward);
+                    // We took focus over; stop WebView2 from cycling back inside.
+                    unsafe { args.SetHandled(true)? };
+                }
+                Ok(())
+            },
+        ));
+
+        // WebView2 AddRefs the handler and keeps it alive; the registration lives
+        // as long as the controller (i.e. the webview) does, so we drop `token`.
+        let mut token: i64 = 0;
+        // SAFETY: main-thread COM call on a live controller.
+        unsafe {
+            let _ = controller.add_MoveFocusRequested(&handler, &mut token);
         }
     }
 }

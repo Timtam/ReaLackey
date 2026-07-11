@@ -28,6 +28,8 @@ extern "C" {
     fn ui_set_resize_cb(on_resize: extern "C" fn());
     fn ui_set_destroy_cb(on_destroy: extern "C" fn());
     fn ui_enable_webview_tabstop();
+    fn ui_set_webview_focus_cb(on_focus: extern "C" fn());
+    fn ui_focus_after_webview(forward: c_int);
 }
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
@@ -91,6 +93,20 @@ pub fn install_destroy_cb() {
 /// Make the webview host window a keyboard tab-stop (call after creation).
 pub fn enable_webview_tabstop() {
     unsafe { ui_enable_webview_tabstop() }
+}
+
+/// Register the "webview host focused" thunk (forwards focus into the content).
+pub fn install_webview_focus_cb() {
+    unsafe { ui_set_webview_focus_cb(on_webview_focus) }
+}
+
+/// Move focus to the native control after (forward) / before the webview.
+pub fn focus_after_webview(forward: bool) {
+    unsafe { ui_focus_after_webview(forward as c_int) }
+}
+
+extern "C" fn on_webview_focus() {
+    let _ = std::panic::catch_unwind(crate::ui::output::on_webview_focus);
 }
 
 extern "C" fn on_resize() {
