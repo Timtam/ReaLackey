@@ -28,6 +28,9 @@ impl HookCommand for Commands {
         if Some(id) == CMD_OPEN.get().copied() {
             if let Some(h) = MAIN_HWND.get().copied() {
                 ui::ffi::show(h as *mut c_void);
+                // Create the embedded webview now that the dialog HWND exists
+                // (idempotent; no-op if already created or unavailable).
+                ui::output::ensure_created();
             }
             true
         } else if Some(id) == CMD_SETKEY.get().copied() {

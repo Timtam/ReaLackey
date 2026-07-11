@@ -112,6 +112,10 @@ src/
   ui/               Rust side of the C++ shim
     ffi.rs            extern "C" decls + panic-guarded callback thunks
     bridge.rs         routes dialog callbacks -> worker
+    output.rs         HTML conversation pane: embeds a WebView2 (wry) as a child
+                      of the dialog and renders markdown->HTML + collapsible tool
+                      cards; falls back to the plain edit control if unavailable
+  text.rs           markdown -> clean prose (OSARA) and markdown -> HTML (pane)
   tools/            tool/function catalog the model drives (read + mutating)
   dsp/              pure-Rust audio feature extraction (loudness, spectral)
 cpp/
@@ -122,8 +126,14 @@ build.rs            compiles the C++ shim (cc) + the .rc (embed-resource)
 ```
 
 **Threading rule:** the REAPER API and the dialog are main-thread-only. The
-worker never touches them directly — it sends `UiEvent`s over a channel drained
-by `ControlSurface::run()` on the main thread.
+worker never touches them directly — it sends structured `UiEvent`s (user
+message, assistant delta, tool started/finished, notice, status, …) over a
+channel drained by `ControlSurface::run()` on the main thread, which renders
+them into the HTML pane (or the edit-control fallback). The embedded WebView2 is
+`!Send` and lives in a main-thread `thread_local`; it needs the Edge **WebView2
+runtime** (present on current Windows), and gracefully falls back to the plain
+edit control if that runtime or hosting is unavailable. The final answer is also
+spoken via OSARA with markdown stripped to plain prose.
 
 ## Build
 

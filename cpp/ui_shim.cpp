@@ -35,6 +35,32 @@ static HWND          g_dlg   = NULL;
 static on_submit_cb  g_on_submit  = NULL;
 static on_confirm_cb g_on_confirm = NULL;
 static on_cancel_cb  g_on_cancel  = NULL;
+static on_resize_cb  g_on_resize  = NULL;
+static on_destroy_cb g_on_destroy = NULL;
+
+// Reflow the dialog's controls to fill the client area, so the window (and the
+// embedded webview, which tracks the output rect) is comfortably resizable.
+static void layout_controls(HWND hwnd) {
+  RECT rc;
+  GetClientRect(hwnd, &rc);
+  const int cw = rc.right, ch = rc.bottom;
+  const int m = 6, bw = 60, bh = 22, ih = 22, sh = 16;
+  int closeY = ch - m - bh;
+  int inputY = closeY - m - ih;
+  int statusY = inputY - m - sh;
+  int outH = statusY - 2 * m;
+  if (outH < 20) outH = 20;
+  HWND out = GetDlgItem(hwnd, ID_OUTPUT_EDIT);
+  HWND st  = GetDlgItem(hwnd, ID_STATUS_TEXT);
+  HWND in  = GetDlgItem(hwnd, ID_INPUT_EDIT);
+  HWND sb  = GetDlgItem(hwnd, ID_SUBMIT_BTN);
+  HWND cb  = GetDlgItem(hwnd, IDCANCEL);
+  if (out) MoveWindow(out, m, m, cw - 2 * m, outH, TRUE);
+  if (st)  MoveWindow(st, m, statusY, cw - 2 * m, sh, TRUE);
+  if (in)  MoveWindow(in, m, inputY, cw - 3 * m - bw, ih, TRUE);
+  if (sb)  MoveWindow(sb, cw - m - bw, inputY, bw, bh, TRUE);
+  if (cb)  MoveWindow(cb, cw - m - bw, closeY, bw, bh, TRUE);
+}
 
 // ---- text helpers (UTF-8 <-> platform) --------------------------------------
 #ifdef _WIN32
@@ -123,11 +149,17 @@ static RAAI_DLGRET DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
       }
       return FALSE;
 
+    case WM_SIZE:
+      layout_controls(hwnd);
+      if (g_on_resize) g_on_resize();   // let Rust re-bound the webview
+      return TRUE;
+
     case WM_CLOSE:                 // window [x]: hide, keep the window + history.
       ShowWindow(hwnd, SW_HIDE);
       return TRUE;
 
     case WM_DESTROY:
+      if (g_on_destroy) g_on_destroy();  // drop the webview while its parent lives
       if (g_on_cancel) g_on_cancel();
       g_dlg = NULL;
       return TRUE;
@@ -179,6 +211,42 @@ extern "C" void ui_set_status(const char* utf8) {  // MAIN THREAD ONLY
 
 extern "C" void ui_close(void) {
   if (g_dlg) DestroyWindow(g_dlg);
+}
+
+// ---- webview hosting --------------------------------------------------------
+extern "C" void* ui_get_hwnd(void) {
+  return (void*)g_dlg;
+}
+
+extern "C" int ui_output_bounds(int* x, int* y, int* w, int* h) {
+  if (!g_dlg || !x || !y || !w || !h) return 0;
+  HWND edit = GetDlgItem(g_dlg, ID_OUTPUT_EDIT);
+  if (!edit) return 0;
+  RECT r;
+  if (!GetWindowRect(edit, &r)) return 0;
+  POINT tl = { r.left, r.top };
+  POINT br = { r.right, r.bottom };
+  ScreenToClient(g_dlg, &tl);
+  ScreenToClient(g_dlg, &br);
+  *x = tl.x;
+  *y = tl.y;
+  *w = br.x - tl.x;
+  *h = br.y - tl.y;
+  return 1;
+}
+
+extern "C" void ui_set_output_edit_visible(int visible) {
+  if (!g_dlg) return;
+  HWND edit = GetDlgItem(g_dlg, ID_OUTPUT_EDIT);
+  if (edit) ShowWindow(edit, visible ? SW_SHOW : SW_HIDE);
+}
+
+extern "C" void ui_set_resize_cb(on_resize_cb on_resize) {
+  g_on_resize = on_resize;
+}
+
+extern "C" void ui_set_destroy_cb(on_destroy_cb on_destroy) {
+  g_on_destroy = on_destroy;
 }
 
 extern "C" void ui_add_menu_item(void* hmenu, const char* label, int command_id) {

@@ -22,6 +22,11 @@ extern "C" {
     fn ui_add_menu_item(hmenu: *mut c_void, label: *const c_char, command_id: c_int);
     fn ui_create_submenu() -> *mut c_void;
     fn ui_attach_submenu(parent_hmenu: *mut c_void, submenu: *mut c_void, title: *const c_char);
+    fn ui_get_hwnd() -> *mut c_void;
+    fn ui_output_bounds(x: *mut c_int, y: *mut c_int, w: *mut c_int, h: *mut c_int) -> c_int;
+    fn ui_set_output_edit_visible(visible: c_int);
+    fn ui_set_resize_cb(on_resize: extern "C" fn());
+    fn ui_set_destroy_cb(on_destroy: extern "C" fn());
 }
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
@@ -53,6 +58,41 @@ pub fn set_status(text: &str) {
 #[allow(dead_code)]
 pub fn close() {
     unsafe { ui_close() }
+}
+
+/// The dialog's native window handle (null if the dialog isn't created yet).
+pub fn get_hwnd() -> *mut c_void {
+    unsafe { ui_get_hwnd() }
+}
+
+/// The output area's rect in dialog client pixels, if the dialog exists.
+pub fn output_bounds() -> Option<(i32, i32, i32, i32)> {
+    let (mut x, mut y, mut w, mut h) = (0, 0, 0, 0);
+    let ok = unsafe { ui_output_bounds(&mut x, &mut y, &mut w, &mut h) };
+    (ok != 0).then_some((x, y, w, h))
+}
+
+/// Show/hide the plain output edit (hidden once the webview takes over).
+pub fn set_output_edit_visible(visible: bool) {
+    unsafe { ui_set_output_edit_visible(visible as c_int) }
+}
+
+/// Register the resize thunk so the webview re-bounds with the dialog.
+pub fn install_resize_cb() {
+    unsafe { ui_set_resize_cb(on_resize) }
+}
+
+/// Register the destroy thunk so the webview is dropped when the dialog is.
+pub fn install_destroy_cb() {
+    unsafe { ui_set_destroy_cb(on_destroy) }
+}
+
+extern "C" fn on_resize() {
+    let _ = std::panic::catch_unwind(crate::ui::output::on_resize);
+}
+
+extern "C" fn on_destroy() {
+    let _ = std::panic::catch_unwind(crate::ui::output::on_destroy);
 }
 
 /// Append a menu item (bound to `command_id`) to a native `HMENU`.

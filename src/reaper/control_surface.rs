@@ -35,13 +35,19 @@ impl PumpSurface {
     }
 
     fn handle_ui(&self, ev: UiEvent) {
+        use crate::ui::output;
         match ev {
-            UiEvent::AssistantDelta(s) => ui::ffi::append_output(&s),
+            UiEvent::UserMessage(s) => output::user_message(&s),
+            UiEvent::AssistantStart => output::assistant_start(),
+            UiEvent::AssistantDelta(s) => output::assistant_delta(&s),
+            UiEvent::ToolStarted { name, input } => output::tool_started(&name, &input),
+            UiEvent::ToolFinished { is_error, summary } => output::tool_finished(is_error, &summary),
+            UiEvent::Notice(s) => output::notice(&s),
             UiEvent::Status(s) => ui::ffi::set_status(&s),
             UiEvent::Announce(s) => self.osara.announce(&s),
             UiEvent::Done => {}
             UiEvent::Error(e) => {
-                ui::ffi::append_output(&format!("\r\n[Error] {e}\r\n"));
+                output::error(&e);
                 ui::ffi::set_status("Error.");
                 self.osara.announce(&format!("Error: {e}"));
             }

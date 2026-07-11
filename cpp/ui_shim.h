@@ -15,6 +15,8 @@ extern "C" {
 typedef void (*on_submit_cb)(const char* utf8_text);  // "Send" pressed
 typedef void (*on_confirm_cb)(int confirm_id);        // "Confirm" (Phase 3)
 typedef void (*on_cancel_cb)(void);                   // dialog closed / "Stopp"
+typedef void (*on_resize_cb)(void);                   // dialog resized (reflow webview)
+typedef void (*on_destroy_cb)(void);                  // dialog HWND destroyed (drop webview)
 
 // One-time init. On non-Windows, `reaper_get_func` (REAPER's rec->GetFunc) is
 // forwarded to SWELL so it can resolve the host's SWELL API. On Windows,
@@ -32,6 +34,19 @@ void ui_show(void* parent_hwnd);
 void ui_append_output(const char* utf8);  // append to the read-only log
 void ui_set_status(const char* utf8);      // set the status field
 void ui_close(void);                       // destroy the dialog
+
+// --- webview hosting (Rust hosts an embedded WebView2 in the output area) -----
+// The dialog's native HWND (as a void*), or NULL if not created yet.
+void* ui_get_hwnd(void);
+// The output area's rect in dialog client pixels. Returns 1 on success.
+int ui_output_bounds(int* x, int* y, int* w, int* h);
+// Show/hide the plain output edit (hidden when the webview takes over).
+void ui_set_output_edit_visible(int visible);
+// Register a callback fired (main thread) whenever the dialog is resized.
+void ui_set_resize_cb(on_resize_cb on_resize);
+// Register a callback fired (main thread) when the dialog HWND is destroyed, so
+// Rust can drop the embedded webview before its parent window goes away.
+void ui_set_destroy_cb(on_destroy_cb on_destroy);
 
 // Append a menu item wired to a REAPER command id. Used to add an entry to
 // REAPER's Extensions menu from a hookcustommenu callback (main thread only).

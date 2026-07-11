@@ -83,7 +83,7 @@ async fn handle_prompt(
     prompt: String,
 ) {
     if !config::has_api_key() {
-        let _ = ui_tx.send(UiEvent::AssistantDelta(format!("\r\nYou: {prompt}\r\n")));
+        let _ = ui_tx.send(UiEvent::UserMessage(prompt));
         let _ = ui_tx.send(UiEvent::Error(
             "No Anthropic API key set. Use Extensions -> REAPER AI Assistant -> \
              Set Anthropic API key (or set the ANTHROPIC_API_KEY environment variable)."
@@ -94,9 +94,7 @@ async fn handle_prompt(
         return;
     }
 
-    let _ = ui_tx.send(UiEvent::AssistantDelta(format!(
-        "\r\nYou: {prompt}\r\nAssistant: "
-    )));
+    let _ = ui_tx.send(UiEvent::UserMessage(prompt.clone()));
     let _ = ui_tx.send(UiEvent::Status("Thinking…".into()));
 
     history.push(ChatMessage::user_text(prompt));
@@ -148,8 +146,16 @@ async fn handle_prompt(
         if result.stop_reason == StopReason::ToolUse && !result.tool_calls.is_empty() {
             let mut results = Vec::new();
             for (id, name, input) in result.tool_calls {
-                let _ = ui_tx.send(UiEvent::AssistantDelta(format!("\r\n[tool: {name}]\r\n")));
+                let input_pretty = serde_json::to_string_pretty(&input).unwrap_or_default();
+                let _ = ui_tx.send(UiEvent::ToolStarted {
+                    name: name.clone(),
+                    input: input_pretty,
+                });
                 let outcome = run_tool(ui_tx, op_tx, &name, input).await;
+                let _ = ui_tx.send(UiEvent::ToolFinished {
+                    is_error: outcome.is_error,
+                    summary: truncate_summary(&outcome.content),
+                });
                 results.push(Content::ToolResult {
                     tool_use_id: id,
                     content: outcome.content,
@@ -170,7 +176,6 @@ async fn handle_prompt(
     }
 
     if !final_answer.is_empty() {
-        let _ = ui_tx.send(UiEvent::AssistantDelta("\r\n".into()));
         // Announce the final answer as one sense-unit (design §kap-a11y), with
         // Markdown stripped so the screen reader speaks prose, not "hash"/"star".
         let spoken = crate::text::strip_markdown(&final_answer);
@@ -202,11 +207,16 @@ async fn run_turn(
         stop_reason: StopReason::EndTurn,
         aborted: false,
     };
+    let mut assistant_started = false;
 
     loop {
         tokio::select! {
             ev = ev_rx.recv() => match ev {
                 Some(ChatEvent::TextDelta(d)) => {
+                    if !assistant_started {
+                        assistant_started = true;
+                        let _ = ui_tx.send(UiEvent::AssistantStart);
+                    }
                     out.text.push_str(&d);
                     let _ = ui_tx.send(UiEvent::AssistantDelta(d));
                 }
@@ -252,7 +262,7 @@ async fn run_tool(
     // `preview` returns Some only for mutating tools; those require confirmation.
     if let Some(preview) = tools::preview(name, &input) {
         if config::confirmation_required() {
-            let _ = ui_tx.send(UiEvent::AssistantDelta(format!("Proposed change: {preview}\r\n")));
+            let _ = ui_tx.send(UiEvent::Notice(format!("Proposed change: {preview}")));
             let _ = ui_tx.send(UiEvent::Announce(format!("Proposed change: {preview}. Confirm?")));
             let confirmed = confirm(
                 op_tx,
@@ -260,7 +270,7 @@ async fn run_tool(
             )
             .await;
             if !confirmed {
-                let _ = ui_tx.send(UiEvent::AssistantDelta("Declined.\r\n".into()));
+                let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
                 return ToolOutcome {
                     content: json!({ "applied": false, "reason": "user declined the change" })
                         .to_string(),
@@ -268,11 +278,22 @@ async fn run_tool(
                 };
             }
             let outcome = exec_tool(op_tx, name.to_string(), input).await;
-            let _ = ui_tx.send(UiEvent::AssistantDelta("Applied.\r\n".into()));
+            let _ = ui_tx.send(UiEvent::Notice("Applied.".into()));
             return outcome;
         }
     }
     exec_tool(op_tx, name.to_string(), input).await
+}
+
+/// Cap a tool result shown in the UI card (the full result still goes to the model).
+fn truncate_summary(s: &str) -> String {
+    const MAX: usize = 4000;
+    if s.chars().count() <= MAX {
+        return s.to_string();
+    }
+    let mut t: String = s.chars().take(MAX).collect();
+    t.push_str("\n… (truncated)");
+    t
 }
 
 /// Ask the user to confirm a change via a native message box (main thread).

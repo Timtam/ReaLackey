@@ -14,11 +14,22 @@ pub enum MainTask {
 }
 
 /// Something to reflect in the UI / screen reader. Handled ONLY on the main
-/// thread (see `reaper::control_surface::PumpSurface`).
+/// thread (see `reaper::control_surface::PumpSurface`), which renders it into the
+/// HTML output pane (or the plain edit-control fallback).
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    /// Append a chunk to the read-only conversation log.
+    /// The user's prompt (starts a new exchange).
+    UserMessage(String),
+    /// Begin a fresh assistant message block (before its first delta).
+    AssistantStart,
+    /// Append a streamed token to the current assistant message.
     AssistantDelta(String),
+    /// A tool call was started (name + pretty-printed input).
+    ToolStarted { name: String, input: String },
+    /// A tool call finished (its result/outcome summary).
+    ToolFinished { is_error: bool, summary: String },
+    /// A neutral inline note (proposed change, applied, declined, …).
+    Notice(String),
     /// Replace the status line.
     Status(String),
     /// Speak a full sense-unit via OSARA (screen reader).

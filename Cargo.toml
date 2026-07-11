@@ -43,8 +43,14 @@ keyring = { version = "3", features = ["windows-native"] }
 
 # --- Misc --------------------------------------------------------------------
 thiserror = "2"
-# Markdown -> clean prose (OSARA announcements) and, later, -> HTML (output pane).
+# Markdown -> clean prose (OSARA announcements) and -> HTML (output pane).
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+
+# Embedded WebView2 output pane (rendered markdown + collapsible tool cards).
+# Windows-only for now; the mac/linux build keeps the plain edit-control fallback.
+[target.'cfg(windows)'.dependencies]
+wry = "0.55"
+raw-window-handle = "0.6"
 
 [build-dependencies]
 cc             = "1"    # compiles the C++/SWELL shim
