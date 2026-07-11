@@ -139,6 +139,14 @@ impl Output {
             ffi::append_output(&format!("\r\n[Error] {text}\r\n"));
         }
     }
+
+    /// Put text in the webview's aria-live region so a screen reader observing
+    /// the pane announces it. Plain text (set via textContent), not HTML.
+    fn announce(&self, text: &str) {
+        if self.active() {
+            self.call_js("liveAnnounce", text);
+        }
+    }
 }
 
 // ---- public API (all main-thread) -------------------------------------------
@@ -160,6 +168,7 @@ pub fn ensure_created() {
             Ok(webview) => {
                 STATE.with(|c| c.borrow_mut().webview = Some(webview));
                 ffi::set_output_edit_visible(false);
+                ffi::enable_webview_tabstop();
                 console("REAPER AI Assistant: HTML output pane active.\n");
             }
             Err(e) => {
@@ -226,6 +235,9 @@ pub fn notice(text: &str) {
 pub fn error(text: &str) {
     STATE.with(|c| c.borrow_mut().error(text));
 }
+pub fn announce(text: &str) {
+    STATE.with(|c| c.borrow().announce(text));
+}
 
 // ---- Windows: the wry hosting ----------------------------------------------
 
@@ -277,12 +289,16 @@ details.tool>summary::before{content:"\25b8  ";}
 details.tool[open]>summary::before{content:"\25be  ";}
 details.tool pre{margin:0;padding:8px;background:#151515;overflow:auto;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;}
 .tres.err{color:#f48771;}
-</style></head><body><div id="log"></div><script>
+.sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;}
+</style></head><body>
+<div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
+<div id="log" role="log"></div><script>
 function sd(){window.scrollTo(0,document.body.scrollHeight);}
 function addBlock(h){var l=document.getElementById('log');if(l){l.insertAdjacentHTML('beforeend',h);sd();}}
 function startAssistant(){var o=document.getElementById('cur');if(o)o.removeAttribute('id');addBlock('<div class="msg assistant" id="cur"></div>');}
 function updateAssistant(h){var c=document.getElementById('cur');if(c){c.innerHTML=h;sd();}}
 function setToolResult(h){var l=document.querySelectorAll('#log details.tool');if(l.length){var t=l[l.length-1].querySelector('.tres');if(t){t.innerHTML=h;sd();}}}
+function liveAnnounce(t){var l=document.getElementById('live');if(l){l.textContent='';setTimeout(function(){l.textContent=t;},60);}}
 </script></body></html>"#;
 
     // WebView2 is COM and requires the calling (UI) thread to be in a

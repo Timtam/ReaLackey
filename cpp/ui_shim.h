@@ -47,6 +47,9 @@ void ui_set_resize_cb(on_resize_cb on_resize);
 // Register a callback fired (main thread) when the dialog HWND is destroyed, so
 // Rust can drop the embedded webview before its parent window goes away.
 void ui_set_destroy_cb(on_destroy_cb on_destroy);
+// Give the embedded webview's host window WS_TABSTOP so keyboard focus (Tab)
+// can reach it and the screen reader can enter the conversation content.
+void ui_enable_webview_tabstop(void);
 
 // Append a menu item wired to a REAPER command id. Used to add an entry to
 // REAPER's Extensions menu from a hookcustommenu callback (main thread only).

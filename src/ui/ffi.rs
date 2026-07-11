@@ -27,6 +27,7 @@ extern "C" {
     fn ui_set_output_edit_visible(visible: c_int);
     fn ui_set_resize_cb(on_resize: extern "C" fn());
     fn ui_set_destroy_cb(on_destroy: extern "C" fn());
+    fn ui_enable_webview_tabstop();
 }
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
@@ -85,6 +86,11 @@ pub fn install_resize_cb() {
 /// Register the destroy thunk so the webview is dropped when the dialog is.
 pub fn install_destroy_cb() {
     unsafe { ui_set_destroy_cb(on_destroy) }
+}
+
+/// Make the webview host window a keyboard tab-stop (call after creation).
+pub fn enable_webview_tabstop() {
+    unsafe { ui_enable_webview_tabstop() }
 }
 
 extern "C" fn on_resize() {

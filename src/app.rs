@@ -12,7 +12,7 @@ use crate::ai::worker;
 use crate::reaper::action;
 use crate::reaper::api;
 use crate::reaper::control_surface::PumpSurface;
-use crate::reaper::osara::Osara;
+use crate::reaper::osara;
 use crate::tools::ReaperOp;
 use crate::ui;
 
@@ -26,8 +26,8 @@ struct AppState {
 
 pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // Extract what we need from the low-level context BEFORE it's moved into
-    // the medium session.
-    let osara_ptr = unsafe { context.GetFunc(c"osara_outputMessage".as_ptr()) };
+    // the medium session. (OSARA is resolved lazily at announce time, since it
+    // may load after us — see reaper::osara.)
     let hinst = context.h_instance().cast::<c_void>();
 
     // REAPER's GetFunc, passed to SWELL on non-Windows (ignored on Windows).
@@ -39,8 +39,6 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
         .GetFunc
         .map(|f| f as *mut c_void)
         .unwrap_or(std::ptr::null_mut());
-
-    let osara = Osara::from_ptr(osara_ptr);
 
     // Resolve REAPER's native input box (for the "set API key" action) and load
     // any persisted/env API key into the cache — both before `context` moves.
@@ -67,7 +65,7 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
 
     // Main-thread pump: drains UiEvents (output/status) and ReaperOps (tool
     // executions) ~30x/s — the only place the dialog / OSARA / REAPER API run.
-    session.plugin_register_add_csurf_inst(Box::new(PumpSurface::new(ui_rx, op_rx, osara)))?;
+    session.plugin_register_add_csurf_inst(Box::new(PumpSurface::new(ui_rx, op_rx)))?;
 
     // "Open Assistant" action.
     action::register(&mut session)?;
@@ -76,9 +74,8 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     session
         .reaper()
         .show_console_msg("REAPER AI Assistant loaded.\n");
-    if osara.is_available() {
-        osara.announce("REAPER AI Assistant loaded.");
-    }
+    // Lazy: a no-op if OSARA hasn't loaded yet (it usually loads after us).
+    osara::announce("REAPER AI Assistant loaded.");
 
     // Leak the app state so the session (and all registrations) live at a stable
     // address for the process lifetime, then publish the main-thread REAPER

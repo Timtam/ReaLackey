@@ -249,6 +249,22 @@ extern "C" void ui_set_destroy_cb(on_destroy_cb on_destroy) {
   g_on_destroy = on_destroy;
 }
 
+extern "C" void ui_enable_webview_tabstop(void) {
+  if (!g_dlg) return;
+  // The webview is hosted as one or more child windows of the dialog that are
+  // NOT our known controls; give them WS_TABSTOP so the dialog's Tab cycle can
+  // land on the webview (which then hands keyboard focus to its web content).
+  for (HWND child = GetWindow(g_dlg, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+    int id = GetDlgCtrlID(child);
+    if (id == ID_OUTPUT_EDIT || id == ID_STATUS_TEXT || id == ID_INPUT_EDIT ||
+        id == ID_SUBMIT_BTN || id == IDCANCEL) {
+      continue;
+    }
+    LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
+    SetWindowLongPtr(child, GWL_STYLE, style | WS_TABSTOP);
+  }
+}
+
 extern "C" void ui_add_menu_item(void* hmenu, const char* label, int command_id) {
   if (!hmenu || !label) return;
   HMENU m = (HMENU)hmenu;

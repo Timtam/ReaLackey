@@ -9,7 +9,7 @@ use crossbeam_channel::Receiver;
 use reaper_medium::{ControlSurface, MessageBoxResult, MessageBoxType};
 
 use crate::ai::protocol::UiEvent;
-use crate::reaper::{api, history, osara::Osara};
+use crate::reaper::{api, history, osara};
 use crate::tools::{self, ReaperOp, ToolOutcome};
 use crate::ui;
 
@@ -20,16 +20,14 @@ const UNDO_POLL_TICKS: u32 = 15;
 pub struct PumpSurface {
     ui_rx: Receiver<UiEvent>,
     op_rx: Receiver<ReaperOp>,
-    osara: Osara,
     tick: u32,
 }
 
 impl PumpSurface {
-    pub fn new(ui_rx: Receiver<UiEvent>, op_rx: Receiver<ReaperOp>, osara: Osara) -> Self {
+    pub fn new(ui_rx: Receiver<UiEvent>, op_rx: Receiver<ReaperOp>) -> Self {
         Self {
             ui_rx,
             op_rx,
-            osara,
             tick: 0,
         }
     }
@@ -44,12 +42,20 @@ impl PumpSurface {
             UiEvent::ToolFinished { is_error, summary } => output::tool_finished(is_error, &summary),
             UiEvent::Notice(s) => output::notice(&s),
             UiEvent::Status(s) => ui::ffi::set_status(&s),
-            UiEvent::Announce(s) => self.osara.announce(&s),
+            UiEvent::Announce(s) => {
+                // Two accessible channels: OSARA (speaks directly, focus-
+                // independent) and the webview's aria-live region (read by the
+                // screen reader when the pane is observed).
+                osara::announce(&s);
+                output::announce(&s);
+            }
             UiEvent::Done => {}
             UiEvent::Error(e) => {
                 output::error(&e);
                 ui::ffi::set_status("Error.");
-                self.osara.announce(&format!("Error: {e}"));
+                let msg = format!("Error: {e}");
+                osara::announce(&msg);
+                output::announce(&msg);
             }
         }
     }
