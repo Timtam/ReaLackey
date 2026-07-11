@@ -1,0 +1,41 @@
+# --- Design document: intentionally NEVER committed (internal planning only) ---
+DESIGN.typ
+design.typ
+*.typ
+*.pdf
+
+# --- Rust / Cargo ---
+/target/
+**/target/
+Cargo.lock.orig
+*.rs.bk
+
+# --- Secrets / API keys (never commit) ---
+.env
+.env.*
+*.key
+secrets.toml
+config.local.toml
+
+# --- Native build intermediates (C++/SWELL shim) ---
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.dll
+*.dylib
+*.so
+
+# --- Build logs ---
+*.log
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
+.idea/
+*.swp
+*~

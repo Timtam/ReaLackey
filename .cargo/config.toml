@@ -1,0 +1,6 @@
+# Point bindgen (used transitively by reaper-low) at the libclang bundled with
+# Visual Studio, so `cargo build` works without a separate LLVM install.
+# Adjust the path if your VS install lives elsewhere; unset it if you have LLVM
+# on PATH. Only consumed by build scripts.
+[env]
+LIBCLANG_PATH = 'C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\Llvm\x64\bin'

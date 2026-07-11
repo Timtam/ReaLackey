@@ -1,0 +1,26 @@
+// ONE Win32 DIALOGEX resource used on all three platforms.
+//   Windows : compiled directly by rc.exe (embed-resource, from build.rs).
+//   mac/linux: `php WDL/swell/swell_resgen.php assistant.rc` -> assistant.rc_mac_dlg,
+//              which is #included from a .cpp that first #includes swell-dlggen.h.
+//
+// Keep this file ASCII-only: rc.exe interprets non-ASCII per the build codepage,
+// which mangles umlauts/ss. Dynamic (Rust-supplied) strings carry the real
+// German text at runtime.
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#include "resource.h"
+
+ID_ASSISTANT_DLG DIALOGEX 0, 0, 400, 300
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX
+CAPTION "REAPER AI Assistant"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    EDITTEXT        ID_OUTPUT_EDIT, 6, 6, 388, 240,
+                    ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+    LTEXT           "Ready.", ID_STATUS_TEXT, 6, 250, 388, 9, SS_LEFTNOWORDWRAP
+    EDITTEXT        ID_INPUT_EDIT, 6, 262, 322, 14,
+                    ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
+    DEFPUSHBUTTON   "&Send", ID_SUBMIT_BTN, 334, 262, 60, 14
+    PUSHBUTTON      "&Close", IDCANCEL, 334, 280, 60, 14
+END

@@ -1,0 +1,53 @@
+# REAPER AI Assistant — working title (project name still open, see design doc).
+# Single-process native REAPER extension (cdylib).  Phase 0 skeleton.
+[package]
+name = "reaper-aiassistant"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"          # needs c"..." CStr literals (get_func / OSARA resolution)
+publish = false
+license = "MIT OR Apache-2.0"
+description = "AI assistant deeply integrated into the REAPER DAW (native Rust extension)."
+
+[lib]
+# The output file name MUST start with `reaper_` or REAPER refuses to load it.
+name = "reaper_aiassistant"    # -> reaper_aiassistant.dll / .dylib / .so
+crate-type = ["cdylib"]
+
+[dependencies]
+# --- REAPER bindings ---------------------------------------------------------
+# crates.io is frozen at 0.1.0 (2020) and reaper-high is unpublished; the master
+# API is vastly larger. Pin ALL crates to the SAME git rev (they share a workspace).
+# Swap `rev` for `branch = "master"` to track the latest.
+reaper-low    = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "955d6a2e8ab3e6ea1251357ee14210cd88d4c2ae" }
+reaper-medium = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "955d6a2e8ab3e6ea1251357ee14210cd88d4c2ae" }
+reaper-macros = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "955d6a2e8ab3e6ea1251357ee14210cd88d4c2ae" }
+
+# --- Async worker + HTTP/SSE (no Anthropic SDK; raw reqwest+serde) -----------
+tokio        = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+tokio-util   = { version = "0.7", default-features = false }   # CancellationToken
+reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures-util = { version = "0.3", default-features = false }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+async-trait  = "0.1"
+
+# --- Main-thread <-> worker channels ----------------------------------------
+crossbeam-channel = "0.5"
+
+# --- Secure API-key storage (OS credential store) ---------------------------
+# windows-native = Windows Credential Manager. Add apple-native /
+# sync-secret-service when the mac/linux builds are turned on; without a backend
+# keyring degrades gracefully (in-memory + env var only).
+keyring = { version = "3", features = ["windows-native"] }
+
+# --- Misc --------------------------------------------------------------------
+thiserror = "2"
+
+[build-dependencies]
+cc             = "1"    # compiles the C++/SWELL shim
+embed-resource = "3"    # compiles the Win32 dialog .rc via rc.exe (cc cannot)
+
+[profile.release]
+lto = true
+codegen-units = 1
