@@ -49,6 +49,18 @@ pub fn default_model() -> String {
     std::env::var("RAAI_MODEL").unwrap_or_else(|_| "claude-opus-4-8".to_string())
 }
 
+/// Upper bound on tokens the model may generate per turn. The old 1024 cap cut
+/// long answers off mid-list; 8192 is generous for chat while staying well
+/// within the model's output limit (it is only an upper bound — unused tokens
+/// cost nothing). Override with `RAAI_MAX_TOKENS`.
+pub fn max_output_tokens() -> u32 {
+    std::env::var("RAAI_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(8192)
+}
+
 /// Whether mutating tools require user confirmation (design: configurable,
 /// default on). Set `RAAI_CONFIRM=off` (or 0/false/no) to disable.
 pub fn confirmation_required() -> bool {

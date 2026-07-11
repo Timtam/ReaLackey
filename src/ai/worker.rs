@@ -102,12 +102,13 @@ async fn handle_prompt(
     let tools = tools::definitions();
     let cancel = CancellationToken::new();
     let mut final_answer = String::new();
+    let mut truncated = false;
 
     for turn in 0..MAX_TURNS {
         let req = ChatRequest {
             model: config::default_model(),
             system: Some(config::system_prompt()),
-            max_tokens: 1024,
+            max_tokens: config::max_output_tokens(),
             messages: history.clone(),
             tools: tools.clone(),
         };
@@ -189,16 +190,28 @@ async fn handle_prompt(
             }
             continue;
         }
+        // A non-tool turn is the final answer. If the model ran into the output
+        // limit, the text ends mid-thought — flag it so we don't stop silently.
+        truncated = result.stop_reason == StopReason::MaxTokens;
         break;
     }
 
     if !final_answer.is_empty() {
         // Announce the final answer as one sense-unit (design §kap-a11y), with
         // Markdown stripped so the screen reader speaks prose, not "hash"/"star".
-        let spoken = crate::text::strip_markdown(&final_answer);
+        let mut spoken = crate::text::strip_markdown(&final_answer);
+        if truncated {
+            spoken.push_str("\n\nNote: this response was cut off at the length limit.");
+        }
         if !spoken.trim().is_empty() {
             let _ = ui_tx.send(UiEvent::Announce(spoken));
         }
+    }
+    if truncated {
+        // Visible marker in the pane too, so a cut-off answer never looks complete.
+        let _ = ui_tx.send(UiEvent::Notice(
+            "Response cut off at the length limit — ask me to continue for the rest.".into(),
+        ));
     }
     let _ = ui_tx.send(UiEvent::Status("Ready.".into()));
     let _ = ui_tx.send(UiEvent::Done);
