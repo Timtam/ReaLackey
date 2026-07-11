@@ -145,6 +145,11 @@ async fn handle_prompt(
 
         // Continue the loop only if the model asked for tools.
         if result.stop_reason == StopReason::ToolUse && !result.tool_calls.is_empty() {
+            // Confirm ALL mutating tool calls in this turn with a SINGLE prompt,
+            // rather than one message box per change (which is punishing when the
+            // assistant configures many parameters at once).
+            let mutations_ok = confirm_mutations(ui_tx, op_tx, &result.tool_calls).await;
+
             let mut results = Vec::new();
             for (id, name, input) in result.tool_calls {
                 let input_pretty = serde_json::to_string_pretty(&input).unwrap_or_default();
@@ -152,7 +157,7 @@ async fn handle_prompt(
                     name: name.clone(),
                     input: input_pretty,
                 });
-                let outcome = run_tool(ui_tx, op_tx, &name, input).await;
+                let outcome = run_tool(ui_tx, op_tx, &name, input, mutations_ok).await;
                 let _ = ui_tx.send(UiEvent::ToolFinished {
                     is_error: outcome.is_error,
                     summary: truncate_summary(&outcome.content),
@@ -282,12 +287,14 @@ async fn run_turn(
     out
 }
 
-/// Run a tool, gating mutating tools behind a user confirmation (default on).
+/// Run a tool. Mutating tools were already confirmed for the whole turn in one
+/// batch (`mutations_ok`); screenshot/pixel tools keep their own per-use gates.
 async fn run_tool(
     ui_tx: &CbSender<UiEvent>,
     op_tx: &CbSender<ReaperOp>,
     name: &str,
     input: Value,
+    mutations_ok: bool,
 ) -> ToolOutcome {
     // Tier-B pixel input: arm-per-task consent. The user approves once, then the
     // assistant may click/drag in plugin windows (announced each time) until it
@@ -341,28 +348,60 @@ async fn run_tool(
         return exec_tool(op_tx, name.to_string(), input).await;
     }
 
-    // `preview` returns Some only for mutating tools; those require confirmation.
-    if let Some(preview) = tools::preview(name, &input) {
-        if config::confirmation_required() {
-            let _ = ui_tx.send(UiEvent::Notice(format!("Proposed change: {preview}")));
-            let _ = ui_tx.send(UiEvent::Announce(format!("Proposed change: {preview}. Confirm?")));
-            let confirmed = confirm(
-                op_tx,
-                format!("The assistant proposes this change:\n\n{preview}\n\nApply it?"),
-            )
-            .await;
-            if !confirmed {
-                let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
-                return ToolOutcome::ok(
-                    json!({ "applied": false, "reason": "user declined the change" }).to_string(),
-                );
-            }
-            let outcome = exec_tool(op_tx, name.to_string(), input).await;
-            let _ = ui_tx.send(UiEvent::Notice("Applied.".into()));
-            return outcome;
-        }
+    // `preview` returns Some only for mutating tools. Their confirmation was
+    // already handled for the whole turn as a single batch prompt, so here we
+    // only honour a declined batch.
+    if tools::preview(name, &input).is_some() && !mutations_ok {
+        return ToolOutcome::ok(
+            json!({ "applied": false, "reason": "user declined the change" }).to_string(),
+        );
     }
     exec_tool(op_tx, name.to_string(), input).await
+}
+
+/// Confirm every mutating tool call in a turn with ONE prompt. Returns whether
+/// they were approved (always `true` when confirmation is off or there are no
+/// mutations). Screenshot/pixel tools are gated separately, not here.
+async fn confirm_mutations(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    calls: &[(String, String, Value)],
+) -> bool {
+    if !config::confirmation_required() {
+        return true;
+    }
+    let previews: Vec<String> = calls
+        .iter()
+        .filter_map(|(_, name, input)| tools::preview(name, input))
+        .collect();
+    if previews.is_empty() {
+        return true;
+    }
+    let list = previews
+        .iter()
+        .enumerate()
+        .map(|(i, p)| format!("{}. {}", i + 1, p))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let count = previews.len();
+    let (noun, apply) = if count == 1 {
+        ("change", "Apply it?")
+    } else {
+        ("changes", "Apply all of them?")
+    };
+    let _ = ui_tx.send(UiEvent::Notice(format!("Proposed {count} {noun}:\n{list}")));
+    let _ = ui_tx.send(UiEvent::Announce(format!(
+        "The assistant proposes {count} {noun}. {apply}"
+    )));
+    let confirmed = confirm(
+        op_tx,
+        format!("The assistant proposes {count} {noun}:\n\n{list}\n\n{apply}"),
+    )
+    .await;
+    let _ = ui_tx.send(UiEvent::Notice(
+        if confirmed { "Applying." } else { "Declined." }.into(),
+    ));
+    confirmed
 }
 
 /// A short, spoken-friendly description of a pixel action for the announcement.

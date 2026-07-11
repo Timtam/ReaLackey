@@ -61,6 +61,17 @@ pub fn max_output_tokens() -> u32 {
         .unwrap_or(8192)
 }
 
+/// Whether the offline post-FX render (`analyze_processed_audio`) is allowed.
+/// OFF by default: rendering via `Main_OnCommand` from the control-surface tick
+/// re-enters REAPER's message loop and has crashed the host. Opt in with
+/// `RAAI_ENABLE_PROCESSED_RENDER=1` only to test a safe render path.
+pub fn processed_render_enabled() -> bool {
+    matches!(
+        std::env::var("RAAI_ENABLE_PROCESSED_RENDER").as_deref(),
+        Ok("1") | Ok("true") | Ok("on") | Ok("yes")
+    )
+}
+
 /// Whether mutating tools require user confirmation (design: configurable,
 /// default on). Set `RAAI_CONFIRM=off` (or 0/false/no) to disable.
 pub fn confirmation_required() -> bool {
@@ -106,7 +117,10 @@ pub fn system_prompt() -> String {
      human-readable display values over raw normalized 0..1 values. Before making \
      a change, briefly explain what you intend to do; every change is shown to the \
      user for confirmation and is wrapped in a labelled undo block, so both you \
-     and the user can undo it. You can undo/redo actions and read the recent-action \
+     and the user can undo it. When you plan SEVERAL independent changes (e.g. \
+     configuring a plugin's parameters), make them together in ONE step (multiple \
+     tool calls in the same turn) so the user can approve them all with a single \
+     confirmation, instead of one at a time. You can undo/redo actions and read the recent-action \
      history (get_undo_history) to understand the user's workflow and suggest \
      improvements. You have a persistent per-project memory saved in the \
      project file: at the START of a session call get_project_memory to recall \
