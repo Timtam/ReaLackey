@@ -157,8 +157,9 @@ static RAAI_DLGRET DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
           if (g_on_confirm) g_on_confirm(0);
           return TRUE;
         case IDCANCEL:            // "Close" / Esc: HIDE, don't destroy, so the
-          ShowWindow(hwnd, SW_HIDE);   // conversation history survives and the
-          return TRUE;                 // action can re-show it (side-by-side use).
+          if (g_on_cancel) g_on_cancel();  // conversation history survives; but
+          ShowWindow(hwnd, SW_HIDE);       // disarm pixel control + stop any turn
+          return TRUE;                     // so "close" is a real kill switch.
       }
       return FALSE;
 
@@ -167,7 +168,8 @@ static RAAI_DLGRET DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
       if (g_on_resize) g_on_resize();   // let Rust re-bound the webview
       return TRUE;
 
-    case WM_CLOSE:                 // window [x]: hide, keep the window + history.
+    case WM_CLOSE:                 // window [x]: hide, keep the window + history,
+      if (g_on_cancel) g_on_cancel();  // but disarm pixel control + stop the turn.
       ShowWindow(hwnd, SW_HIDE);
       return TRUE;
 

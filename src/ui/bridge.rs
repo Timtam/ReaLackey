@@ -44,8 +44,10 @@ pub fn submit(text: String) {
 /// "Confirm" pressed (Phase 3 mutations). No-op in Phase 0.
 pub fn confirm(_confirm_id: i32) {}
 
-/// Dialog closed / "Stopp": abort any in-flight generation.
+/// Dialog closed / "Stopp": abort any in-flight generation and disarm pixel
+/// control (a physical kill switch for the Tier-B click/drag capability).
 pub fn cancel() {
+    crate::tools::disarm_pixel_control();
     if let Some(tx) = TASK_TX.get() {
         let _ = tx.send(MainTask::Cancel);
     }

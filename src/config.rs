@@ -112,7 +112,19 @@ pub fn system_prompt() -> String {
      project file: at the START of a session call get_project_memory to recall \
      context, and use set_project_memory to record decisions, TODOs, and \
      progress as you work. You can also read/append the project's Notes and \
-     per-track notes. Answer concisely."
+     per-track notes. \
+     For plugin GUIs a screen reader cannot read (custom-drawn interfaces, meters, \
+     waveforms), you can SEE them with capture_view (each capture asks the user for \
+     consent). Having seen a control, PREFER to act through the parameter API — \
+     set_fx_param or set_fx_param_by_steps (relative nudges like 'a bit more') — \
+     because those are undoable. Only for GUI-only controls that have NO host \
+     parameter (e.g. a Kontakt mode or patch switch) fall back to plugin_click / \
+     plugin_drag, giving pixel coordinates read from the most recent capture_view \
+     image of that plugin; the user must arm pixel control first (they are prompted \
+     once). Those synthesized clicks are NOT undoable by REAPER, so after each one \
+     call capture_view again to verify, and work in small steps. When the user says \
+     to stop operating the GUI, or you are done, call disable_pixel_control. \
+     Answer concisely."
         .to_string()
 }
 

@@ -289,6 +289,37 @@ async fn run_tool(
     name: &str,
     input: Value,
 ) -> ToolOutcome {
+    // Tier-B pixel input: arm-per-task consent. The user approves once, then the
+    // assistant may click/drag in plugin windows (announced each time) until it
+    // is disarmed. GUI clicks bypass REAPER's undo, so this is a distinct gate,
+    // always enforced regardless of the mutation-confirm toggle.
+    if tools::is_pixel_tool(name) {
+        if !tools::is_pixel_armed() {
+            let msg = "The assistant wants to operate a plugin's on-screen controls by \
+                       synthesizing real mouse clicks/drags — for GUI-only controls that have no \
+                       automatable parameter (e.g. a Kontakt mode switch). It will briefly move \
+                       the mouse cursor inside the plugin window.\n\nIMPORTANT: these GUI actions \
+                       CANNOT be undone by REAPER's undo.\n\nAllow the assistant to click in \
+                       plugin windows for this session? (You can cancel any action, or tell it to \
+                       stop.)";
+            let approved = confirm(op_tx, msg.to_string()).await;
+            if !approved {
+                let _ = ui_tx.send(UiEvent::Notice("Pixel control declined.".into()));
+                return ToolOutcome::ok(
+                    json!({ "done": false, "reason": "user declined pixel control" }).to_string(),
+                );
+            }
+            tools::arm_pixel_control();
+            let _ = ui_tx.send(UiEvent::Notice("Pixel control armed for this session.".into()));
+            let _ = ui_tx.send(UiEvent::Announce("Pixel control armed.".into()));
+        }
+        // Announce each action so a synthesized click is never silent.
+        let desc = pixel_action_desc(name, &input);
+        let _ = ui_tx.send(UiEvent::Notice(desc.clone()));
+        let _ = ui_tx.send(UiEvent::Announce(desc));
+        return exec_tool(op_tx, name.to_string(), input).await;
+    }
+
     // Screen capture sends pixels to the cloud, so it is ALWAYS consent-gated
     // (data protection), independent of the mutation-confirm toggle, and asked
     // before the tool runs. capture_view is not a mutation, so the preview path
@@ -332,6 +363,22 @@ async fn run_tool(
         }
     }
     exec_tool(op_tx, name.to_string(), input).await
+}
+
+/// A short, spoken-friendly description of a pixel action for the announcement.
+fn pixel_action_desc(name: &str, input: &Value) -> String {
+    let n = |k: &str| input.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+    match name {
+        "plugin_click" => format!("Clicking the plugin at {}, {}.", n("x"), n("y")),
+        "plugin_drag" => format!(
+            "Dragging in the plugin from {}, {} to {}, {}.",
+            n("x1"),
+            n("y1"),
+            n("x2"),
+            n("y2")
+        ),
+        _ => "Operating the plugin.".to_string(),
+    }
 }
 
 /// Cap a tool result shown in the UI card (the full result still goes to the model).

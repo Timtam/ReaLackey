@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use reaper_medium::{
     AddFxBehavior, FxLocation, FxShowInstruction, ItemAttributeKey, MainThreadScope,
@@ -1022,6 +1023,52 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["target"]),
             ),
         },
+        // --- Tier B: operate GUI-only plugin controls via synthesized input ---
+        ToolDef {
+            name: "plugin_click".into(),
+            description: "Click a control in the FOCUSED plugin's GUI by synthesizing a real mouse \
+                          click. This is for GUI-only controls that have NO host parameter (e.g. a \
+                          Kontakt mode/patch toggle) — for normal knobs/sliders prefer \
+                          set_fx_param / set_fx_param_by_steps, which are undoable. x and y are \
+                          PIXELS in the most recent capture_view image of that plugin (top-left is \
+                          0,0); they are clamped to the window. Requires the user to have armed \
+                          pixel control (you'll be prompted once). IMPORTANT: GUI clicks CANNOT be \
+                          undone by REAPER — after clicking, call capture_view to verify the result."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "x": { "type": "integer", "description": "x pixel in the plugin screenshot" },
+                    "y": { "type": "integer", "description": "y pixel in the plugin screenshot" }
+                }),
+                json!(["x", "y"]),
+            ),
+        },
+        ToolDef {
+            name: "plugin_drag".into(),
+            description: "Drag within the FOCUSED plugin's GUI from (x1,y1) to (x2,y2) — the way a \
+                          knob is turned (usually a vertical drag). Coordinates are PIXELS in the \
+                          most recent capture_view image, clamped to the window. Same rules as \
+                          plugin_click: needs pixel control armed, and the change is NOT undoable \
+                          by REAPER; verify with capture_view afterwards."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "x1": { "type": "integer" },
+                    "y1": { "type": "integer" },
+                    "x2": { "type": "integer" },
+                    "y2": { "type": "integer" }
+                }),
+                json!(["x1", "y1", "x2", "y2"]),
+            ),
+        },
+        ToolDef {
+            name: "disable_pixel_control".into(),
+            description: "Turn OFF pixel control (stop being able to click/drag in plugin GUIs). \
+                          Call this when the user asks you to stop operating a plugin's GUI or says \
+                          you're done. Always allowed; does not change the project."
+                .into(),
+            input_schema: empty(),
+        },
     ]
 }
 
@@ -1164,6 +1211,38 @@ fn track_from_location(
     }
 }
 
+/// Synthesize a left click at image-space `(x, y)` in the focused plugin's
+/// window (Phase 7 Tier B — for GUI-only controls with no host parameter). The
+/// user has already armed pixel control by the time this runs. Coordinates are
+/// clamped to the window in the input backend, so a click can't leave it.
+fn plugin_click(reaper: &Reaper<MainThreadScope>, x: i32, y: i32) -> Result<Value, String> {
+    let hwnd = resolve_focused_fx_hwnd(reaper)?;
+    crate::ui::input::click(hwnd, x, y)?;
+    Ok(json!({
+        "clicked": true, "x": x, "y": y,
+        "note": "Synthesized a GUI click. This is NOT undoable by REAPER. Use \
+                 capture_view to verify the result changed as intended."
+    }))
+}
+
+/// Synthesize a left-button drag from `(x1, y1)` to `(x2, y2)` in the focused
+/// plugin's window (e.g. turning a knob vertically). See [`plugin_click`].
+fn plugin_drag(
+    reaper: &Reaper<MainThreadScope>,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> Result<Value, String> {
+    let hwnd = resolve_focused_fx_hwnd(reaper)?;
+    crate::ui::input::drag(hwnd, x1, y1, x2, y2)?;
+    Ok(json!({
+        "dragged": true, "from": [x1, y1], "to": [x2, y2],
+        "note": "Synthesized a GUI drag. This is NOT undoable by REAPER. Use \
+                 capture_view to verify the result."
+    }))
+}
+
 fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Result<Value, String> {
     match name {
         "get_project_summary" => Ok(get_project_summary(reaper)),
@@ -1207,6 +1286,23 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_u32(input, "step_count").unwrap_or(1),
             input.get("step_size").and_then(|v| v.as_f64()).unwrap_or(0.01),
         ),
+        // Tier B pixel input (arm-gated in the worker before reaching here).
+        "plugin_click" => plugin_click(
+            reaper,
+            req_u32(input, "x")? as i32,
+            req_u32(input, "y")? as i32,
+        ),
+        "plugin_drag" => plugin_drag(
+            reaper,
+            req_u32(input, "x1")? as i32,
+            req_u32(input, "y1")? as i32,
+            req_u32(input, "x2")? as i32,
+            req_u32(input, "y2")? as i32,
+        ),
+        "disable_pixel_control" => {
+            disarm_pixel_control();
+            Ok(json!({ "pixel_control": "disabled" }))
+        }
         "set_fx_enabled" => set_fx_enabled(
             reaper,
             req_u32(input, "track_index")?,
@@ -1459,6 +1555,32 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
 
 /// Human-readable preview for a mutating tool call, or None for read/undo tools.
 /// Returning `Some` marks the tool as requiring confirmation.
+// ---- Tier-B pixel control (Phase 7): arm-per-task state ----------------------
+// When the user "arms" pixel control, the assistant may synthesize clicks/drags
+// into plugin windows (for GUI-only controls with no host parameter) until it is
+// disarmed. Arming is human-gated (worker consent); disarming is always allowed.
+static PIXEL_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the assistant is currently allowed to synthesize plugin-GUI input.
+pub fn is_pixel_armed() -> bool {
+    PIXEL_ARMED.load(Ordering::Relaxed)
+}
+
+/// Arm pixel control (call only after explicit user consent).
+pub fn arm_pixel_control() {
+    PIXEL_ARMED.store(true, Ordering::Relaxed);
+}
+
+/// Disarm pixel control (always safe; e.g. the dialog closed or the user said stop).
+pub fn disarm_pixel_control() {
+    PIXEL_ARMED.store(false, Ordering::Relaxed);
+}
+
+/// Whether a tool synthesizes plugin-GUI input (gated by the arm consent).
+pub fn is_pixel_tool(name: &str) -> bool {
+    matches!(name, "plugin_click" | "plugin_drag")
+}
+
 /// A mandatory consent gate for tools that send data off the machine (Phase 7
 /// screen capture). Returns `Some(description-of-what-is-captured)` for such
 /// tools, or `None`. Unlike mutation confirmation, this gate is ALWAYS enforced
@@ -1470,6 +1592,11 @@ pub fn consent_prompt(name: &str, input: &Value) -> Option<String> {
                 .get("target")
                 .and_then(|v| v.as_str())
                 .unwrap_or("reaper_main");
+            // Every screenshot is consent-gated, always — a capture sends pixels
+            // to the cloud, so it is never covered by the pixel-control arm (which
+            // only authorizes LOCAL input), and consent is never persistent (per
+            // the design's data-protection rule). The arm and this gate are
+            // deliberately independent.
             let what = match target {
                 "reaper_main" => "the REAPER main window",
                 "focused_plugin" => "the focused plugin window",
