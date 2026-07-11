@@ -13,8 +13,9 @@ use std::os::raw::c_int;
 use reaper_medium::{
     AddFxBehavior, FxLocation, ItemAttributeKey, MainThreadScope, MasterTrackBehavior, MediaItem,
     MediaItemTake, MediaTrack, PositionInSeconds, ProjectContext, Reaper,
-    ReaperNormalizedFxParamValue, ReaperStr, SendTarget, TrackFxChainType, TrackFxLocation,
-    TrackLocation, TrackSendAttributeKey, TrackSendCategory, TrackSendDirection, UndoScope,
+    ReaperNormalizedFxParamValue, ReaperStr, SendTarget, TrackDefaultsBehavior, TrackFxChainType,
+    TrackFxLocation, TrackLocation, TrackSendAttributeKey, TrackSendCategory, TrackSendDirection,
+    UndoScope,
 };
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -606,6 +607,240 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["key"]),
             ),
         },
+        // --- item properties ---
+        ToolDef {
+            name: "get_item_properties".into(),
+            description: "Read a media item's properties: position, length, volume, mute, \
+                          loop_source, lock, snap_offset, fade in/out lengths, shapes and \
+                          directions, auto-fade lengths, group_id, color, all_takes_play, plus \
+                          the take count."
+                .into(),
+            input_schema: obj(
+                json!({ "item_index": { "type": "integer", "description": "0-based project media item index" } }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_item_property".into(),
+            description: "Set one media item property to a numeric value. CHANGES the project \
+                          (confirmed + undo-wrapped). property is one of: position, length, volume, \
+                          mute (0/1), loop_source (0/1), lock (0/1), snap_offset, fade_in_len, \
+                          fade_out_len, fade_in_len_auto (-1=off), fade_out_len_auto, fade_in_shape \
+                          (0..6), fade_out_shape, fade_in_dir (-1..1), fade_out_dir, group_id, \
+                          color (native color|0x1000000; 0 clears), all_takes_play (0/1). Times are \
+                          in seconds."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "property": { "type": "string" },
+                    "value": { "type": "number" }
+                }),
+                json!(["item_index", "property", "value"]),
+            ),
+        },
+        // --- take properties ---
+        ToolDef {
+            name: "get_take_properties".into(),
+            description: "Read a take's properties (defaults to the active take): name, \
+                          start_offset (seconds into the source), volume, pan, playrate, pitch \
+                          (semitones), preserve_pitch, channel_mode, color, and the source file \
+                          and length."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "take_index": { "type": "integer", "description": "0-based take index; omit for the active take" }
+                }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_take_property".into(),
+            description: "Set one take property. CHANGES the project (confirmed + undo-wrapped). \
+                          property is one of: start_offset (seconds), volume (linear), pan (-1..1), \
+                          playrate, pitch (semitones), preserve_pitch (0/1), channel_mode (int), \
+                          color, or name (pass 'text' instead of 'value'). Defaults to the active \
+                          take unless take_index is given."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "property": { "type": "string" },
+                    "value": { "type": "number", "description": "numeric value (for non-name properties)" },
+                    "text": { "type": "string", "description": "string value (for property=name)" },
+                    "take_index": { "type": "integer" }
+                }),
+                json!(["item_index", "property"]),
+            ),
+        },
+        ToolDef {
+            name: "set_active_take".into(),
+            description: "Choose which take of an item is the active (playing) take. CHANGES the \
+                          project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "take_index": { "type": "integer" }
+                }),
+                json!(["item_index", "take_index"]),
+            ),
+        },
+        // --- track settings ---
+        ToolDef {
+            name: "get_track_properties".into(),
+            description: "Read a track's settings: name, mute, solo, volume, pan, visible_tcp, \
+                          visible_mixer, height, height_lock, folder_depth, folder_compact, \
+                          free_mode, color, rec_arm, rec_monitor."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_track_property".into(),
+            description: "Set one track setting. CHANGES the project (confirmed + undo-wrapped). \
+                          property is one of: mute (0/1), solo (0/1/2), volume (linear), pan \
+                          (-1..1), visible_tcp (0/1), visible_mixer (0/1), height (px; 0=auto), \
+                          height_lock (0/1), folder_depth (1 opens a folder, -1/-2.. closes), \
+                          folder_compact (0/1/2), free_mode (0/1), color, rec_arm (0/1), \
+                          rec_monitor (0/1/2), or name (pass 'text' instead of 'value')."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "property": { "type": "string" },
+                    "value": { "type": "number" },
+                    "text": { "type": "string", "description": "string value (for property=name)" }
+                }),
+                json!(["track_index", "property"]),
+            ),
+        },
+        // --- grouping ---
+        ToolDef {
+            name: "get_track_group_membership".into(),
+            description: "List which track groups (1..64) the track belongs to, per grouping \
+                          parameter (e.g. VOLUME_LEAD, MUTE_FOLLOW, VOLUME_VCA_LEAD). Only \
+                          parameters with any membership are returned."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_track_group_membership".into(),
+            description: "Add or remove a track from a grouping. CHANGES the project (confirmed + \
+                          undo-wrapped). group is 1..64; param is a REAPER group-name such as \
+                          VOLUME_LEAD, VOLUME_FOLLOW, PAN_LEAD, MUTE_FOLLOW, SOLO_LEAD, \
+                          VOLUME_VCA_LEAD, VOLUME_VCA_FOLLOW (LEAD = controls the group, FOLLOW = \
+                          follows it); member true adds, false removes."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "group": { "type": "integer", "description": "group number 1..64" },
+                    "param": { "type": "string", "description": "uppercase REAPER group-name, e.g. VOLUME_LEAD" },
+                    "member": { "type": "boolean" }
+                }),
+                json!(["track_index", "group", "param", "member"]),
+            ),
+        },
+        ToolDef {
+            name: "group_items".into(),
+            description: "Put several media items into a shared item group (so they select/move \
+                          together). CHANGES the project (confirmed + undo-wrapped). Omit group_id \
+                          to allocate a fresh unused group. Pass group_id 0 to ungroup."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_indices": { "type": "array", "items": { "type": "integer" }, "description": "0-based project media item indices" },
+                    "group_id": { "type": "integer", "description": "shared group id; omit to auto-allocate, 0 to ungroup" }
+                }),
+                json!(["item_indices"]),
+            ),
+        },
+        // --- copy / move / delete ---
+        ToolDef {
+            name: "copy_item".into(),
+            description: "Duplicate a media item (with all its takes) onto a track. CHANGES the \
+                          project (confirmed + undo-wrapped). Defaults to the same track/position \
+                          as the source; pass dest_track_index and/or position (seconds) to place \
+                          the copy. Returns the new item_index."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "dest_track_index": { "type": "integer", "description": "target track (default: same as source)" },
+                    "position": { "type": "number", "description": "new start in seconds (default: same as source)" }
+                }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "move_item".into(),
+            description: "Move an existing media item to another track and/or position. CHANGES \
+                          the project (confirmed + undo-wrapped). Provide dest_track_index and/or \
+                          position (seconds)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "dest_track_index": { "type": "integer" },
+                    "position": { "type": "number" }
+                }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "delete_item".into(),
+            description: "Delete a media item from its track. CHANGES the project (confirmed + \
+                          undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({ "item_index": { "type": "integer" } }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "duplicate_track".into(),
+            description: "Duplicate a track (its FX, envelopes, routing and items) as a new track \
+                          immediately below it. CHANGES the project (confirmed + undo-wrapped). \
+                          Returns the new track_index."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "delete_track".into(),
+            description: "Delete a track and all of its items. CHANGES the project (confirmed + \
+                          undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "copy_take".into(),
+            description: "Copy a take from one item to another as a new (inactive) take. CHANGES \
+                          the project (confirmed + undo-wrapped). Supports plain file-based audio \
+                          takes; for MIDI, in-project, or section/reverse sources use copy_item to \
+                          duplicate the whole item. Defaults to the source item's active take."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "src_item_index": { "type": "integer" },
+                    "dest_item_index": { "type": "integer" },
+                    "take_index": { "type": "integer", "description": "which take of the source; omit for its active take" }
+                }),
+                json!(["src_item_index", "dest_item_index"]),
+            ),
+        },
     ]
 }
 
@@ -794,6 +1029,83 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             input.get("value").and_then(|v| v.as_f64()),
             opt_str(input, "text"),
         ),
+        // item properties
+        "get_item_properties" => get_item_properties(reaper, req_u32(input, "item_index")?),
+        "set_item_property" => set_item_property(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_str(input, "property")?,
+            req_f64(input, "value")?,
+        ),
+        // take properties
+        "get_take_properties" => get_take_properties(
+            reaper,
+            req_u32(input, "item_index")?,
+            opt_u32(input, "take_index"),
+        ),
+        "set_take_property" => set_take_property(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_str(input, "property")?,
+            input.get("value").and_then(|v| v.as_f64()),
+            opt_str(input, "text"),
+            opt_u32(input, "take_index"),
+        ),
+        "set_active_take" => set_active_take(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "take_index")?,
+        ),
+        // track settings
+        "get_track_properties" => get_track_properties(reaper, req_u32(input, "track_index")?),
+        "set_track_property" => set_track_property(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_str(input, "property")?,
+            input.get("value").and_then(|v| v.as_f64()),
+            opt_str(input, "text"),
+        ),
+        // grouping
+        "get_track_group_membership" => {
+            get_track_group_membership(reaper, req_u32(input, "track_index")?)
+        }
+        "set_track_group_membership" => set_track_group_membership(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "group")?,
+            req_str(input, "param")?,
+            req_bool(input, "member")?,
+        ),
+        "group_items" => {
+            let arr = input
+                .get("item_indices")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "missing 'item_indices' array".to_string())?;
+            let idxs: Vec<u32> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+            group_items(reaper, &idxs, input.get("group_id").and_then(|v| v.as_i64()))
+        }
+        // copy / move / delete
+        "copy_item" => copy_item(
+            reaper,
+            req_u32(input, "item_index")?,
+            opt_u32(input, "dest_track_index"),
+            input.get("position").and_then(|v| v.as_f64()),
+        ),
+        "move_item" => move_item(
+            reaper,
+            req_u32(input, "item_index")?,
+            opt_u32(input, "dest_track_index"),
+            input.get("position").and_then(|v| v.as_f64()),
+        ),
+        "delete_item" => delete_item(reaper, req_u32(input, "item_index")?),
+        "duplicate_track" => duplicate_track(reaper, req_u32(input, "track_index")?),
+        "delete_track" => delete_track(reaper, req_u32(input, "track_index")?),
+        "copy_take" => copy_take(
+            reaper,
+            req_u32(input, "src_item_index")?,
+            req_u32(input, "dest_item_index")?,
+            opt_u32(input, "take_index"),
+        ),
         // undo / history
         "undo" => Ok(undo(reaper)),
         "redo" => Ok(redo(reaper)),
@@ -922,6 +1234,64 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
                 .map(|s| format!("\"{s}\""))
                 .or_else(|| input.get("value").map(|v| v.to_string()))
                 .unwrap_or_else(|| "?".into()),
+        )),
+        "set_item_property" => Some(format!(
+            "Set item {} {} to {}",
+            show("item_index"),
+            input.get("property").and_then(|v| v.as_str()).unwrap_or("?"),
+            show("value"),
+        )),
+        "set_take_property" => Some(format!(
+            "Set take {} of item {} to {}",
+            input.get("property").and_then(|v| v.as_str()).unwrap_or("?"),
+            show("item_index"),
+            input
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .or_else(|| input.get("value").map(|v| v.to_string()))
+                .unwrap_or_else(|| "?".into()),
+        )),
+        "set_active_take" => Some(format!(
+            "Set active take {} on item {}",
+            show("take_index"),
+            show("item_index"),
+        )),
+        "set_track_property" => Some(format!(
+            "Set track {} {} to {}",
+            show("track_index"),
+            input.get("property").and_then(|v| v.as_str()).unwrap_or("?"),
+            input
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .or_else(|| input.get("value").map(|v| v.to_string()))
+                .unwrap_or_else(|| "?".into()),
+        )),
+        "set_track_group_membership" => Some(format!(
+            "{} track {} {} group {}",
+            if input.get("member").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "Add"
+            } else {
+                "Remove"
+            },
+            show("track_index"),
+            input.get("param").and_then(|v| v.as_str()).unwrap_or("?"),
+            show("group"),
+        )),
+        "group_items" => Some(format!(
+            "Group {} item(s)",
+            input.get("item_indices").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        )),
+        "copy_item" => Some(format!("Copy item {}", show("item_index"))),
+        "move_item" => Some(format!("Move item {}", show("item_index"))),
+        "delete_item" => Some(format!("Delete item {}", show("item_index"))),
+        "duplicate_track" => Some(format!("Duplicate track {}", show("track_index"))),
+        "delete_track" => Some(format!("Delete track {}", show("track_index"))),
+        "copy_take" => Some(format!(
+            "Copy a take from item {} to item {}",
+            show("src_item_index"),
+            show("dest_item_index"),
         )),
         _ => None,
     }
@@ -2287,6 +2657,764 @@ fn set_render_setting(
     Ok(result)
 }
 
+// ---- item / take / track properties, grouping, copy/move -------------------
+
+/// Friendly-name -> raw REAPER key tables. Used by both the readers (iterate
+/// all) and the setters (look up one). Values flow through the low-level
+/// `*Info_Value` functions as f64.
+const ITEM_PROPS: &[(&str, &CStr)] = &[
+    ("position", c"D_POSITION"),
+    ("length", c"D_LENGTH"),
+    ("volume", c"D_VOL"),
+    ("mute", c"B_MUTE"),
+    ("loop_source", c"B_LOOPSRC"),
+    ("lock", c"C_LOCK"),
+    ("snap_offset", c"D_SNAPOFFSET"),
+    ("fade_in_len", c"D_FADEINLEN"),
+    ("fade_out_len", c"D_FADEOUTLEN"),
+    ("fade_in_len_auto", c"D_FADEINLEN_AUTO"),
+    ("fade_out_len_auto", c"D_FADEOUTLEN_AUTO"),
+    ("fade_in_shape", c"C_FADEINSHAPE"),
+    ("fade_out_shape", c"C_FADEOUTSHAPE"),
+    ("fade_in_dir", c"D_FADEINDIR"),
+    ("fade_out_dir", c"D_FADEOUTDIR"),
+    ("group_id", c"I_GROUPID"),
+    ("color", c"I_CUSTOMCOLOR"),
+    ("all_takes_play", c"B_ALLTAKESPLAY"),
+];
+
+const TAKE_PROPS: &[(&str, &CStr)] = &[
+    ("start_offset", c"D_STARTOFFS"),
+    ("volume", c"D_VOL"),
+    ("pan", c"D_PAN"),
+    ("playrate", c"D_PLAYRATE"),
+    ("pitch", c"D_PITCH"),
+    ("preserve_pitch", c"B_PPITCH"),
+    ("channel_mode", c"I_CHANMODE"),
+    ("color", c"I_CUSTOMCOLOR"),
+];
+
+const TRACK_PROPS: &[(&str, &CStr)] = &[
+    ("mute", c"B_MUTE"),
+    ("solo", c"I_SOLO"),
+    ("volume", c"D_VOL"),
+    ("pan", c"D_PAN"),
+    ("visible_tcp", c"B_SHOWINTCP"),
+    ("visible_mixer", c"B_SHOWINMIXER"),
+    ("height", c"I_HEIGHTOVERRIDE"),
+    ("height_lock", c"B_HEIGHTLOCK"),
+    ("folder_depth", c"I_FOLDERDEPTH"),
+    ("folder_compact", c"I_FOLDERCOMPACT"),
+    ("free_mode", c"B_FREEMODE"),
+    ("color", c"I_CUSTOMCOLOR"),
+    ("rec_arm", c"I_RECARM"),
+    ("rec_monitor", c"I_RECMON"),
+];
+
+/// Numeric take attributes copied when duplicating a take.
+const TAKE_COPY_KEYS: &[&CStr] = &[
+    c"D_STARTOFFS",
+    c"D_VOL",
+    c"D_PAN",
+    c"D_PLAYRATE",
+    c"D_PITCH",
+    c"B_PPITCH",
+    c"I_CHANMODE",
+    c"I_CUSTOMCOLOR",
+];
+
+/// Track grouping parameters queried by get_track_group_membership.
+const GROUP_PARAMS: &[&CStr] = &[
+    c"VOLUME_LEAD",
+    c"VOLUME_FOLLOW",
+    c"PAN_LEAD",
+    c"PAN_FOLLOW",
+    c"WIDTH_LEAD",
+    c"WIDTH_FOLLOW",
+    c"MUTE_LEAD",
+    c"MUTE_FOLLOW",
+    c"SOLO_LEAD",
+    c"SOLO_FOLLOW",
+    c"RECARM_LEAD",
+    c"RECARM_FOLLOW",
+    c"POLARITY_LEAD",
+    c"POLARITY_FOLLOW",
+    c"AUTOMODE_LEAD",
+    c"AUTOMODE_FOLLOW",
+    c"VOLUME_VCA_LEAD",
+    c"VOLUME_VCA_FOLLOW",
+];
+
+/// Every group-name REAPER's GetSetTrackGroupMembership accepts (current
+/// LEAD/FOLLOW names plus the deprecated MASTER/SLAVE aliases). Used to reject
+/// typos, which would otherwise silently no-op while reporting success.
+const GROUP_PARAM_NAMES: &[&str] = &[
+    "MEDIA_EDIT_LEAD",
+    "MEDIA_EDIT_FOLLOW",
+    "VOLUME_LEAD",
+    "VOLUME_FOLLOW",
+    "VOLUME_VCA_LEAD",
+    "VOLUME_VCA_FOLLOW",
+    "VOLUME_VCA_FOLLOW_ISPREFX",
+    "PAN_LEAD",
+    "PAN_FOLLOW",
+    "WIDTH_LEAD",
+    "WIDTH_FOLLOW",
+    "MUTE_LEAD",
+    "MUTE_FOLLOW",
+    "SOLO_LEAD",
+    "SOLO_FOLLOW",
+    "RECARM_LEAD",
+    "RECARM_FOLLOW",
+    "POLARITY_LEAD",
+    "POLARITY_FOLLOW",
+    "AUTOMODE_LEAD",
+    "AUTOMODE_FOLLOW",
+    "VOLUME_REVERSE",
+    "PAN_REVERSE",
+    "WIDTH_REVERSE",
+    "NO_LEAD_WHEN_FOLLOW",
+    // deprecated pre-v6.12 aliases, still accepted by REAPER
+    "MEDIA_EDIT_MASTER",
+    "MEDIA_EDIT_SLAVE",
+    "VOLUME_MASTER",
+    "VOLUME_SLAVE",
+    "VOLUME_VCA_MASTER",
+    "VOLUME_VCA_SLAVE",
+    "PAN_MASTER",
+    "PAN_SLAVE",
+    "WIDTH_MASTER",
+    "WIDTH_SLAVE",
+    "MUTE_MASTER",
+    "MUTE_SLAVE",
+    "SOLO_MASTER",
+    "SOLO_SLAVE",
+    "RECARM_MASTER",
+    "RECARM_SLAVE",
+    "POLARITY_MASTER",
+    "POLARITY_SLAVE",
+    "AUTOMODE_MASTER",
+    "AUTOMODE_SLAVE",
+];
+
+fn lookup_key(table: &[(&str, &'static CStr)], name: &str) -> Option<&'static CStr> {
+    table.iter().find(|e| e.0 == name).map(|e| e.1)
+}
+
+fn item_at(reaper: &Reaper<MainThreadScope>, index: u32) -> Result<MediaItem, String> {
+    reaper
+        .get_media_item(ProjectContext::CurrentProject, index)
+        .ok_or_else(|| format!("no media item at index {index}"))
+}
+
+fn track_at(reaper: &Reaper<MainThreadScope>, index: u32) -> Result<MediaTrack, String> {
+    reaper
+        .get_track(ProjectContext::CurrentProject, index)
+        .ok_or_else(|| format!("no track at index {index}"))
+}
+
+fn resolve_take(
+    reaper: &Reaper<MainThreadScope>,
+    item: MediaItem,
+    take_index: Option<u32>,
+) -> Result<MediaItemTake, String> {
+    match take_index {
+        Some(i) => {
+            if i > i32::MAX as u32 {
+                return Err(format!("take index {i} out of range"));
+            }
+            let ptr = unsafe { reaper.low().GetTake(item.as_ptr(), i as c_int) };
+            MediaItemTake::new(ptr).ok_or_else(|| format!("no take at index {i}"))
+        }
+        None => unsafe { reaper.get_active_take(item) }.ok_or_else(|| "item has no active take".to_string()),
+    }
+}
+
+fn get_item_properties(reaper: &Reaper<MainThreadScope>, item_index: u32) -> Result<Value, String> {
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    let ip = item.as_ptr();
+    let mut props = serde_json::Map::new();
+    for &(name, key) in ITEM_PROPS {
+        let v = unsafe { low.GetMediaItemInfo_Value(ip, key.as_ptr()) };
+        props.insert(name.to_string(), json!(v));
+    }
+    let take_count = unsafe { low.CountTakes(ip) };
+    Ok(json!({ "item_index": item_index, "take_count": take_count, "properties": props }))
+}
+
+fn set_item_property(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    property: &str,
+    value: f64,
+) -> Result<Value, String> {
+    let key = lookup_key(ITEM_PROPS, property)
+        .ok_or_else(|| format!("unknown item property '{property}'"))?;
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.SetMediaItemInfo_Value(item.as_ptr(), key.as_ptr(), value) };
+    unsafe { low.UpdateItemInProject(item.as_ptr()) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set item {item_index} {property}"),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+    if ok {
+        Ok(json!({ "set": true, "item_index": item_index, "property": property, "value": value }))
+    } else {
+        Err(format!("failed to set item property '{property}'"))
+    }
+}
+
+fn get_take_properties(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, take_index)?;
+    let low = reaper.low();
+    let tp = take.as_ptr();
+    let mut props = serde_json::Map::new();
+    for &(name, key) in TAKE_PROPS {
+        let v = unsafe { low.GetMediaItemTakeInfo_Value(tp, key.as_ptr()) };
+        props.insert(name.to_string(), json!(v));
+    }
+    let name = take_name(reaper, take);
+    let source = unsafe { low.GetMediaItemTake_Source(tp) };
+    let (source_len, is_qn, source_file) = if source.is_null() {
+        (0.0, false, String::new())
+    } else {
+        let mut lengthis_qn = false;
+        let len = unsafe { low.GetMediaSourceLength(source, &mut lengthis_qn) };
+        let file = read_string(4096, |b, s| {
+            unsafe { low.GetMediaSourceFileName(source, b, s) };
+            true
+        })
+        .unwrap_or_default();
+        (len, lengthis_qn, file)
+    };
+    Ok(json!({
+        "item_index": item_index,
+        "take_index": take_index,
+        "name": name,
+        "properties": props,
+        "source_length": source_len,
+        "source_length_is_qn": is_qn,
+        "source_file": source_file,
+    }))
+}
+
+fn set_take_property(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    property: &str,
+    value: Option<f64>,
+    text: Option<&str>,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, take_index)?;
+    let low = reaper.low();
+    let tp = take.as_ptr();
+    if property == "name" {
+        let text = text.ok_or_else(|| "property 'name' requires 'text'".to_string())?;
+        if text.as_bytes().contains(&0) {
+            return Err("'text' contains a NUL byte".to_string());
+        }
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0);
+        reaper.undo_begin_block_2(project);
+        let ok = unsafe {
+            low.GetSetMediaItemTakeInfo_String(
+                tp,
+                c"P_NAME".as_ptr(),
+                bytes.as_mut_ptr() as *mut c_char,
+                true,
+            )
+        };
+        reaper.undo_end_block_2(
+            project,
+            format!("AI: rename take of item {item_index}"),
+            UndoScope::All,
+        );
+        reaper.update_arrange();
+        return if ok {
+            Ok(json!({ "set": true, "item_index": item_index, "property": "name", "text": text }))
+        } else {
+            Err("failed to set take name".to_string())
+        };
+    }
+    let key = lookup_key(TAKE_PROPS, property)
+        .ok_or_else(|| format!("unknown take property '{property}'"))?;
+    let value = value.ok_or_else(|| format!("property '{property}' requires 'value'"))?;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.SetMediaItemTakeInfo_Value(tp, key.as_ptr(), value) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set take {property} of item {item_index}"),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+    if ok {
+        Ok(json!({ "set": true, "item_index": item_index, "property": property, "value": value }))
+    } else {
+        Err(format!("failed to set take property '{property}'"))
+    }
+}
+
+fn set_active_take(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    take_index: u32,
+) -> Result<Value, String> {
+    if take_index > i32::MAX as u32 {
+        return Err(format!("take index {take_index} out of range"));
+    }
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    let ptr = unsafe { low.GetTake(item.as_ptr(), take_index as c_int) };
+    let take = MediaItemTake::new(ptr).ok_or_else(|| format!("no take at index {take_index}"))?;
+    reaper.undo_begin_block_2(project);
+    unsafe { low.SetActiveTake(take.as_ptr()) };
+    unsafe { low.UpdateItemInProject(item.as_ptr()) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set active take {take_index} on item {item_index}"),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+    Ok(json!({ "set": true, "item_index": item_index, "take_index": take_index }))
+}
+
+fn get_track_properties(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+) -> Result<Value, String> {
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    let trp = track.as_ptr();
+    let mut props = serde_json::Map::new();
+    for &(name, key) in TRACK_PROPS {
+        let v = unsafe { low.GetMediaTrackInfo_Value(trp, key.as_ptr()) };
+        props.insert(name.to_string(), json!(v));
+    }
+    Ok(json!({ "track_index": track_index, "name": track_name(reaper, track), "properties": props }))
+}
+
+fn set_track_property(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    property: &str,
+    value: Option<f64>,
+    text: Option<&str>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    if property == "name" {
+        let text = text.ok_or_else(|| "property 'name' requires 'text'".to_string())?;
+        if text.as_bytes().contains(&0) {
+            return Err("'text' contains a NUL byte".to_string());
+        }
+        reaper.undo_begin_block_2(project);
+        unsafe { reaper.get_set_media_track_info_set_name(track, text) };
+        reaper.undo_end_block_2(
+            project,
+            format!("AI: rename track {track_index}"),
+            UndoScope::All,
+        );
+        return Ok(json!({ "set": true, "track_index": track_index, "property": "name", "text": text }));
+    }
+    let key = lookup_key(TRACK_PROPS, property)
+        .ok_or_else(|| format!("unknown track property '{property}'"))?;
+    let value = value.ok_or_else(|| format!("property '{property}' requires 'value'"))?;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.SetMediaTrackInfo_Value(track.as_ptr(), key.as_ptr(), value) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set track {track_index} {property}"),
+        UndoScope::All,
+    );
+    // Visibility/height/folder changes only take visual effect after a layout pass.
+    low.TrackList_AdjustWindows(false);
+    reaper.update_arrange();
+    if ok {
+        Ok(json!({ "set": true, "track_index": track_index, "property": property, "value": value }))
+    } else {
+        Err(format!("failed to set track property '{property}'"))
+    }
+}
+
+fn get_track_group_membership(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+) -> Result<Value, String> {
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    let trp = track.as_ptr();
+    let mut groups = serde_json::Map::new();
+    for key in GROUP_PARAMS {
+        let lo = unsafe { low.GetSetTrackGroupMembership(trp, key.as_ptr(), 0, 0) };
+        let hi = unsafe { low.GetSetTrackGroupMembershipHigh(trp, key.as_ptr(), 0, 0) };
+        if lo == 0 && hi == 0 {
+            continue;
+        }
+        let mut nums = Vec::new();
+        for b in 0..32u32 {
+            if lo & (1u32 << b) != 0 {
+                nums.push(b + 1);
+            }
+        }
+        for b in 0..32u32 {
+            if hi & (1u32 << b) != 0 {
+                nums.push(b + 33);
+            }
+        }
+        groups.insert(key.to_str().unwrap_or_default().to_string(), json!(nums));
+    }
+    Ok(json!({
+        "track_index": track_index,
+        "groups": groups,
+        "note": "each entry lists the group numbers (1..64) the track belongs to for that parameter",
+    }))
+}
+
+fn set_track_group_membership(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    group: u32,
+    param: &str,
+    member: bool,
+) -> Result<Value, String> {
+    if !(1..=64).contains(&group) {
+        return Err("group must be between 1 and 64".to_string());
+    }
+    if !GROUP_PARAM_NAMES.contains(&param) {
+        return Err(format!(
+            "unknown group parameter '{param}'; expected one of e.g. VOLUME_LEAD, VOLUME_FOLLOW, \
+             MUTE_FOLLOW, SOLO_LEAD, VOLUME_VCA_LEAD, VOLUME_VCA_FOLLOW"
+        ));
+    }
+    let param_c = CString::new(param).map_err(|_| "invalid param".to_string())?;
+    let project = ProjectContext::CurrentProject;
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    let trp = track.as_ptr();
+    reaper.undo_begin_block_2(project);
+    let previous = if group <= 32 {
+        let bit = 1u32 << (group - 1);
+        let val = if member { bit } else { 0 };
+        unsafe { low.GetSetTrackGroupMembership(trp, param_c.as_ptr(), bit, val) }
+    } else {
+        let bit = 1u32 << (group - 33);
+        let val = if member { bit } else { 0 };
+        unsafe { low.GetSetTrackGroupMembershipHigh(trp, param_c.as_ptr(), bit, val) }
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set track {track_index} {param} group {group}"),
+        UndoScope::All,
+    );
+    Ok(json!({
+        "set": true, "track_index": track_index, "group": group, "param": param,
+        "member": member, "previous_mask": previous
+    }))
+}
+
+fn group_items(
+    reaper: &Reaper<MainThreadScope>,
+    item_indices: &[u32],
+    group_id: Option<i64>,
+) -> Result<Value, String> {
+    if item_indices.is_empty() {
+        return Err("provide at least one item index".to_string());
+    }
+    let project = ProjectContext::CurrentProject;
+    let items: Vec<MediaItem> = item_indices
+        .iter()
+        .map(|&i| item_at(reaper, i))
+        .collect::<Result<_, _>>()?;
+    let low = reaper.low();
+    let gid = match group_id {
+        Some(g) => g as f64,
+        None => {
+            // Allocate a fresh group id: one past the largest in use.
+            let mut max_g = 0i64;
+            for i in 0..reaper.count_media_items(project) {
+                if let Some(it) = reaper.get_media_item(project, i) {
+                    let g = unsafe { low.GetMediaItemInfo_Value(it.as_ptr(), c"I_GROUPID".as_ptr()) }
+                        as i64;
+                    max_g = max_g.max(g);
+                }
+            }
+            (max_g + 1) as f64
+        }
+    };
+    reaper.undo_begin_block_2(project);
+    for it in &items {
+        unsafe { low.SetMediaItemInfo_Value(it.as_ptr(), c"I_GROUPID".as_ptr(), gid) };
+    }
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: group {} item(s)", items.len()),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+    Ok(json!({ "grouped": items.len(), "group_id": gid as i64 }))
+}
+
+fn copy_item(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    dest_track_index: Option<u32>,
+    position: Option<f64>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    // Resolve the destination track before opening the undo block.
+    let dest_track = match dest_track_index {
+        Some(ti) => track_at(reaper, ti)?,
+        None => {
+            let ptr = unsafe { low.GetMediaItemTrack(item.as_ptr()) };
+            MediaTrack::new(ptr).ok_or_else(|| "could not resolve the source track".to_string())?
+        }
+    };
+    let chunk = read_chunk(|b, s| unsafe { low.GetItemStateChunk(item.as_ptr(), b, s, false) })
+        .ok_or_else(|| "could not read the item's state chunk".to_string())?;
+    // Strip the item/take GUID lines so REAPER assigns fresh ones to the copy.
+    let chunk = strip_chunk_lines(&chunk, &["IGUID", "GUID"]);
+    let chunk_c = CString::new(chunk).map_err(|_| "item chunk contains a NUL byte".to_string())?;
+    reaper.undo_begin_block_2(project);
+    let new_item = MediaItem::new(unsafe { low.AddMediaItemToTrack(dest_track.as_ptr()) });
+    let ok = match new_item {
+        Some(ni) => {
+            let set_ok = unsafe { low.SetItemStateChunk(ni.as_ptr(), chunk_c.as_ptr(), false) };
+            if set_ok {
+                if let Some(pos) = position {
+                    unsafe { low.SetMediaItemInfo_Value(ni.as_ptr(), c"D_POSITION".as_ptr(), pos) };
+                }
+                unsafe { low.UpdateItemInProject(ni.as_ptr()) };
+            } else {
+                // Roll back the blank item we just added so we don't leave junk.
+                unsafe { low.DeleteTrackMediaItem(dest_track.as_ptr(), ni.as_ptr()) };
+            }
+            set_ok
+        }
+        None => false,
+    };
+    reaper.undo_end_block_2(project, format!("AI: copy item {item_index}"), UndoScope::All);
+    reaper.update_arrange();
+    if !ok {
+        return Err("failed to copy item".to_string());
+    }
+    let new_index = new_item.and_then(|ni| media_item_index_map(reaper).get(&ni).copied());
+    Ok(json!({ "copied": true, "source_item_index": item_index, "new_item_index": new_index }))
+}
+
+fn move_item(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    dest_track_index: Option<u32>,
+    position: Option<f64>,
+) -> Result<Value, String> {
+    if dest_track_index.is_none() && position.is_none() {
+        return Err("provide dest_track_index and/or position".to_string());
+    }
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    // Resolve destination before the undo block so failures stay balanced.
+    let dest = match dest_track_index {
+        Some(ti) => Some(track_at(reaper, ti)?),
+        None => None,
+    };
+    let low = reaper.low();
+    reaper.undo_begin_block_2(project);
+    let mut reparented = false;
+    if let Some(d) = dest {
+        reparented = unsafe { low.MoveMediaItemToTrack(item.as_ptr(), d.as_ptr()) };
+    }
+    if let Some(pos) = position {
+        unsafe { low.SetMediaItemInfo_Value(item.as_ptr(), c"D_POSITION".as_ptr(), pos) };
+    }
+    unsafe { low.UpdateItemInProject(item.as_ptr()) };
+    reaper.undo_end_block_2(project, format!("AI: move item {item_index}"), UndoScope::All);
+    reaper.update_arrange();
+    let new_index = media_item_index_map(reaper).get(&item).copied();
+    Ok(json!({ "moved": true, "item_index": new_index, "track_changed": reparented }))
+}
+
+fn delete_item(reaper: &Reaper<MainThreadScope>, item_index: u32) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    let track = MediaTrack::new(unsafe { low.GetMediaItemTrack(item.as_ptr()) })
+        .ok_or_else(|| "could not resolve the item's track".to_string())?;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.DeleteTrackMediaItem(track.as_ptr(), item.as_ptr()) };
+    reaper.undo_end_block_2(project, format!("AI: delete item {item_index}"), UndoScope::All);
+    reaper.update_arrange();
+    if ok {
+        Ok(json!({ "deleted": true, "item_index": item_index }))
+    } else {
+        Err("failed to delete item".to_string())
+    }
+}
+
+fn duplicate_track(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let src = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    let chunk = read_chunk(|b, s| unsafe { low.GetTrackStateChunk(src.as_ptr(), b, s, false) })
+        .ok_or_else(|| "could not read the track's state chunk".to_string())?;
+    // Strip the track's own GUID so the duplicate gets a fresh TRACKID; a
+    // collision would break routing / grouping / VCA references keyed by GUID.
+    let chunk = strip_chunk_lines(&chunk, &["TRACKID"]);
+    let chunk_c = CString::new(chunk).map_err(|_| "track chunk contains a NUL byte".to_string())?;
+    let new_idx = track_index + 1;
+    reaper.undo_begin_block_2(project);
+    reaper.insert_track_at_index(new_idx, TrackDefaultsBehavior::OmitDefaultEnvAndFx);
+    let result = match reaper.get_track(project, new_idx) {
+        Some(new_track) => {
+            if unsafe { low.SetTrackStateChunk(new_track.as_ptr(), chunk_c.as_ptr(), false) } {
+                Ok(new_idx)
+            } else {
+                Err("failed to apply the track chunk to the new track".to_string())
+            }
+        }
+        None => Err("could not fetch the inserted track".to_string()),
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: duplicate track {track_index}"),
+        UndoScope::All,
+    );
+    low.TrackList_AdjustWindows(false);
+    reaper.update_arrange();
+    result.map(|ni| json!({ "duplicated": true, "source_track_index": track_index, "new_track_index": ni }))
+}
+
+fn delete_track(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = track_at(reaper, track_index)?;
+    reaper.undo_begin_block_2(project);
+    unsafe { reaper.delete_track(track) };
+    reaper.undo_end_block_2(project, format!("AI: delete track {track_index}"), UndoScope::All);
+    reaper.low().TrackList_AdjustWindows(false);
+    reaper.update_arrange();
+    Ok(json!({ "deleted": true, "track_index": track_index }))
+}
+
+fn copy_take(
+    reaper: &Reaper<MainThreadScope>,
+    src_item_index: u32,
+    dest_item_index: u32,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let src_item = item_at(reaper, src_item_index)?;
+    let dest_item = item_at(reaper, dest_item_index)?;
+    let src_take = resolve_take(reaper, src_item, take_index)?;
+    let low = reaper.low();
+    let stp = src_take.as_ptr();
+    let source = unsafe { low.GetMediaItemTake_Source(stp) };
+    if source.is_null() {
+        return Err("the source take has no media source".to_string());
+    }
+    // Recreating from the file loses section/reverse trimming, so refuse those.
+    let src_type = {
+        let mut buf = vec![0u8; 64];
+        unsafe { low.GetMediaSourceType(source, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+        buf_to_string(&buf)
+    };
+    if src_type.eq_ignore_ascii_case("SECTION") {
+        return Err(
+            "copy_take cannot faithfully copy a section/reverse take source; use copy_item to \
+             duplicate the whole item."
+                .to_string(),
+        );
+    }
+    let file = read_string(4096, |b, s| {
+        unsafe { low.GetMediaSourceFileName(source, b, s) };
+        true
+    })
+    .unwrap_or_default();
+    if file.trim().is_empty() {
+        return Err(
+            "copy_take supports file-based audio takes; this take has an in-project source \
+             (e.g. MIDI). Use copy_item to duplicate the whole item."
+                .to_string(),
+        );
+    }
+    let file_c = CString::new(file).map_err(|_| "source filename contains a NUL byte".to_string())?;
+    let take_name_src = take_name(reaper, src_take);
+    // Remember the destination's active take so the copy lands as an inactive take.
+    let prior_active = unsafe { reaper.get_active_take(dest_item) };
+    // Create the source before opening the undo block; destroy it if we bail.
+    let new_src = unsafe { low.PCM_Source_CreateFromFile(file_c.as_ptr()) };
+    if new_src.is_null() {
+        return Err("could not create a source from the take's file".to_string());
+    }
+    reaper.undo_begin_block_2(project);
+    let new_take_ptr = unsafe { low.AddTakeToMediaItem(dest_item.as_ptr()) };
+    if new_take_ptr.is_null() {
+        unsafe { low.PCM_Source_Destroy(new_src) };
+        reaper.undo_end_block_2(project, "AI: copy take (failed)".to_string(), UndoScope::All);
+        return Err("could not add a take to the destination item".to_string());
+    }
+    if !unsafe { low.SetMediaItemTake_Source(new_take_ptr, new_src) } {
+        // Source not adopted — free it so we don't leak, and report failure.
+        unsafe { low.PCM_Source_Destroy(new_src) };
+        reaper.undo_end_block_2(project, "AI: copy take (failed)".to_string(), UndoScope::All);
+        return Err("could not attach the source to the new take".to_string());
+    }
+    for key in TAKE_COPY_KEYS {
+        let v = unsafe { low.GetMediaItemTakeInfo_Value(stp, key.as_ptr()) };
+        unsafe { low.SetMediaItemTakeInfo_Value(new_take_ptr, key.as_ptr(), v) };
+    }
+    if !take_name_src.is_empty() {
+        if let Ok(name_c) = CString::new(take_name_src) {
+            let mut bytes = name_c.into_bytes_with_nul();
+            unsafe {
+                low.GetSetMediaItemTakeInfo_String(
+                    new_take_ptr,
+                    c"P_NAME".as_ptr(),
+                    bytes.as_mut_ptr() as *mut c_char,
+                    true,
+                )
+            };
+        }
+    }
+    // Keep the previously-active take active (if the item had one).
+    if let Some(pa) = prior_active {
+        unsafe { low.SetActiveTake(pa.as_ptr()) };
+    }
+    unsafe { low.UpdateItemInProject(dest_item.as_ptr()) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: copy take to item {dest_item_index}"),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+    let new_take_index = unsafe { low.CountTakes(dest_item.as_ptr()) } - 1;
+    Ok(json!({
+        "copied": true,
+        "src_item_index": src_item_index,
+        "dest_item_index": dest_item_index,
+        "new_take_index": new_take_index,
+    }))
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 fn selected_track_set(reaper: &Reaper<MainThreadScope>) -> std::collections::HashSet<MediaTrack> {
@@ -2334,6 +3462,36 @@ fn track_name(reaper: &Reaper<MainThreadScope>, track: MediaTrack) -> String {
     .unwrap_or_default()
 }
 
+/// Read a take's name via the pointer-returning `GetTakeName` (medium wrapper).
+/// This avoids the caller-sized-buffer `GetSetMediaItemTakeInfo_String(P_NAME)`
+/// form, which has no length argument and would overflow on a long name.
+fn take_name(reaper: &Reaper<MainThreadScope>, take: MediaItemTake) -> String {
+    reaper.get_take_name(take, |r| {
+        r.map(|s| reaper_string(s.as_c_str().to_bytes())).unwrap_or_default()
+    })
+}
+
+/// Drop chunk lines whose first whitespace-delimited token is one of `keys`, so
+/// REAPER assigns fresh identifiers (GUIDs) when the chunk is re-applied to a
+/// duplicate — otherwise the copy shares the source's GUID, corrupting anything
+/// that resolves objects by GUID (routing, grouping/VCA, associations).
+fn strip_chunk_lines(chunk: &str, keys: &[&str]) -> String {
+    let mut out = String::with_capacity(chunk.len());
+    for line in chunk.lines() {
+        let token = line
+            .trim_start()
+            .split(|c: char| c.is_whitespace())
+            .next()
+            .unwrap_or("");
+        if keys.contains(&token) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 fn track_location_json(loc: TrackLocation) -> Value {
     match loc {
         TrackLocation::MasterTrack => json!("master"),
@@ -2365,6 +3523,30 @@ fn read_string(cap: usize, f: impl FnOnce(*mut c_char, c_int) -> bool) -> Option
     Some(reaper_string(&buf[..end]))
 }
 
+/// Read a REAPER state chunk via a fill-a-buffer call, growing the buffer until
+/// the whole chunk fits (chunks are unbounded — a busy track can be MBs). These
+/// "NeedBig" APIs silently truncate (still returning success) when the buffer is
+/// too small, so completeness is judged by whether the buffer was left
+/// *unfilled*: REAPER stops early only when it has written the entire chunk, so
+/// at least one spare byte past the NUL terminator proves nothing was cut off.
+/// Relying on a trailing `>` is unsound — chunks are full of nested `>` lines.
+fn read_chunk(f: impl Fn(*mut c_char, c_int) -> bool) -> Option<String> {
+    let mut cap: usize = 512 * 1024;
+    let max: usize = 64 * 1024 * 1024;
+    loop {
+        let mut buf = vec![0u8; cap];
+        let ok = f(buf.as_mut_ptr() as *mut c_char, cap as c_int);
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(cap);
+        if ok && end < cap - 1 {
+            return Some(reaper_string(&buf[..end]));
+        }
+        if cap >= max {
+            return None; // give up rather than apply a possibly-truncated chunk
+        }
+        cap *= 2;
+    }
+}
+
 /// # Safety
 /// `ptr` must be null or a valid NUL-terminated C string owned by REAPER.
 unsafe fn cstr_to_string(ptr: *const c_char) -> String {
@@ -2392,6 +3574,10 @@ fn req_i64(input: &Value, key: &str) -> Result<i64, String> {
 
 fn opt_usize(input: &Value, key: &str) -> Option<usize> {
     input.get(key).and_then(|v| v.as_u64()).map(|n| n as usize)
+}
+
+fn opt_u32(input: &Value, key: &str) -> Option<u32> {
+    input.get(key).and_then(|v| v.as_u64()).map(|n| n as u32)
 }
 
 fn opt_bool(input: &Value, key: &str) -> Option<bool> {

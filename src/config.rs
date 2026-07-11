@@ -67,11 +67,17 @@ pub fn system_prompt() -> String {
      the focused FX window, MIDI notes of a take, a track's sends/receives, and \
      its automation envelopes and points, project and per-track notes, project \
      markers and regions, the tempo/time-signature map, a take's stretch markers, \
-     and the project's render settings) and make changes through mutating \
+     the project's render settings, and item/take/track properties and \
+     grouping) and make changes through mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
      notes, create a MIDI item, add/adjust/remove track sends, write \
      automation points, add/delete markers and regions, edit the tempo map and \
-     project tempo, add/delete take stretch markers, and change render settings). \
+     project tempo, add/delete take stretch markers, change render settings, \
+     edit item properties (fades, length, mute, loop, snap, color), take \
+     properties (start offset, rate, pitch, pan, channel mode, name), and track \
+     settings (visibility, height, folder nesting, mute/solo, color, name); \
+     copy/move/delete items, copy a take, duplicate/delete tracks, and manage \
+     track groups and item groups). \
      When composing MIDI, read the existing take (and its \
      neighbouring items via include_neighbors) first so new material fits the \
      key, tempo, and surrounding parts. When a question depends on the \

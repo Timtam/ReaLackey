@@ -29,6 +29,7 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 | **Phase 4:** MIDI composition + track routing | ✅ code complete |
 | **+ Automation:** envelopes read/write + automation items | ✅ code complete |
 | **+ Arrangement:** markers/regions, tempo map, stretch markers, render settings | ✅ code complete |
+| **+ Editing:** item/take/track properties, grouping, copy/move/delete | ✅ code complete |
 
 **Read tools** (main thread, results fed back to the model): `get_project_summary`,
 `get_tracks`, `get_track_fx`, `get_fx_params`, `get_selected_items`,
@@ -36,7 +37,9 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 `get_take_midi` (notes, optionally incl. neighbouring items), `get_track_sends`,
 `get_track_envelopes`, `get_envelope_points`, `get_automation_items`,
 `get_project_notes`, `get_track_notes`, `get_project_memory`,
-`get_markers`, `get_tempo_markers`, `get_stretch_markers`, `get_render_settings`.
+`get_markers`, `get_tempo_markers`, `get_stretch_markers`, `get_render_settings`,
+`get_item_properties`, `get_take_properties`, `get_track_properties`,
+`get_track_group_membership`.
 
 **Per-project notes & memory:** the assistant can read/append the project's Notes
 and per-track notes (undo-wrapped), and keeps a **persistent per-project memory**
@@ -50,7 +53,11 @@ confirmation-gated), so the assistant can track progress freely.
 `add_send`, `set_send_param`, `remove_send`; automation: `insert_envelope_point`;
 markers/regions: `add_marker`, `add_region`, `delete_marker`; tempo map:
 `add_tempo_marker`, `delete_tempo_marker`, `set_project_tempo`; stretch markers:
-`add_stretch_marker`, `delete_stretch_marker`; render: `set_render_setting`.
+`add_stretch_marker`, `delete_stretch_marker`; render: `set_render_setting`;
+item/take/track editing: `set_item_property`, `set_take_property`,
+`set_active_take`, `set_track_property`, `set_track_group_membership`,
+`group_items`; arrangement edits: `copy_item`, `move_item`, `delete_item`,
+`copy_take`, `duplicate_track`, `delete_track`.
 Every change is shown to the user
 for confirmation (a native, screen-reader-accessible Yes/No box) and wrapped in
 a **labelled Undo block** (`AI: …`) so both the user and the assistant can revert
