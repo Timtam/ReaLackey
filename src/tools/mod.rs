@@ -880,19 +880,22 @@ pub fn definitions() -> Vec<ToolDef> {
             description: "Analyse PROCESSED (post-FX) audio by doing a short offline render and \
                           measuring the result — the same metrics as analyze_track_audio (peak/RMS, \
                           loudness LUFS, clipping, spectral profile) but WITH the FX applied. \
-                          target 'master' renders the full mix (all track FX + master FX); target \
-                          'track' (with track_index) renders that track through its FX and the \
-                          master. This performs a brief offline render (it may momentarily show a \
-                          progress bar), is capped at 30 s, and saves/restores your render settings \
-                          and track selection. Use this when the user asks about the processed or \
-                          final sound; use analyze_track_audio for the raw pre-FX source."
+                          target 'master' renders the full mix (all track FX + master FX); 'track' \
+                          (with track_index) renders that track through its FX and the master; \
+                          'item' (with item_index) renders that item through its take FX and its \
+                          track's FX (no master). This performs a brief offline render (it may \
+                          momentarily show a progress bar) and saves/restores your render settings \
+                          and selection. master/track are capped at 30 s; an item renders its full \
+                          length (up to ~2 min). Use this for the processed/final sound; use \
+                          analyze_track_audio or analyze_item_audio for the raw pre-FX source."
                 .into(),
             input_schema: obj(
                 json!({
-                    "target": { "type": "string", "enum": ["master", "track"], "description": "'master' for the full mix, 'track' for one track's processed output" },
+                    "target": { "type": "string", "enum": ["master", "track", "item"], "description": "'master' = full mix, 'track' = one track's processed output, 'item' = one item through its take+track FX" },
                     "track_index": { "type": "integer", "description": "required when target is 'track'" },
-                    "start": { "type": "number", "description": "start in seconds (default: time selection or 0)" },
-                    "length": { "type": "number", "description": "seconds to render (default: content/selection, capped at 30 s)" }
+                    "item_index": { "type": "integer", "description": "required when target is 'item'" },
+                    "start": { "type": "number", "description": "start in seconds for master/track (default: time selection or 0)" },
+                    "length": { "type": "number", "description": "seconds to render for master/track (default: content/selection, capped at 30 s)" }
                 }),
                 json!(["target"]),
             ),
@@ -1176,6 +1179,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_str(input, "target")?,
             opt_u32(input, "track_index"),
+            opt_u32(input, "item_index"),
             input.get("start").and_then(|v| v.as_f64()),
             input.get("length").and_then(|v| v.as_f64()),
         ),
@@ -3635,6 +3639,10 @@ fn analyze_track_audio(
 
 /// Default render window (seconds) when no time selection or explicit range.
 const PROCESSED_DEFAULT_SECONDS: f64 = 20.0;
+/// An item longer than this is rejected for a processed render (item renders
+/// span the whole item, so this bounds the temp-file size, the decode
+/// allocation, and the synchronous main-thread render/analysis time).
+const MAX_PROCESSED_ITEM_SECONDS: f64 = 120.0;
 /// Numeric render settings we override and must restore afterwards.
 const RENDER_NUM_KEYS: &[&CStr] = &[
     c"RENDER_SETTINGS",
@@ -3698,14 +3706,16 @@ struct RenderStateGuard<'a> {
     num: Vec<f64>,
     strs: Vec<Option<String>>,
     /// (selected non-master tracks, was the master track selected) — track probe only.
-    selection: Option<(std::collections::HashSet<MediaTrack>, bool)>,
+    track_selection: Option<(std::collections::HashSet<MediaTrack>, bool)>,
+    /// Selected media items — item probe only.
+    item_selection: Option<std::collections::HashSet<MediaItem>>,
     path: Option<String>,
 }
 
 impl Drop for RenderStateGuard<'_> {
     fn drop(&mut self) {
         let low = self.reaper.low();
-        if let Some((selected, master_selected)) = &self.selection {
+        if let Some((selected, master_selected)) = &self.track_selection {
             let project = ProjectContext::CurrentProject;
             for i in 0..self.reaper.count_tracks(project) {
                 if let Some(t) = self.reaper.get_track(project, i) {
@@ -3715,6 +3725,12 @@ impl Drop for RenderStateGuard<'_> {
             let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
             if !master.is_null() {
                 unsafe { low.SetTrackSelected(master, *master_selected) };
+            }
+        }
+        if let Some(items) = &self.item_selection {
+            unsafe { low.SelectAllMediaItems(CUR_PROJ, false) };
+            for it in items {
+                unsafe { low.SetMediaItemSelected(it.as_ptr(), true) };
             }
         }
         for (k, v) in RENDER_NUM_KEYS.iter().zip(&self.num) {
@@ -3733,85 +3749,130 @@ impl Drop for RenderStateGuard<'_> {
     }
 }
 
-/// Analyse PROCESSED (post-FX) audio: briefly render the master mix or a track's
-/// processed output to a temp WAV, decode + analyse it. All settings/selection
-/// changes are undone (and the temp file removed) by a Drop guard on every path.
+/// Analyse PROCESSED (post-FX) audio: briefly render the master mix, a track's
+/// processed output, or a single item (through its take + track FX) to a temp
+/// WAV, decode + analyse it. All settings/selection changes are undone (and the
+/// temp file removed) by a Drop guard on every path.
 fn analyze_processed_audio(
     reaper: &Reaper<MainThreadScope>,
     target: &str,
     track_index: Option<u32>,
+    item_index: Option<u32>,
     param_start: Option<f64>,
     param_length: Option<f64>,
 ) -> Result<Value, String> {
-    let track = match target {
-        "master" => None,
+    let (track, item) = match target {
+        "master" => (None, None),
         "track" => {
             let ti = track_index.ok_or_else(|| "target 'track' requires track_index".to_string())?;
-            Some(track_at(reaper, ti)?)
+            (Some(track_at(reaper, ti)?), None)
         }
-        other => return Err(format!("unknown target '{other}' (use 'master' or 'track')")),
+        "item" => {
+            let ii = item_index.ok_or_else(|| "target 'item' requires item_index".to_string())?;
+            (None, Some(item_at(reaper, ii)?))
+        }
+        other => {
+            return Err(format!("unknown target '{other}' (use 'master', 'track', or 'item')"))
+        }
     };
     let low = reaper.low();
 
-    // Work out the render window: explicit range, else the time selection, else
-    // from 0 for the project's content length — all capped at the analysis limit.
-    let (mut sel_start, mut sel_end) = (0.0f64, 0.0f64);
-    unsafe { low.GetSet_LoopTimeRange(false, false, &mut sel_start, &mut sel_end, false) };
-    let has_selection = sel_end > sel_start;
-    let rstart = param_start
-        .unwrap_or(if has_selection { sel_start } else { 0.0 })
-        .max(0.0);
-    let default_len = if has_selection && param_start.is_none() {
-        sel_end - sel_start
-    } else {
-        // Bound the default to the project's content length (master accessor end).
-        let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
-        let acc = unsafe { low.CreateTrackAudioAccessor(master) };
-        if acc.is_null() {
-            PROCESSED_DEFAULT_SECONDS
-        } else {
-            let end = unsafe { low.GetAudioAccessorEndTime(acc) };
-            unsafe { low.DestroyAudioAccessor(acc) };
-            let content = (end - rstart).max(0.0);
-            if content > 0.0 {
-                content
-            } else {
-                PROCESSED_DEFAULT_SECONDS
-            }
+    // Choose the render mode, bounds and window per target.
+    let render_settings: f64;
+    let bounds_flag: f64;
+    let rstart: f64;
+    let rlen: f64;
+    let truncated: bool;
+    let chain: &str;
+    if let Some(it) = item {
+        // 32 = render selected media items (through take FX + track FX, no master);
+        // 4 = selected-media-items bounds (renders the item over its own extent).
+        let pos = unsafe { low.GetMediaItemInfo_Value(it.as_ptr(), c"D_POSITION".as_ptr()) };
+        let len = unsafe { low.GetMediaItemInfo_Value(it.as_ptr(), c"D_LENGTH".as_ptr()) };
+        if !(pos.is_finite() && len.is_finite()) || len <= 0.0 {
+            return Err("item has an invalid or zero length".to_string());
         }
-    };
-    let requested_len = param_length.unwrap_or(default_len);
-    let rlen = requested_len.clamp(0.0, MAX_ANALYZE_SECONDS);
-    if !rstart.is_finite() || !rlen.is_finite() || rlen <= 0.0 {
-        return Err("invalid or empty render window".to_string());
+        if len > MAX_PROCESSED_ITEM_SECONDS {
+            return Err(format!(
+                "item is longer than {MAX_PROCESSED_ITEM_SECONDS:.0} s; analyse a track window instead"
+            ));
+        }
+        render_settings = 32.0;
+        bounds_flag = 4.0;
+        rstart = pos;
+        rlen = len;
+        truncated = false;
+        chain = "take FX + track FX";
+    } else {
+        // master / track: explicit range, else the time selection, else the
+        // project content, capped at the analysis limit; custom time bounds.
+        let (mut sel_start, mut sel_end) = (0.0f64, 0.0f64);
+        unsafe { low.GetSet_LoopTimeRange(false, false, &mut sel_start, &mut sel_end, false) };
+        let has_selection = sel_end > sel_start;
+        let start = param_start
+            .unwrap_or(if has_selection { sel_start } else { 0.0 })
+            .max(0.0);
+        let default_len = if has_selection && param_start.is_none() {
+            sel_end - sel_start
+        } else {
+            let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
+            let acc = unsafe { low.CreateTrackAudioAccessor(master) };
+            if acc.is_null() {
+                PROCESSED_DEFAULT_SECONDS
+            } else {
+                let end = unsafe { low.GetAudioAccessorEndTime(acc) };
+                unsafe { low.DestroyAudioAccessor(acc) };
+                let content = (end - start).max(0.0);
+                if content > 0.0 {
+                    content
+                } else {
+                    PROCESSED_DEFAULT_SECONDS
+                }
+            }
+        };
+        let requested_len = param_length.unwrap_or(default_len);
+        let len = requested_len.clamp(0.0, MAX_ANALYZE_SECONDS);
+        if !start.is_finite() || !len.is_finite() || len <= 0.0 {
+            return Err("invalid or empty render window".to_string());
+        }
+        render_settings = if track.is_some() { 128.0 } else { 0.0 };
+        bounds_flag = 0.0;
+        rstart = start;
+        rlen = len;
+        truncated = requested_len.is_finite() && requested_len > MAX_ANALYZE_SECONDS;
+        chain = if track.is_some() {
+            "track FX + master FX"
+        } else {
+            "full mix including master FX"
+        };
     }
     let rend = rstart + rlen;
-    let truncated = requested_len.is_finite() && requested_len > MAX_ANALYZE_SECONDS;
 
     // Snapshot BEFORE mutating; the guard restores everything on drop.
-    let selection_snapshot = track.map(|_| {
+    let track_selection = track.map(|_| {
         let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
         let master_selected = !master.is_null()
             && unsafe { low.GetMediaTrackInfo_Value(master, c"I_SELECTED".as_ptr()) } != 0.0;
         (selected_track_set(reaper), master_selected)
     });
+    let item_selection = item.map(|_| selected_item_set(reaper));
     let mut guard = RenderStateGuard {
         reaper,
         num: RENDER_NUM_KEYS.iter().map(|k| proj_info_get(low, k)).collect(),
         strs: RENDER_STR_KEYS.iter().map(|k| proj_info_str_snapshot(low, k)).collect(),
-        selection: selection_snapshot,
+        track_selection,
+        item_selection,
         path: None,
     };
 
     // Configure the render: WAV, 48 kHz stereo, no tail/normalize/dither/secondary,
-    // custom bounds, don't add to project. RENDER_SETTINGS 0 = master mix; 128 =
-    // selected tracks routed through the master.
+    // don't add to project.
     let tmp_dir = std::env::temp_dir().to_string_lossy().to_string();
     let base = format!("raai_render_probe_{}", std::process::id());
     proj_info_str_set(low, c"RENDER_FORMAT", "evaw");
     proj_info_str_set(low, c"RENDER_FORMAT2", "");
-    proj_info_set(low, c"RENDER_SETTINGS", if track.is_some() { 128.0 } else { 0.0 });
-    proj_info_set(low, c"RENDER_BOUNDSFLAG", 0.0);
+    proj_info_set(low, c"RENDER_SETTINGS", render_settings);
+    proj_info_set(low, c"RENDER_BOUNDSFLAG", bounds_flag);
     proj_info_set(low, c"RENDER_STARTPOS", rstart);
     proj_info_set(low, c"RENDER_ENDPOS", rend);
     proj_info_set(low, c"RENDER_SRATE", ANALYZE_SR as f64);
@@ -3824,6 +3885,10 @@ fn analyze_processed_audio(
     proj_info_str_set(low, c"RENDER_PATTERN", &base);
     if let Some(t) = track {
         unsafe { low.SetOnlyTrackSelected(t.as_ptr()) };
+    }
+    if let Some(it) = item {
+        unsafe { low.SelectAllMediaItems(CUR_PROJ, false) };
+        unsafe { low.SetMediaItemSelected(it.as_ptr(), true) };
     }
 
     // The target path reflects the settings we just applied; hand it to the guard
@@ -3852,13 +3917,8 @@ fn analyze_processed_audio(
     // `?` here drops `guard`, which restores settings/selection and deletes the file.
     let (samples, channels, sr) = outcome?;
     let features = crate::dsp::analyze(&samples, channels, sr);
-    let chain = if track.is_some() {
-        "track FX + master FX"
-    } else {
-        "full mix including master FX"
-    };
     Ok(audio_result_json(
-        json!({ "target": target, "track_index": track_index, "chain": chain }),
+        json!({ "target": target, "track_index": track_index, "item_index": item_index, "chain": chain }),
         rstart,
         rlen,
         truncated,
@@ -3869,6 +3929,17 @@ fn analyze_processed_audio(
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+fn selected_item_set(reaper: &Reaper<MainThreadScope>) -> std::collections::HashSet<MediaItem> {
+    let project = ProjectContext::CurrentProject;
+    let mut set = std::collections::HashSet::new();
+    for i in 0..reaper.count_selected_media_items(project) {
+        if let Some(it) = reaper.get_selected_media_item(project, i) {
+            set.insert(it);
+        }
+    }
+    set
+}
 
 fn selected_track_set(reaper: &Reaper<MainThreadScope>) -> std::collections::HashSet<MediaTrack> {
     let project = ProjectContext::CurrentProject;

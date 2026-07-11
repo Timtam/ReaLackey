@@ -70,8 +70,9 @@ pub fn system_prompt() -> String {
      the project's render settings, item/take/track properties and \
      grouping, and DSP audio analysis — loudness (LUFS), peak/RMS, clipping, \
      and a spectral profile — of a take or track's pre-FX source audio, or, via \
-     a brief offline render, of PROCESSED post-FX audio (a track's processed \
-     output or the full master mix incl. master FX)) and make changes through \
+     a brief offline render, of PROCESSED post-FX audio (an item through its \
+     take+track FX, a track's processed output, or the full master mix incl. \
+     master FX)) and make changes through \
      mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
      notes, create a MIDI item, add/adjust/remove track sends, write \

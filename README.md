@@ -80,7 +80,8 @@ reads are capped at 30 s.
 **Processed (post-FX) audio** — `analyze_processed_audio` returns the same metrics
 for audio *with* the FX applied, via a short offline render: `target: "master"`
 renders the full mix (all track FX + master FX); `target: "track"` renders one
-track through its FX and the master. It forces a temp WAV (`RENDER_FORMAT="evaw"`),
+track through its FX and the master; `target: "item"` renders one item through
+its take FX and its track's FX (no master). It forces a temp WAV (`RENDER_FORMAT="evaw"`),
 reads the exact output path from `RENDER_TARGETS`, renders with the "most recent
 render settings" action, decodes the WAV in Rust (a unit-tested parser), analyses
 it, deletes the temp file, and **saves/restores every render setting and the
