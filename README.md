@@ -23,17 +23,18 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 | tokio worker thread + main-thread pump (channels) | ✅ |
 | Native Anthropic Messages adapter, streaming SSE (`reqwest`+`serde`) | ✅ (parser unit-tested) |
 | API key entry (native input box) + OS credential-store storage | ✅ |
-| **Phase 1:** tool-use agent loop + read-only context tools | ✅ code complete |
+| **Phase 1:** tool-use agent loop | ✅ code complete |
+| **Phase 2:** plugin/FX + item read tools (incl. take FX) | ✅ code complete |
 
-**Phase 1 tools** (read-only, executed on the main thread and fed back to the
-model): `get_project_summary` (tempo, track/selection counts, cursor) and
-`get_tracks` (index, name, selected). Ask e.g. "how many tracks are in this
-project and which are selected?"
+**Read tools** (executed on the main thread, results fed back to the model):
+`get_project_summary`, `get_tracks`, `get_track_fx`, `get_fx_params`,
+`get_selected_items`, `get_take_fx`, `get_take_fx_params`, `list_installed_fx`,
+`get_focused_fx`. Ask e.g. *"what plugins are on the selected track and how is
+the EQ set?"* or *"describe the FX window I have open."*
 
-Later phases add: plugin advice (P2), safe Undo-wrapped mutations (P3), MIDI
-composition (P4), the shared OpenAI-compatible provider adapter (P5), audio
-analysis via JSFX probe + Rust DSP (P6), screen vision (P7), docking +
-distribution (P8).
+Later phases add: safe Undo-wrapped mutations (P3), MIDI composition (P4), the
+shared OpenAI-compatible provider adapter (P5), audio analysis via JSFX probe +
+Rust DSP (P6), screen vision (P7), docking + distribution (P8).
 
 ## Architecture
 

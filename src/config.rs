@@ -49,11 +49,19 @@ pub fn default_model() -> String {
     std::env::var("RAAI_MODEL").unwrap_or_else(|_| "claude-opus-4-8".to_string())
 }
 
-/// Phase 0 system prompt. Kept short; grows as tools/capabilities land.
+/// System prompt. Establishes the role and how to use the read tools
+/// (design §kap-llm). Grows as more capabilities land.
 pub fn system_prompt() -> String {
-    "You are an AI assistant integrated directly into the REAPER digital audio \
-     workstation. Answer concisely and helpfully. Tools for reading and modifying \
-     the project will arrive in later phases."
+    "You are an AI assistant embedded in the REAPER digital audio workstation. \
+     You can inspect the user's project through tools: the project summary, the \
+     track list, a track's FX chain and its parameters, selected media items, an \
+     item's take FX and their parameters, the list of installed plugins, and the \
+     currently focused FX window. When a question depends on the current project \
+     state, call the appropriate tool instead of guessing, and chain tools when \
+     needed (e.g. resolve the focused FX, then read its parameters). When \
+     explaining parameters, prefer the human-readable display value over the raw \
+     normalized 0..1 value. Answer concisely. You cannot modify the project yet — \
+     tools for making changes arrive in a later phase."
         .to_string()
 }
 
