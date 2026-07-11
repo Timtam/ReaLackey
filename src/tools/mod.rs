@@ -7,7 +7,7 @@
 //! (Undo-wrapped, confirmation-gated) arrive in Phase 3.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
 
 use reaper_medium::{
@@ -369,6 +369,81 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["track_index", "envelope_index", "time", "value"]),
             ),
         },
+        // --- notes & per-project memory ---
+        ToolDef {
+            name: "get_project_notes".into(),
+            description: "Read the project's Notes (the user-visible Project Notes field)."
+                .into(),
+            input_schema: empty(),
+        },
+        ToolDef {
+            name: "set_project_notes".into(),
+            description: "Write the project's Notes field. Appends by default (set append=false to \
+                          replace). Undo-wrapped so the user can revert."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "text": { "type": "string" },
+                    "append": { "type": "boolean", "description": "append (default true) vs replace" }
+                }),
+                json!(["text"]),
+            ),
+        },
+        ToolDef {
+            name: "get_track_notes".into(),
+            description: "Read the per-track notes the assistant stores on a track (persists in the project)."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_track_notes".into(),
+            description: "Set the per-track notes for a track (replaces; persists in the project). \
+                          Undo-wrapped."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "text": { "type": "string" }
+                }),
+                json!(["track_index", "text"]),
+            ),
+        },
+        ToolDef {
+            name: "get_project_memory".into(),
+            description: "Read the assistant's persistent per-project memory. With a key, returns \
+                          that entry's value; without a key, lists all key/value entries. Use this \
+                          at the start of a session to recall context and progress."
+                .into(),
+            input_schema: obj(
+                json!({ "key": { "type": "string", "description": "omit to list all entries" } }),
+                json!([]),
+            ),
+        },
+        ToolDef {
+            name: "set_project_memory".into(),
+            description: "Store a key/value entry in the assistant's persistent per-project memory \
+                          (saved in the project file). Use this to remember decisions, TODOs, and \
+                          progress across sessions. Not shown to the user and not confirmation-gated."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "key": { "type": "string" },
+                    "value": { "type": "string" }
+                }),
+                json!(["key", "value"]),
+            ),
+        },
+        ToolDef {
+            name: "delete_project_memory".into(),
+            description: "Delete an entry from the assistant's per-project memory.".into(),
+            input_schema: obj(
+                json!({ "key": { "type": "string" } }),
+                json!(["key"]),
+            ),
+        },
     ]
 }
 
@@ -483,6 +558,24 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_f64(input, "value")?,
             input.get("shape").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
         ),
+        // notes & per-project memory
+        "get_project_notes" => Ok(get_project_notes(reaper)),
+        "set_project_notes" => Ok(set_project_notes(
+            reaper,
+            req_str(input, "text")?,
+            opt_bool(input, "append").unwrap_or(true),
+        )),
+        "get_track_notes" => get_track_notes(reaper, req_u32(input, "track_index")?),
+        "set_track_notes" => {
+            set_track_notes(reaper, req_u32(input, "track_index")?, req_str(input, "text")?)
+        }
+        "get_project_memory" => get_project_memory(reaper, opt_str(input, "key")),
+        "set_project_memory" => set_project_memory(
+            reaper,
+            req_str(input, "key")?,
+            input.get("value").and_then(|v| v.as_str()).unwrap_or(""),
+        ),
+        "delete_project_memory" => delete_project_memory(reaper, req_str(input, "key")?),
         // undo / history
         "undo" => Ok(undo(reaper)),
         "redo" => Ok(redo(reaper)),
@@ -1386,6 +1479,162 @@ fn insert_envelope_point(
     }
 }
 
+// ---- notes & per-project memory ---------------------------------------------
+
+const NOTES_BUF: usize = 256 * 1024;
+const MEMORY_EXT: &CStr = c"REAPER_AI_Assistant";
+const TRACK_NOTES_KEY: &str = "raai_notes";
+
+fn read_project_notes(low: &reaper_low::Reaper) -> String {
+    read_string(NOTES_BUF, |b, s| {
+        unsafe { low.GetSetProjectNotes(std::ptr::null_mut(), false, b, s) };
+        true
+    })
+    .unwrap_or_default()
+}
+
+fn get_project_notes(reaper: &Reaper<MainThreadScope>) -> Value {
+    json!({ "notes": read_project_notes(reaper.low()) })
+}
+
+fn set_project_notes(reaper: &Reaper<MainThreadScope>, text: &str, append: bool) -> Value {
+    let low = reaper.low();
+    let new_text = if append {
+        let current = read_project_notes(low);
+        if current.trim().is_empty() {
+            text.to_string()
+        } else {
+            format!("{current}\n{text}")
+        }
+    } else {
+        text.to_string()
+    };
+    let mut bytes = new_text.into_bytes();
+    bytes.push(0); // NUL terminator
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    unsafe {
+        low.GetSetProjectNotes(
+            std::ptr::null_mut(),
+            true,
+            bytes.as_mut_ptr() as *mut c_char,
+            bytes.len() as c_int,
+        );
+    }
+    reaper.undo_end_block_2(project, "AI: update project notes".to_string(), UndoScope::All);
+    json!({ "saved": true, "appended": append })
+}
+
+fn get_track_notes(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Value, String> {
+    let track = reaper
+        .get_track(ProjectContext::CurrentProject, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let notes = unsafe {
+        reaper.get_set_media_track_info_get_ext(track, TRACK_NOTES_KEY, |s: &ReaperStr| {
+            reaper_string(s.as_c_str().to_bytes())
+        })
+    }
+    .unwrap_or_default();
+    Ok(json!({ "track_index": track_index, "notes": notes }))
+}
+
+fn set_track_notes(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    text: &str,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    reaper.undo_begin_block_2(project);
+    unsafe {
+        reaper.get_set_media_track_info_set_ext(track, TRACK_NOTES_KEY, text);
+    }
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: update notes for track {track_index}"),
+        UndoScope::All,
+    );
+    Ok(json!({ "saved": true, "track_index": track_index }))
+}
+
+fn get_project_memory(reaper: &Reaper<MainThreadScope>, key: Option<&str>) -> Result<Value, String> {
+    let low = reaper.low();
+    match key {
+        Some(k) => {
+            let key_c = CString::new(k).map_err(|_| "invalid key".to_string())?;
+            let value = read_string(NOTES_BUF, |b, s| unsafe {
+                low.GetProjExtState(std::ptr::null_mut(), MEMORY_EXT.as_ptr(), key_c.as_ptr(), b, s) > 0
+            })
+            .unwrap_or_default();
+            Ok(json!({ "key": k, "value": value }))
+        }
+        None => {
+            let mut entries = Vec::new();
+            let mut i: c_int = 0;
+            loop {
+                let mut keyb = vec![0u8; 1024];
+                let mut valb = vec![0u8; NOTES_BUF];
+                let ok = unsafe {
+                    low.EnumProjExtState(
+                        std::ptr::null_mut(),
+                        MEMORY_EXT.as_ptr(),
+                        i,
+                        keyb.as_mut_ptr() as *mut c_char,
+                        keyb.len() as c_int,
+                        valb.as_mut_ptr() as *mut c_char,
+                        valb.len() as c_int,
+                    )
+                };
+                if !ok {
+                    break;
+                }
+                entries.push(json!({ "key": buf_to_string(&keyb), "value": buf_to_string(&valb) }));
+                i += 1;
+                if i > 10_000 {
+                    break;
+                }
+            }
+            Ok(json!({ "memory": entries }))
+        }
+    }
+}
+
+fn set_project_memory(
+    reaper: &Reaper<MainThreadScope>,
+    key: &str,
+    value: &str,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    let key_c = CString::new(key).map_err(|_| "invalid key (contains a NUL byte)".to_string())?;
+    let val_c = CString::new(value).map_err(|_| "value contains a NUL byte".to_string())?;
+    unsafe {
+        low.SetProjExtState(
+            std::ptr::null_mut(),
+            MEMORY_EXT.as_ptr(),
+            key_c.as_ptr(),
+            val_c.as_ptr(),
+        );
+    }
+    Ok(json!({ "saved": true, "key": key }))
+}
+
+fn delete_project_memory(reaper: &Reaper<MainThreadScope>, key: &str) -> Result<Value, String> {
+    let low = reaper.low();
+    let key_c = CString::new(key).map_err(|_| "invalid key".to_string())?;
+    // An empty value removes the key.
+    unsafe {
+        low.SetProjExtState(std::ptr::null_mut(), MEMORY_EXT.as_ptr(), key_c.as_ptr(), c"".as_ptr());
+    }
+    Ok(json!({ "deleted": true, "key": key }))
+}
+
+fn buf_to_string(buf: &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    reaper_string(&buf[..end])
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 fn selected_track_set(reaper: &Reaper<MainThreadScope>) -> std::collections::HashSet<MediaTrack> {
@@ -1498,7 +1747,14 @@ fn opt_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn req_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
-    opt_str(input, key).ok_or_else(|| format!("missing or invalid '{key}' (expected a non-empty string)"))
+    let s = opt_str(input, key)
+        .ok_or_else(|| format!("missing or invalid '{key}' (expected a non-empty string)"))?;
+    // reaper-medium's ReaperStringArg panics on interior NUL bytes; reject them
+    // here so model input can never unwind across the FFI boundary.
+    if s.as_bytes().contains(&0) {
+        return Err(format!("'{key}' contains a NUL byte"));
+    }
+    Ok(s)
 }
 
 fn req_f64(input: &Value, key: &str) -> Result<f64, String> {

@@ -33,7 +33,15 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 `get_tracks`, `get_track_fx`, `get_fx_params`, `get_selected_items`,
 `get_take_fx`, `get_take_fx_params`, `list_installed_fx`, `get_focused_fx`,
 `get_take_midi` (notes, optionally incl. neighbouring items), `get_track_sends`,
-`get_track_envelopes`, `get_envelope_points`, `get_automation_items`.
+`get_track_envelopes`, `get_envelope_points`, `get_automation_items`,
+`get_project_notes`, `get_track_notes`, `get_project_memory`.
+
+**Per-project notes & memory:** the assistant can read/append the project's Notes
+and per-track notes (undo-wrapped), and keeps a **persistent per-project memory**
+(`get_project_memory` / `set_project_memory` / `delete_project_memory`) stored in
+the `.rpp` via project ext-state — a keyed scratchpad it uses to remember
+decisions, TODOs, and progress across sessions. Memory writes are metadata (not
+confirmation-gated), so the assistant can track progress freely.
 
 **Mutating tools** — FX: `add_fx`, `set_fx_param`, `set_fx_enabled`; MIDI:
 `insert_midi_notes` (quarter-note timing), `create_midi_item`; routing:

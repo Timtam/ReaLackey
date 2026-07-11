@@ -65,7 +65,8 @@ pub fn system_prompt() -> String {
      You can inspect the project through read tools (project summary, tracks, \
      track/take FX and their parameters, selected items, installed plugins, and \
      the focused FX window, MIDI notes of a take, a track's sends/receives, and \
-     its automation envelopes and points) and make changes through mutating \
+     its automation envelopes and points, plus project and per-track notes) and \
+     make changes through mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
      notes, create a MIDI item, add/adjust/remove track sends, and write \
      automation points). When composing MIDI, read the existing take (and its \
@@ -78,7 +79,11 @@ pub fn system_prompt() -> String {
      user for confirmation and is wrapped in a labelled undo block, so both you \
      and the user can undo it. You can undo/redo actions and read the recent-action \
      history (get_undo_history) to understand the user's workflow and suggest \
-     improvements. Answer concisely."
+     improvements. You have a persistent per-project memory saved in the \
+     project file: at the START of a session call get_project_memory to recall \
+     context, and use set_project_memory to record decisions, TODOs, and \
+     progress as you work. You can also read/append the project's Notes and \
+     per-track notes. Answer concisely."
         .to_string()
 }
 
