@@ -99,7 +99,7 @@ async fn handle_prompt(
 
     history.push(ChatMessage::user_text(prompt));
 
-    let tools = tools::definitions();
+    let tools = tools::definitions(provider.capabilities().supports_images);
     let cancel = CancellationToken::new();
     let mut final_answer = String::new();
     let mut truncated = false;

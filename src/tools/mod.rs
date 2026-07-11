@@ -87,13 +87,20 @@ impl ToolOutcome {
     }
 }
 
-/// Tool definitions advertised to the model.
-pub fn definitions() -> Vec<ToolDef> {
+/// A tool that only makes sense when the model can see images (Phase 7). These
+/// are withheld from models without vision (`supports_images == false`).
+fn is_vision_tool(name: &str) -> bool {
+    name == "capture_view" || is_pixel_tool(name) || name == "disable_pixel_control"
+}
+
+/// Tool definitions advertised to the model. Vision/pixel tools are only
+/// included when the active model can actually see images.
+pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
     let obj = |props: Value, required: Value| {
         json!({ "type": "object", "properties": props, "required": required })
     };
     let empty = || json!({ "type": "object", "properties": {} });
-    vec![
+    let mut defs = vec![
         ToolDef {
             name: "get_project_summary".into(),
             description: "Lightweight snapshot of the current REAPER project: project name and \
@@ -1102,7 +1109,11 @@ pub fn definitions() -> Vec<ToolDef> {
                 .into(),
             input_schema: empty(),
         },
-    ]
+    ];
+    if !supports_images {
+        defs.retain(|d| !is_vision_tool(&d.name));
+    }
+    defs
 }
 
 /// Execute a tool by name on the main thread. Never panics.
