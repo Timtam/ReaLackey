@@ -313,6 +313,62 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["track_index", "send_index"]),
             ),
         },
+        // --- automation / envelopes (Phase 5) ---
+        ToolDef {
+            name: "get_track_envelopes".into(),
+            description: "List a track's automation envelopes (index, name, point count, \
+                          automation-item count)."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "get_envelope_points".into(),
+            description: "Read the points of a track envelope: time (seconds), value (in the \
+                          envelope's native units), shape, tension, selected."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "envelope_index": { "type": "integer" },
+                    "limit": { "type": "integer", "description": "max points (default 200)" }
+                }),
+                json!(["track_index", "envelope_index"]),
+            ),
+        },
+        ToolDef {
+            name: "get_automation_items".into(),
+            description: "List the automation items on a track envelope (position, length, \
+                          play rate, pool id)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "envelope_index": { "type": "integer" }
+                }),
+                json!(["track_index", "envelope_index"]),
+            ),
+        },
+        ToolDef {
+            name: "insert_envelope_point".into(),
+            description: "Insert (or replace) an automation point on a track envelope. CHANGES the \
+                          project (confirmed + undo-wrapped). Read get_envelope_points first to \
+                          understand the value scale. shape: 0=linear, 1=square, 2=slow, 3=fast \
+                          start, 4=fast end, 5=bezier."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "envelope_index": { "type": "integer" },
+                    "time": { "type": "number", "description": "position in seconds" },
+                    "value": { "type": "number", "description": "value in the envelope's native units" },
+                    "shape": { "type": "integer", "description": "0=linear (default) .. 5=bezier" }
+                }),
+                json!(["track_index", "envelope_index", "time", "value"]),
+            ),
+        },
     ]
 }
 
@@ -406,6 +462,27 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "track_index")?,
             req_u32(input, "send_index")?,
         ),
+        // automation / envelopes
+        "get_track_envelopes" => get_track_envelopes(reaper, req_u32(input, "track_index")?),
+        "get_envelope_points" => get_envelope_points(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "envelope_index")?,
+            opt_usize(input, "limit").unwrap_or(DEFAULT_LIMIT),
+        ),
+        "get_automation_items" => get_automation_items(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "envelope_index")?,
+        ),
+        "insert_envelope_point" => insert_envelope_point(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "envelope_index")?,
+            req_f64(input, "time")?,
+            req_f64(input, "value")?,
+            input.get("shape").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
+        ),
         // undo / history
         "undo" => Ok(undo(reaper)),
         "redo" => Ok(redo(reaper)),
@@ -472,6 +549,13 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             "Remove send {} from track {}",
             show("send_index"),
             show("track_index"),
+        )),
+        "insert_envelope_point" => Some(format!(
+            "Insert an automation point on track {} envelope {} at time {} = {}",
+            show("track_index"),
+            show("envelope_index"),
+            show("time"),
+            show("value"),
         )),
         _ => None,
     }
@@ -1162,6 +1246,144 @@ fn remove_send(
     );
     res.map(|_| json!({ "removed": true, "track_index": track_index, "send_index": send_index }))
         .map_err(|_| "failed to remove send".to_string())
+}
+
+// ---- automation / envelopes (Phase 5) ---------------------------------------
+
+fn get_track_envelopes(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Value, String> {
+    let track = reaper
+        .get_track(ProjectContext::CurrentProject, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let tp = track.as_ptr();
+    let count = unsafe { low.CountTrackEnvelopes(tp) };
+    let mut envs = Vec::new();
+    for i in 0..count {
+        let env = unsafe { low.GetTrackEnvelope(tp, i) };
+        if env.is_null() {
+            continue;
+        }
+        let name = read_string(NAME_BUF as usize, |b, s| unsafe { low.GetEnvelopeName(env, b, s) })
+            .unwrap_or_default();
+        envs.push(json!({
+            "index": i,
+            "name": name,
+            "point_count": unsafe { low.CountEnvelopePoints(env) },
+            "automation_item_count": unsafe { low.CountAutomationItems(env) },
+        }));
+    }
+    Ok(json!({ "track_index": track_index, "envelopes": envs }))
+}
+
+fn get_envelope_points(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    envelope_index: u32,
+    limit: usize,
+) -> Result<Value, String> {
+    let track = reaper
+        .get_track(ProjectContext::CurrentProject, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let env = unsafe { low.GetTrackEnvelope(track.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!("no envelope at index {envelope_index}"));
+    }
+    let count = unsafe { low.CountEnvelopePoints(env) };
+    let cap = (limit as c_int).min(count);
+    let mut points = Vec::new();
+    for i in 0..cap {
+        let mut time = 0.0f64;
+        let mut value = 0.0f64;
+        let mut shape: c_int = 0;
+        let mut tension = 0.0f64;
+        let mut selected = false;
+        let ok = unsafe {
+            low.GetEnvelopePoint(env, i, &mut time, &mut value, &mut shape, &mut tension, &mut selected)
+        };
+        if !ok {
+            continue;
+        }
+        points.push(json!({
+            "index": i, "time": time, "value": value,
+            "shape": shape, "tension": tension, "selected": selected
+        }));
+    }
+    Ok(json!({
+        "track_index": track_index,
+        "envelope_index": envelope_index,
+        "point_count": count,
+        "truncated": count > cap,
+        "points": points,
+    }))
+}
+
+fn get_automation_items(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    envelope_index: u32,
+) -> Result<Value, String> {
+    let track = reaper
+        .get_track(ProjectContext::CurrentProject, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let env = unsafe { low.GetTrackEnvelope(track.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!("no envelope at index {envelope_index}"));
+    }
+    let count = unsafe { low.CountAutomationItems(env) };
+    let get = |i: c_int, key: &CStr| unsafe { low.GetSetAutomationItemInfo(env, i, key.as_ptr(), 0.0, false) };
+    let mut items = Vec::new();
+    for i in 0..count {
+        items.push(json!({
+            "index": i,
+            "position": get(i, c"D_POSITION"),
+            "length": get(i, c"D_LENGTH"),
+            "playrate": get(i, c"D_PLAYRATE"),
+            "pool_id": get(i, c"D_POOL_ID"),
+        }));
+    }
+    Ok(json!({
+        "track_index": track_index,
+        "envelope_index": envelope_index,
+        "automation_items": items,
+    }))
+}
+
+fn insert_envelope_point(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    envelope_index: u32,
+    time: f64,
+    value: f64,
+    shape: c_int,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let env = unsafe { low.GetTrackEnvelope(track.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!("no envelope at index {envelope_index}"));
+    }
+    let mut no_sort = false;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.InsertEnvelopePoint(env, time, value, shape, 0.0, false, &mut no_sort) };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: insert envelope point on track {track_index} envelope {envelope_index}"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({
+            "inserted": true, "track_index": track_index,
+            "envelope_index": envelope_index, "time": time, "value": value, "shape": shape
+        }))
+    } else {
+        Err("failed to insert envelope point".to_string())
+    }
 }
 
 // ---- helpers ----------------------------------------------------------------
