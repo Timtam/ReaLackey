@@ -64,8 +64,12 @@ pub fn system_prompt() -> String {
     "You are an AI assistant embedded in the REAPER digital audio workstation. \
      You can inspect the project through read tools (project summary, tracks, \
      track/take FX and their parameters, selected items, installed plugins, and \
-     the focused FX window) and make changes through mutating tools (add an FX, \
-     set an FX parameter, enable/bypass an FX). When a question depends on the \
+     the focused FX window, MIDI notes of a take, and a track's sends/receives) \
+     and make changes through mutating tools (add an FX, set an FX parameter, \
+     enable/bypass an FX, write MIDI notes, create a MIDI item, and add/adjust/ \
+     remove track sends). When composing MIDI, read the existing take (and its \
+     neighbouring items via include_neighbors) first so new material fits the \
+     key, tempo, and surrounding parts. When a question depends on the \
      current project state, call a tool instead of guessing, and chain tools when \
      needed (e.g. resolve the focused FX, then read its parameters). Prefer \
      human-readable display values over raw normalized 0..1 values. Before making \

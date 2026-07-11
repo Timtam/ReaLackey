@@ -11,9 +11,10 @@ use std::ffi::{c_char, CStr};
 use std::os::raw::c_int;
 
 use reaper_medium::{
-    AddFxBehavior, FxLocation, ItemAttributeKey, MainThreadScope, MasterTrackBehavior, MediaTrack,
-    ProjectContext, Reaper, ReaperNormalizedFxParamValue, ReaperStr, TrackFxChainType,
-    TrackFxLocation, TrackLocation, UndoScope,
+    AddFxBehavior, FxLocation, ItemAttributeKey, MainThreadScope, MasterTrackBehavior, MediaItem,
+    MediaItemTake, MediaTrack, PositionInSeconds, ProjectContext, Reaper,
+    ReaperNormalizedFxParamValue, ReaperStr, SendTarget, TrackFxChainType, TrackFxLocation,
+    TrackLocation, TrackSendAttributeKey, TrackSendCategory, TrackSendDirection, UndoScope,
 };
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -203,6 +204,115 @@ pub fn definitions() -> Vec<ToolDef> {
                 .into(),
             input_schema: empty(),
         },
+        // --- MIDI (Phase 4) ---
+        ToolDef {
+            name: "get_take_midi".into(),
+            description: "Read the MIDI notes of a media item's active take (pitch, note name, \
+                          velocity, channel, timing in seconds and PPQ). Set include_neighbors to \
+                          also read overlapping items on the adjacent tracks for harmonic context."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer", "description": "0-based project media item index" },
+                    "include_neighbors": { "type": "boolean", "description": "also include overlapping items on adjacent tracks" }
+                }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "insert_midi_notes".into(),
+            description: "Insert MIDI notes into an item's active take. CHANGES the project \
+                          (confirmed + undo-wrapped). Times are in quarter notes relative to the \
+                          item start."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "notes": {
+                        "type": "array",
+                        "description": "notes to insert",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pitch": { "type": "integer", "description": "MIDI pitch 0-127 (60 = middle C / C4)" },
+                                "start_qn": { "type": "number", "description": "start in quarter notes from the item start" },
+                                "length_qn": { "type": "number", "description": "length in quarter notes" },
+                                "velocity": { "type": "integer", "description": "1-127, default 96" },
+                                "channel": { "type": "integer", "description": "0-15, default 0" }
+                            },
+                            "required": ["pitch", "start_qn", "length_qn"]
+                        }
+                    }
+                }),
+                json!(["item_index", "notes"]),
+            ),
+        },
+        ToolDef {
+            name: "create_midi_item".into(),
+            description: "Create an empty MIDI item on a track. CHANGES the project (confirmed + \
+                          undo-wrapped). Position and length are in quarter notes. Returns the new \
+                          item_index for use with insert_midi_notes."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "start_qn": { "type": "number", "description": "start position in quarter notes" },
+                    "length_qn": { "type": "number", "description": "length in quarter notes" }
+                }),
+                json!(["track_index", "start_qn", "length_qn"]),
+            ),
+        },
+        // --- track routing / sends (Phase 4) ---
+        ToolDef {
+            name: "get_track_sends".into(),
+            description: "List a track's sends (destination track, volume, pan, mute) and receives."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "add_send".into(),
+            description: "Create a send from one track to another. CHANGES the project (confirmed + \
+                          undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "src_track_index": { "type": "integer" },
+                    "dest_track_index": { "type": "integer" }
+                }),
+                json!(["src_track_index", "dest_track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_send_param".into(),
+            description: "Set a send's volume, pan, or mute. CHANGES the project (confirmed + \
+                          undo-wrapped). volume is a linear amplitude (1.0 = 0 dB), pan is -1..1, \
+                          mute is 0 or 1."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "send_index": { "type": "integer" },
+                    "param": { "type": "string", "enum": ["volume", "pan", "mute"] },
+                    "value": { "type": "number" }
+                }),
+                json!(["track_index", "send_index", "param", "value"]),
+            ),
+        },
+        ToolDef {
+            name: "remove_send".into(),
+            description: "Remove a send from a track. CHANGES the project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "send_index": { "type": "integer" }
+                }),
+                json!(["track_index", "send_index"]),
+            ),
+        },
     ]
 }
 
@@ -260,6 +370,42 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "fx_index")?,
             req_bool(input, "enabled")?,
         ),
+        // MIDI
+        "get_take_midi" => get_take_midi(
+            reaper,
+            req_u32(input, "item_index")?,
+            opt_bool(input, "include_neighbors").unwrap_or(false),
+        ),
+        "insert_midi_notes" => insert_midi_notes(
+            reaper,
+            req_u32(input, "item_index")?,
+            input.get("notes").ok_or_else(|| "missing 'notes' array".to_string())?,
+        ),
+        "create_midi_item" => create_midi_item(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_f64(input, "start_qn")?,
+            req_f64(input, "length_qn")?,
+        ),
+        // routing
+        "get_track_sends" => get_track_sends(reaper, req_u32(input, "track_index")?),
+        "add_send" => add_send(
+            reaper,
+            req_u32(input, "src_track_index")?,
+            req_u32(input, "dest_track_index")?,
+        ),
+        "set_send_param" => set_send_param(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "send_index")?,
+            req_str(input, "param")?,
+            req_f64(input, "value")?,
+        ),
+        "remove_send" => remove_send(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "send_index")?,
+        ),
         // undo / history
         "undo" => Ok(undo(reaper)),
         "redo" => Ok(redo(reaper)),
@@ -298,6 +444,34 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             },
             show("track_index"),
             show("fx_index"),
+        )),
+        "insert_midi_notes" => Some(format!(
+            "Insert {} MIDI note(s) into item {}",
+            input.get("notes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            show("item_index"),
+        )),
+        "create_midi_item" => Some(format!(
+            "Create a MIDI item on track {} (start {} QN, length {} QN)",
+            show("track_index"),
+            show("start_qn"),
+            show("length_qn"),
+        )),
+        "add_send" => Some(format!(
+            "Add a send from track {} to track {}",
+            show("src_track_index"),
+            show("dest_track_index"),
+        )),
+        "set_send_param" => Some(format!(
+            "Set send {} {} to {} on track {}",
+            show("send_index"),
+            input.get("param").and_then(|v| v.as_str()).unwrap_or("?"),
+            show("value"),
+            show("track_index"),
+        )),
+        "remove_send" => Some(format!(
+            "Remove send {} from track {}",
+            show("send_index"),
+            show("track_index"),
         )),
         _ => None,
     }
@@ -687,6 +861,309 @@ fn get_undo_history(reaper: &Reaper<MainThreadScope>) -> Value {
     })
 }
 
+// ---- MIDI (Phase 4) ---------------------------------------------------------
+
+fn read_take_notes(reaper: &Reaper<MainThreadScope>, take: MediaItemTake) -> Vec<Value> {
+    let t = take.as_ptr();
+    let low = reaper.low();
+    let mut notecnt: c_int = 0;
+    let mut cc: c_int = 0;
+    let mut syx: c_int = 0;
+    unsafe { low.MIDI_CountEvts(t, &mut notecnt, &mut cc, &mut syx) };
+    let mut notes = Vec::new();
+    for i in 0..notecnt {
+        let mut selected = false;
+        let mut muted = false;
+        let mut sppq = 0.0f64;
+        let mut eppq = 0.0f64;
+        let mut chan: c_int = 0;
+        let mut pitch: c_int = 0;
+        let mut vel: c_int = 0;
+        let ok = unsafe {
+            low.MIDI_GetNote(
+                t, i, &mut selected, &mut muted, &mut sppq, &mut eppq, &mut chan, &mut pitch,
+                &mut vel,
+            )
+        };
+        if !ok {
+            continue;
+        }
+        let start_time = unsafe { low.MIDI_GetProjTimeFromPPQPos(t, sppq) };
+        let end_time = unsafe { low.MIDI_GetProjTimeFromPPQPos(t, eppq) };
+        notes.push(json!({
+            "pitch": pitch, "note": note_name(pitch), "velocity": vel, "channel": chan,
+            "start_time": start_time, "end_time": end_time,
+            "start_ppq": sppq, "end_ppq": eppq,
+            "selected": selected, "muted": muted,
+        }));
+    }
+    notes
+}
+
+fn get_take_midi(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    include_neighbors: bool,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = reaper
+        .get_media_item(project, item_index)
+        .ok_or_else(|| format!("no media item at index {item_index}"))?;
+    let take = unsafe { reaper.get_active_take(item) }.ok_or("item has no active take")?;
+    let notes = read_take_notes(reaper, take);
+    let mut result = json!({ "item_index": item_index, "note_count": notes.len(), "notes": notes });
+
+    if include_neighbors {
+        let track_index_of = track_index_map(reaper);
+        let this_idx = unsafe { reaper.get_media_item_track(item) }
+            .and_then(|tr| track_index_of.get(&tr).copied());
+        let start = unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Position) };
+        let end = start + unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Length) };
+        let mut neighbors = Vec::new();
+        if let Some(ti) = this_idx {
+            let want: Vec<u32> = [ti.checked_sub(1), Some(ti + 1)].into_iter().flatten().collect();
+            for i in 0..reaper.count_media_items(project) {
+                let Some(other) = reaper.get_media_item(project, i) else {
+                    continue;
+                };
+                if other == item {
+                    continue;
+                }
+                let oidx = unsafe { reaper.get_media_item_track(other) }
+                    .and_then(|tr| track_index_of.get(&tr).copied());
+                let Some(oi) = oidx.filter(|oi| want.contains(oi)) else {
+                    continue;
+                };
+                let os = unsafe { reaper.get_media_item_info_value(other, ItemAttributeKey::Position) };
+                let oe = os + unsafe { reaper.get_media_item_info_value(other, ItemAttributeKey::Length) };
+                if oe <= start || os >= end {
+                    continue; // no time overlap
+                }
+                if let Some(otake) = unsafe { reaper.get_active_take(other) } {
+                    neighbors.push(json!({
+                        "item_index": i, "track_index": oi, "notes": read_take_notes(reaper, otake)
+                    }));
+                }
+            }
+        }
+        result["neighbor_items"] = json!(neighbors);
+    }
+    Ok(result)
+}
+
+fn insert_midi_notes(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    notes: &Value,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = reaper
+        .get_media_item(project, item_index)
+        .ok_or_else(|| format!("no media item at index {item_index}"))?;
+    let take = unsafe { reaper.get_active_take(item) }.ok_or("item has no active take")?;
+    let arr = notes.as_array().ok_or("'notes' must be an array")?;
+    let t = take.as_ptr();
+    let low = reaper.low();
+
+    let item_start = unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Position) };
+    let item_start_qn = reaper
+        .time_map_2_time_to_qn(
+            project,
+            PositionInSeconds::new(item_start).unwrap_or_default(),
+        )
+        .get();
+    let no_sort = true;
+    let mut inserted = 0;
+
+    reaper.undo_begin_block_2(project);
+    for n in arr {
+        let (pitch, start_qn, length_qn) = match (
+            n.get("pitch").and_then(|v| v.as_i64()),
+            n.get("start_qn").and_then(|v| v.as_f64()),
+            n.get("length_qn").and_then(|v| v.as_f64()),
+        ) {
+            (Some(p), Some(s), Some(l)) => (p as c_int, s, l),
+            _ => continue, // skip malformed note
+        };
+        let vel = n.get("velocity").and_then(|v| v.as_i64()).unwrap_or(96) as c_int;
+        let chan = n.get("channel").and_then(|v| v.as_i64()).unwrap_or(0) as c_int;
+        let sppq = unsafe { low.MIDI_GetPPQPosFromProjQN(t, item_start_qn + start_qn) };
+        let eppq = unsafe { low.MIDI_GetPPQPosFromProjQN(t, item_start_qn + start_qn + length_qn) };
+        let ok = unsafe { low.MIDI_InsertNote(t, false, false, sppq, eppq, chan, pitch, vel, &no_sort) };
+        if ok {
+            inserted += 1;
+        }
+    }
+    unsafe { low.MIDI_Sort(t) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: insert {inserted} MIDI note(s) into item {item_index}"),
+        UndoScope::All,
+    );
+    Ok(json!({ "inserted": inserted, "item_index": item_index }))
+}
+
+fn create_midi_item(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    start_qn: f64,
+    length_qn: f64,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let qn_in = true;
+    reaper.undo_begin_block_2(project);
+    let item_ptr = unsafe {
+        low.CreateNewMIDIItemInProj(track.as_ptr(), start_qn, start_qn + length_qn, &qn_in)
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: create MIDI item on track {track_index}"),
+        UndoScope::All,
+    );
+    let item_index =
+        MediaItem::new(item_ptr).and_then(|it| media_item_index_map(reaper).get(&it).copied());
+    Ok(json!({
+        "created": !item_ptr.is_null(),
+        "track_index": track_index,
+        "item_index": item_index,
+    }))
+}
+
+fn note_name(pitch: c_int) -> String {
+    if !(0..=127).contains(&pitch) {
+        return pitch.to_string();
+    }
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!("{}{}", NAMES[(pitch % 12) as usize], pitch / 12 - 1)
+}
+
+// ---- track routing / sends (Phase 4) ----------------------------------------
+
+fn get_track_sends(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let track_index_of = track_index_map(reaper);
+
+    let mut sends = Vec::new();
+    for i in 0..unsafe { reaper.get_track_num_sends(track, TrackSendCategory::Send) } {
+        let name = unsafe { reaper.get_track_send_name(track, i, NAME_BUF) }
+            .ok()
+            .map(|s| reaper_string(s.as_c_str().to_bytes()))
+            .unwrap_or_default();
+        let dest = unsafe { reaper.get_track_send_info_desttrack(track, TrackSendDirection::Send, i) }
+            .ok()
+            .and_then(|d| track_index_of.get(&d).copied());
+        sends.push(json!({
+            "index": i,
+            "name": name,
+            "dest_track_index": dest,
+            "volume": unsafe { reaper.get_track_send_info_value(track, TrackSendCategory::Send, i, TrackSendAttributeKey::Vol) },
+            "pan": unsafe { reaper.get_track_send_info_value(track, TrackSendCategory::Send, i, TrackSendAttributeKey::Pan) },
+            "muted": unsafe { reaper.get_track_send_info_value(track, TrackSendCategory::Send, i, TrackSendAttributeKey::Mute) } != 0.0,
+        }));
+    }
+
+    let mut receives = Vec::new();
+    for i in 0..unsafe { reaper.get_track_num_sends(track, TrackSendCategory::Receive) } {
+        let src = unsafe { reaper.get_track_send_info_desttrack(track, TrackSendDirection::Receive, i) }
+            .ok()
+            .and_then(|d| track_index_of.get(&d).copied());
+        receives.push(json!({
+            "index": i,
+            "src_track_index": src,
+            "volume": unsafe { reaper.get_track_send_info_value(track, TrackSendCategory::Receive, i, TrackSendAttributeKey::Vol) },
+        }));
+    }
+    Ok(json!({ "track_index": track_index, "sends": sends, "receives": receives }))
+}
+
+fn add_send(
+    reaper: &Reaper<MainThreadScope>,
+    src_track_index: u32,
+    dest_track_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let src = reaper
+        .get_track(project, src_track_index)
+        .ok_or_else(|| format!("no track at index {src_track_index}"))?;
+    let dest = reaper
+        .get_track(project, dest_track_index)
+        .ok_or_else(|| format!("no track at index {dest_track_index}"))?;
+    reaper.undo_begin_block_2(project);
+    let res = unsafe { reaper.create_track_send(src, SendTarget::OtherTrack(dest)) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: add send from track {src_track_index} to track {dest_track_index}"),
+        UndoScope::All,
+    );
+    res.map(|idx| json!({
+        "added": true, "src_track_index": src_track_index,
+        "dest_track_index": dest_track_index, "send_index": idx
+    }))
+    .map_err(|_| "failed to create send".to_string())
+}
+
+fn set_send_param(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    send_index: u32,
+    param: &str,
+    value: f64,
+) -> Result<Value, String> {
+    let key = match param {
+        "volume" | "vol" => TrackSendAttributeKey::Vol,
+        "pan" => TrackSendAttributeKey::Pan,
+        "mute" => TrackSendAttributeKey::Mute,
+        other => return Err(format!("unknown send param '{other}' (use volume, pan, or mute)")),
+    };
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    reaper.undo_begin_block_2(project);
+    let res = unsafe {
+        reaper.set_track_send_info_value(track, TrackSendCategory::Send, send_index, key, value)
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set send {send_index} {param} on track {track_index}"),
+        UndoScope::All,
+    );
+    res.map(|_| json!({
+        "set": true, "track_index": track_index, "send_index": send_index,
+        "param": param, "value": value
+    }))
+    .map_err(|_| "failed to set send parameter".to_string())
+}
+
+fn remove_send(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    send_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    reaper.undo_begin_block_2(project);
+    let res = unsafe { reaper.remove_track_send(track, TrackSendCategory::Send, send_index) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: remove send {send_index} from track {track_index}"),
+        UndoScope::All,
+    );
+    res.map(|_| json!({ "removed": true, "track_index": track_index, "send_index": send_index }))
+        .map_err(|_| "failed to remove send".to_string())
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 fn selected_track_set(reaper: &Reaper<MainThreadScope>) -> std::collections::HashSet<MediaTrack> {
@@ -785,6 +1262,10 @@ fn req_u32(input: &Value, key: &str) -> Result<u32, String> {
 
 fn opt_usize(input: &Value, key: &str) -> Option<usize> {
     input.get(key).and_then(|v| v.as_u64()).map(|n| n as usize)
+}
+
+fn opt_bool(input: &Value, key: &str) -> Option<bool> {
+    input.get(key).and_then(|v| v.as_bool())
 }
 
 fn opt_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
