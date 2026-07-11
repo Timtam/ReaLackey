@@ -22,29 +22,69 @@ pub fn click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
     imp::click(hwnd, x, y)
 }
 
+/// Double left click at image-space `(x, y)` (select a field, reset a knob…).
+#[cfg(windows)]
+pub fn double_click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
+    imp::double_click(hwnd, x, y)
+}
+
 /// Left-button drag from `(x1, y1)` to `(x2, y2)` in image space (knob turns).
 #[cfg(windows)]
 pub fn drag(hwnd: isize, x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
     imp::drag(hwnd, x1, y1, x2, y2)
 }
 
+/// Type Unicode `text` into whatever control in `hwnd` has focus (e.g. a value
+/// field just clicked); if `submit`, press Enter afterward.
+#[cfg(windows)]
+pub fn type_text(hwnd: isize, text: &str, submit: bool) -> Result<(), String> {
+    imp::type_text(hwnd, text, submit)
+}
+
+/// Mouse-wheel scroll by `clicks` notches (positive = up/away) at image-space
+/// `(x, y)` within `hwnd`.
+#[cfg(windows)]
+pub fn scroll(hwnd: isize, x: i32, y: i32, clicks: i32) -> Result<(), String> {
+    imp::scroll(hwnd, x, y, clicks)
+}
+
+#[cfg(not(windows))]
+const UNSUPPORTED: &str =
+    "synthetic input is not implemented on this platform yet (macOS backend pending)";
+
 #[cfg(not(windows))]
 pub fn click(_hwnd: isize, _x: i32, _y: i32) -> Result<(), String> {
-    Err("synthetic input is not implemented on this platform yet (macOS backend pending)".into())
+    Err(UNSUPPORTED.into())
+}
+
+#[cfg(not(windows))]
+pub fn double_click(_hwnd: isize, _x: i32, _y: i32) -> Result<(), String> {
+    Err(UNSUPPORTED.into())
 }
 
 #[cfg(not(windows))]
 pub fn drag(_hwnd: isize, _x1: i32, _y1: i32, _x2: i32, _y2: i32) -> Result<(), String> {
-    Err("synthetic input is not implemented on this platform yet (macOS backend pending)".into())
+    Err(UNSUPPORTED.into())
+}
+
+#[cfg(not(windows))]
+pub fn type_text(_hwnd: isize, _text: &str, _submit: bool) -> Result<(), String> {
+    Err(UNSUPPORTED.into())
+}
+
+#[cfg(not(windows))]
+pub fn scroll(_hwnd: isize, _x: i32, _y: i32, _clicks: i32) -> Result<(), String> {
+    Err(UNSUPPORTED.into())
 }
 
 #[cfg(windows)]
 mod imp {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
-        MOUSE_EVENT_FLAGS,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+        MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_RETURN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetCursorPos, GetSystemMetrics, GetWindowRect, IsIconic, SetCursorPos,
@@ -68,6 +108,65 @@ mod imp {
                 mouse(nx, ny, MOUSEEVENTF_MOVE),
                 mouse(nx, ny, MOUSEEVENTF_LEFTDOWN),
                 mouse(nx, ny, MOUSEEVENTF_LEFTUP),
+            ])?;
+            restore_cursor(restore);
+        }
+        Ok(())
+    }
+
+    pub fn double_click(hwnd_raw: isize, x: i32, y: i32) -> Result<(), String> {
+        let hwnd = validate(hwnd_raw)?;
+        // SAFETY: main thread; hwnd validated non-null.
+        unsafe {
+            let restore = focus_and_save(hwnd);
+            let (sx, sy) = clamp_to_window(hwnd, x, y)?;
+            let (nx, ny) = normalize(sx, sy);
+            // Two down/up pairs in one batch land within the double-click time.
+            send(&[
+                mouse(nx, ny, MOUSEEVENTF_MOVE),
+                mouse(nx, ny, MOUSEEVENTF_LEFTDOWN),
+                mouse(nx, ny, MOUSEEVENTF_LEFTUP),
+                mouse(nx, ny, MOUSEEVENTF_LEFTDOWN),
+                mouse(nx, ny, MOUSEEVENTF_LEFTUP),
+            ])?;
+            restore_cursor(restore);
+        }
+        Ok(())
+    }
+
+    pub fn type_text(hwnd_raw: isize, text: &str, submit: bool) -> Result<(), String> {
+        let hwnd = validate(hwnd_raw)?;
+        // SAFETY: main thread; hwnd validated non-null.
+        unsafe {
+            // Foreground so keystrokes reach the plugin's focused control.
+            let _ = focus_and_save(hwnd);
+            let mut inputs = Vec::new();
+            for unit in text.encode_utf16() {
+                inputs.push(key_unicode(unit, false));
+                inputs.push(key_unicode(unit, true));
+            }
+            if submit {
+                inputs.push(key_vk(VK_RETURN, false));
+                inputs.push(key_vk(VK_RETURN, true));
+            }
+            if !inputs.is_empty() {
+                send(&inputs)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn scroll(hwnd_raw: isize, x: i32, y: i32, clicks: i32) -> Result<(), String> {
+        let hwnd = validate(hwnd_raw)?;
+        // SAFETY: main thread; hwnd validated non-null.
+        unsafe {
+            let restore = focus_and_save(hwnd);
+            let (sx, sy) = clamp_to_window(hwnd, x, y)?;
+            let (nx, ny) = normalize(sx, sy);
+            let delta = clicks.saturating_mul(120); // WHEEL_DELTA per notch
+            send(&[
+                mouse(nx, ny, MOUSEEVENTF_MOVE),
+                wheel(nx, ny, delta),
             ])?;
             restore_cursor(restore);
         }
@@ -177,6 +276,64 @@ mod imp {
                     dy: ny,
                     mouseData: 0,
                     dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn wheel(nx: i32, ny: i32, delta: i32) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: nx,
+                    dy: ny,
+                    // Signed wheel delta carried as its two's-complement u32.
+                    mouseData: delta as u32,
+                    dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_WHEEL,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    /// A Unicode character as a keyboard event (layout-independent typing).
+    fn key_unicode(unit: u16, up: bool) -> INPUT {
+        let mut flags = KEYEVENTF_UNICODE;
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: unit,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    /// A virtual-key event (e.g. Enter to submit a value).
+    fn key_vk(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+        let flags = if up {
+            KEYEVENTF_KEYUP
+        } else {
+            KEYBD_EVENT_FLAGS(0)
+        };
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,
                 },

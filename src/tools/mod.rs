@@ -1038,9 +1038,42 @@ pub fn definitions() -> Vec<ToolDef> {
             input_schema: obj(
                 json!({
                     "x": { "type": "integer", "description": "x pixel in the plugin screenshot" },
-                    "y": { "type": "integer", "description": "y pixel in the plugin screenshot" }
+                    "y": { "type": "integer", "description": "y pixel in the plugin screenshot" },
+                    "double": { "type": "boolean", "description": "double-click instead of single (default false)" }
                 }),
                 json!(["x", "y"]),
+            ),
+        },
+        ToolDef {
+            name: "plugin_type".into(),
+            description: "Type text into the FOCUSED plugin's currently focused control — e.g. a \
+                          value field you just clicked (plugin_click) to enter a number or name. \
+                          Set submit=true to press Enter afterward. Same rules as plugin_click: \
+                          needs pixel control armed, NOT undoable by REAPER; verify with \
+                          capture_view."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "text": { "type": "string", "description": "text to type into the focused field" },
+                    "submit": { "type": "boolean", "description": "press Enter after typing (default false)" }
+                }),
+                json!(["text"]),
+            ),
+        },
+        ToolDef {
+            name: "plugin_scroll".into(),
+            description: "Mouse-wheel scroll inside the FOCUSED plugin's window at pixel (x,y) from \
+                          the most recent capture_view image — e.g. to scroll a preset/browser \
+                          list. clicks is the number of wheel notches: positive scrolls up/away, \
+                          negative down/toward. Needs pixel control armed; verify with capture_view."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "x": { "type": "integer" },
+                    "y": { "type": "integer" },
+                    "clicks": { "type": "integer", "description": "wheel notches; +up / -down" }
+                }),
+                json!(["x", "y", "clicks"]),
             ),
         },
         ToolDef {
@@ -1215,13 +1248,54 @@ fn track_from_location(
 /// window (Phase 7 Tier B — for GUI-only controls with no host parameter). The
 /// user has already armed pixel control by the time this runs. Coordinates are
 /// clamped to the window in the input backend, so a click can't leave it.
-fn plugin_click(reaper: &Reaper<MainThreadScope>, x: i32, y: i32) -> Result<Value, String> {
+fn plugin_click(
+    reaper: &Reaper<MainThreadScope>,
+    x: i32,
+    y: i32,
+    double: bool,
+) -> Result<Value, String> {
     let hwnd = resolve_focused_fx_hwnd(reaper)?;
-    crate::ui::input::click(hwnd, x, y)?;
+    if double {
+        crate::ui::input::double_click(hwnd, x, y)?;
+    } else {
+        crate::ui::input::click(hwnd, x, y)?;
+    }
     Ok(json!({
-        "clicked": true, "x": x, "y": y,
+        "clicked": true, "double": double, "x": x, "y": y,
         "note": "Synthesized a GUI click. This is NOT undoable by REAPER. Use \
                  capture_view to verify the result changed as intended."
+    }))
+}
+
+/// Type text into the focused plugin's focused control (e.g. a value field just
+/// clicked). See [`plugin_click`] for the safety model.
+fn plugin_type(
+    reaper: &Reaper<MainThreadScope>,
+    text: &str,
+    submit: bool,
+) -> Result<Value, String> {
+    let hwnd = resolve_focused_fx_hwnd(reaper)?;
+    crate::ui::input::type_text(hwnd, text, submit)?;
+    Ok(json!({
+        "typed": true, "chars": text.chars().count(), "submit": submit,
+        "note": "Typed into the plugin's focused control. NOT undoable by REAPER; \
+                 use capture_view to verify."
+    }))
+}
+
+/// Mouse-wheel scroll within the focused plugin's window (e.g. a browser list).
+/// `clicks` is wheel notches; positive scrolls up/away, negative down/toward.
+fn plugin_scroll(
+    reaper: &Reaper<MainThreadScope>,
+    x: i32,
+    y: i32,
+    clicks: i32,
+) -> Result<Value, String> {
+    let hwnd = resolve_focused_fx_hwnd(reaper)?;
+    crate::ui::input::scroll(hwnd, x, y, clicks)?;
+    Ok(json!({
+        "scrolled": true, "x": x, "y": y, "clicks": clicks,
+        "note": "Scrolled the plugin. Use capture_view to verify."
     }))
 }
 
@@ -1291,6 +1365,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_u32(input, "x")? as i32,
             req_u32(input, "y")? as i32,
+            opt_bool(input, "double").unwrap_or(false),
         ),
         "plugin_drag" => plugin_drag(
             reaper,
@@ -1298,6 +1373,17 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "y1")? as i32,
             req_u32(input, "x2")? as i32,
             req_u32(input, "y2")? as i32,
+        ),
+        "plugin_type" => plugin_type(
+            reaper,
+            req_str(input, "text")?,
+            opt_bool(input, "submit").unwrap_or(false),
+        ),
+        "plugin_scroll" => plugin_scroll(
+            reaper,
+            req_u32(input, "x")? as i32,
+            req_u32(input, "y")? as i32,
+            input.get("clicks").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         ),
         "disable_pixel_control" => {
             disarm_pixel_control();
@@ -1578,7 +1664,10 @@ pub fn disarm_pixel_control() {
 
 /// Whether a tool synthesizes plugin-GUI input (gated by the arm consent).
 pub fn is_pixel_tool(name: &str) -> bool {
-    matches!(name, "plugin_click" | "plugin_drag")
+    matches!(
+        name,
+        "plugin_click" | "plugin_drag" | "plugin_type" | "plugin_scroll"
+    )
 }
 
 /// A mandatory consent gate for tools that send data off the machine (Phase 7

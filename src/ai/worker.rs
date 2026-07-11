@@ -369,7 +369,14 @@ async fn run_tool(
 fn pixel_action_desc(name: &str, input: &Value) -> String {
     let n = |k: &str| input.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
     match name {
-        "plugin_click" => format!("Clicking the plugin at {}, {}.", n("x"), n("y")),
+        "plugin_click" => {
+            let kind = if input.get("double").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "Double-clicking"
+            } else {
+                "Clicking"
+            };
+            format!("{} the plugin at {}, {}.", kind, n("x"), n("y"))
+        }
         "plugin_drag" => format!(
             "Dragging in the plugin from {}, {} to {}, {}.",
             n("x1"),
@@ -377,6 +384,12 @@ fn pixel_action_desc(name: &str, input: &Value) -> String {
             n("x2"),
             n("y2")
         ),
+        "plugin_type" => {
+            let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let shown: String = text.chars().take(40).collect();
+            format!("Typing into the plugin: {shown}")
+        }
+        "plugin_scroll" => format!("Scrolling the plugin at {}, {}.", n("x"), n("y")),
         _ => "Operating the plugin.".to_string(),
     }
 }
