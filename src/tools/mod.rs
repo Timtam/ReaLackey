@@ -11,8 +11,9 @@ use std::ffi::{c_char, CStr};
 use std::os::raw::c_int;
 
 use reaper_medium::{
-    FxLocation, ItemAttributeKey, MainThreadScope, MasterTrackBehavior, MediaTrack, ProjectContext,
-    Reaper, TrackFxLocation, TrackLocation,
+    AddFxBehavior, FxLocation, ItemAttributeKey, MainThreadScope, MasterTrackBehavior, MediaTrack,
+    ProjectContext, Reaper, ReaperNormalizedFxParamValue, ReaperStr, TrackFxChainType,
+    TrackFxLocation, TrackLocation, UndoScope,
 };
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -22,11 +23,19 @@ use crate::providers::ToolDef;
 const NAME_BUF: u32 = 256;
 const DEFAULT_LIMIT: usize = 200;
 
-/// A request from the worker to run a tool on the main thread.
-pub struct ReaperOp {
-    pub name: String,
-    pub input: Value,
-    pub reply: oneshot::Sender<ToolOutcome>,
+/// A request from the worker for the main thread to run.
+pub enum ReaperOp {
+    /// Execute a tool and return its outcome.
+    Tool {
+        name: String,
+        input: Value,
+        reply: oneshot::Sender<ToolOutcome>,
+    },
+    /// Ask the user to confirm a proposed change (native Yes/No message box).
+    Confirm {
+        message: String,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// The result of running a tool.
@@ -130,6 +139,70 @@ pub fn definitions() -> Vec<ToolDef> {
                 .into(),
             input_schema: empty(),
         },
+        // --- mutating tools (confirmation-gated, Undo-wrapped) ---
+        ToolDef {
+            name: "add_fx".into(),
+            description: "Add an FX/plugin by name to a track's FX chain. This CHANGES the \
+                          project: it is confirmed by the user and wrapped in a labelled undo block."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "fx_name": { "type": "string", "description": "plugin name, e.g. \"ReaEQ\" or \"VST3: Serum\"" }
+                }),
+                json!(["track_index", "fx_name"]),
+            ),
+        },
+        ToolDef {
+            name: "set_fx_param".into(),
+            description: "Set a track-FX parameter to a normalized value in 0..1. CHANGES the \
+                          project (confirmed + undo-wrapped). Call get_fx_params first to choose \
+                          the parameter index and understand its current value."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "fx_index": { "type": "integer" },
+                    "param_index": { "type": "integer" },
+                    "value": { "type": "number", "description": "normalized value 0..1" }
+                }),
+                json!(["track_index", "fx_index", "param_index", "value"]),
+            ),
+        },
+        ToolDef {
+            name: "set_fx_enabled".into(),
+            description: "Enable or bypass a track FX. CHANGES the project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "fx_index": { "type": "integer" },
+                    "enabled": { "type": "boolean" }
+                }),
+                json!(["track_index", "fx_index", "enabled"]),
+            ),
+        },
+        // --- undo / history (reversible; not confirmation-gated) ---
+        ToolDef {
+            name: "undo".into(),
+            description: "Undo the most recent action (made by either the user or the assistant). \
+                          Reversible with redo."
+                .into(),
+            input_schema: empty(),
+        },
+        ToolDef {
+            name: "redo".into(),
+            description: "Redo the most recently undone action.".into(),
+            input_schema: empty(),
+        },
+        ToolDef {
+            name: "get_undo_history".into(),
+            description: "Inspect undo state: the next undo/redo action labels plus a best-effort \
+                          log of recent undo-point labels (a trail of what the user has been doing) \
+                          for workflow suggestions."
+                .into(),
+            input_schema: empty(),
+        },
     ]
 }
 
@@ -172,7 +245,61 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_usize(input, "limit").unwrap_or(DEFAULT_LIMIT),
         )),
         "get_focused_fx" => Ok(get_focused_fx(reaper)),
+        // mutating
+        "add_fx" => add_fx(reaper, req_u32(input, "track_index")?, req_str(input, "fx_name")?),
+        "set_fx_param" => set_fx_param(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+            req_u32(input, "param_index")?,
+            req_f64(input, "value")?,
+        ),
+        "set_fx_enabled" => set_fx_enabled(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+            req_bool(input, "enabled")?,
+        ),
+        // undo / history
+        "undo" => Ok(undo(reaper)),
+        "redo" => Ok(redo(reaper)),
+        "get_undo_history" => Ok(get_undo_history(reaper)),
         other => Err(format!("unknown tool: {other}")),
+    }
+}
+
+/// Human-readable preview for a mutating tool call, or None for read/undo tools.
+/// Returning `Some` marks the tool as requiring confirmation.
+pub fn preview(name: &str, input: &Value) -> Option<String> {
+    let show = |k: &str| input.get(k).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+    match name {
+        "add_fx" => Some(format!(
+            "Add FX {} to track {}",
+            input
+                .get("fx_name")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "?".into()),
+            show("track_index"),
+        )),
+        "set_fx_param" => Some(format!(
+            "Set track {} FX {} parameter {} to {} (normalized 0..1)",
+            show("track_index"),
+            show("fx_index"),
+            show("param_index"),
+            show("value"),
+        )),
+        "set_fx_enabled" => Some(format!(
+            "{} track {} FX {}",
+            if input.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "Enable"
+            } else {
+                "Bypass"
+            },
+            show("track_index"),
+            show("fx_index"),
+        )),
+        _ => None,
     }
 }
 
@@ -433,6 +560,133 @@ fn get_focused_fx(reaper: &Reaper<MainThreadScope>) -> Value {
     }
 }
 
+// ---- mutating tools (Undo-wrapped) ------------------------------------------
+
+fn add_fx(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_name: &str,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    reaper.undo_begin_block_2(project);
+    // SAFETY: track valid, main thread.
+    let result = unsafe {
+        reaper.track_fx_add_by_name_add(
+            track,
+            fx_name,
+            TrackFxChainType::NormalFxChain,
+            AddFxBehavior::AlwaysAdd,
+        )
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: add FX \"{fx_name}\" to track {track_index}"),
+        UndoScope::All,
+    );
+    match result {
+        Ok(fx_index) => Ok(json!({
+            "added": true, "track_index": track_index, "fx_index": fx_index, "name": fx_name
+        })),
+        Err(_) => Err(format!("could not add FX \"{fx_name}\" (name not found?)")),
+    }
+}
+
+fn set_fx_param(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+    param_index: u32,
+    value: f64,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let loc = TrackFxLocation::NormalFxChain(fx_index);
+    let v = value.clamp(0.0, 1.0);
+    reaper.undo_begin_block_2(project);
+    let result = unsafe {
+        reaper.track_fx_set_param_normalized(track, loc, param_index, ReaperNormalizedFxParamValue::new(v))
+    };
+    let display = unsafe { reaper.track_fx_get_formatted_param_value(track, loc, param_index, NAME_BUF) }
+        .ok()
+        .map(|s| reaper_string(s.as_c_str().to_bytes()))
+        .unwrap_or_default();
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set track {track_index} FX {fx_index} param {param_index} to {v:.4}"),
+        UndoScope::All,
+    );
+    result
+        .map(|_| json!({
+            "set": true, "track_index": track_index, "fx_index": fx_index,
+            "param_index": param_index, "normalized": v, "display_value": display
+        }))
+        .map_err(|_| "failed to set parameter".to_string())
+}
+
+fn set_fx_enabled(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+    enabled: bool,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let loc = TrackFxLocation::NormalFxChain(fx_index);
+    reaper.undo_begin_block_2(project);
+    unsafe { reaper.track_fx_set_enabled(track, loc, enabled) };
+    reaper.undo_end_block_2(
+        project,
+        format!(
+            "AI: {} track {track_index} FX {fx_index}",
+            if enabled { "enable" } else { "bypass" }
+        ),
+        UndoScope::All,
+    );
+    Ok(json!({ "track_index": track_index, "fx_index": fx_index, "enabled": enabled }))
+}
+
+// ---- undo / history ---------------------------------------------------------
+
+fn undo_label(reaper: &Reaper<MainThreadScope>, project: ProjectContext) -> Option<String> {
+    reaper.undo_can_undo_2(project, |s: &ReaperStr| reaper_string(s.as_c_str().to_bytes()))
+}
+
+fn redo_label(reaper: &Reaper<MainThreadScope>, project: ProjectContext) -> Option<String> {
+    reaper.undo_can_redo_2(project, |s: &ReaperStr| reaper_string(s.as_c_str().to_bytes()))
+}
+
+fn undo(reaper: &Reaper<MainThreadScope>) -> Value {
+    let project = ProjectContext::CurrentProject;
+    let action = undo_label(reaper, project);
+    let ok = reaper.undo_do_undo_2(project);
+    json!({ "undone": ok, "action": action })
+}
+
+fn redo(reaper: &Reaper<MainThreadScope>) -> Value {
+    let project = ProjectContext::CurrentProject;
+    let action = redo_label(reaper, project);
+    let ok = reaper.undo_do_redo_2(project);
+    json!({ "redone": ok, "action": action })
+}
+
+fn get_undo_history(reaper: &Reaper<MainThreadScope>) -> Value {
+    let project = ProjectContext::CurrentProject;
+    json!({
+        "next_undo": undo_label(reaper, project),
+        "next_redo": redo_label(reaper, project),
+        "recent_actions": crate::reaper::history::snapshot(),
+        "note": "recent_actions is a best-effort log of undo-point labels observed over time \
+                 (most recent last); REAPER's API does not expose the full undo stack.",
+    })
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 fn selected_track_set(reaper: &Reaper<MainThreadScope>) -> std::collections::HashSet<MediaTrack> {
@@ -538,4 +792,22 @@ fn opt_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
         .get(key)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+}
+
+fn req_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
+    opt_str(input, key).ok_or_else(|| format!("missing or invalid '{key}' (expected a non-empty string)"))
+}
+
+fn req_f64(input: &Value, key: &str) -> Result<f64, String> {
+    input
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("missing or invalid '{key}' (expected a number)"))
+}
+
+fn req_bool(input: &Value, key: &str) -> Result<bool, String> {
+    input
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| format!("missing or invalid '{key}' (expected true or false)"))
 }

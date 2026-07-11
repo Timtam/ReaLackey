@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crossbeam_channel::Sender as CbSender;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -149,7 +149,7 @@ async fn handle_prompt(
             let mut results = Vec::new();
             for (id, name, input) in result.tool_calls {
                 let _ = ui_tx.send(UiEvent::AssistantDelta(format!("\r\n[tool: {name}]\r\n")));
-                let outcome = exec_tool(op_tx, name, input).await;
+                let outcome = run_tool(ui_tx, op_tx, &name, input).await;
                 results.push(Content::ToolResult {
                     tool_use_id: id,
                     content: outcome.content,
@@ -238,11 +238,53 @@ async fn run_turn(
     out
 }
 
+/// Run a tool, gating mutating tools behind a user confirmation (default on).
+async fn run_tool(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    name: &str,
+    input: Value,
+) -> ToolOutcome {
+    // `preview` returns Some only for mutating tools; those require confirmation.
+    if let Some(preview) = tools::preview(name, &input) {
+        if config::confirmation_required() {
+            let _ = ui_tx.send(UiEvent::AssistantDelta(format!("Proposed change: {preview}\r\n")));
+            let _ = ui_tx.send(UiEvent::Announce(format!("Proposed change: {preview}. Confirm?")));
+            let confirmed = confirm(
+                op_tx,
+                format!("The assistant proposes this change:\n\n{preview}\n\nApply it?"),
+            )
+            .await;
+            if !confirmed {
+                let _ = ui_tx.send(UiEvent::AssistantDelta("Declined.\r\n".into()));
+                return ToolOutcome {
+                    content: json!({ "applied": false, "reason": "user declined the change" })
+                        .to_string(),
+                    is_error: false,
+                };
+            }
+            let outcome = exec_tool(op_tx, name.to_string(), input).await;
+            let _ = ui_tx.send(UiEvent::AssistantDelta("Applied.\r\n".into()));
+            return outcome;
+        }
+    }
+    exec_tool(op_tx, name.to_string(), input).await
+}
+
+/// Ask the user to confirm a change via a native message box (main thread).
+async fn confirm(op_tx: &CbSender<ReaperOp>, message: String) -> bool {
+    let (tx, rx) = oneshot::channel();
+    if op_tx.send(ReaperOp::Confirm { message, reply: tx }).is_err() {
+        return false;
+    }
+    rx.await.unwrap_or(false)
+}
+
 /// Send a tool to the main thread for execution and await its result.
 async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> ToolOutcome {
     let (reply_tx, reply_rx) = oneshot::channel();
     if op_tx
-        .send(ReaperOp {
+        .send(ReaperOp::Tool {
             name,
             input,
             reply: reply_tx,

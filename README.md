@@ -25,16 +25,23 @@ The roadmap runs Phase 0 → Phase 8. Phases 0–1 are implemented and building:
 | API key entry (native input box) + OS credential-store storage | ✅ |
 | **Phase 1:** tool-use agent loop | ✅ code complete |
 | **Phase 2:** plugin/FX + item read tools (incl. take FX) | ✅ code complete |
+| **Phase 3:** safe mutations (confirm + Undo) + undo tools | ✅ code complete |
 
-**Read tools** (executed on the main thread, results fed back to the model):
-`get_project_summary`, `get_tracks`, `get_track_fx`, `get_fx_params`,
-`get_selected_items`, `get_take_fx`, `get_take_fx_params`, `list_installed_fx`,
-`get_focused_fx`. Ask e.g. *"what plugins are on the selected track and how is
-the EQ set?"* or *"describe the FX window I have open."*
+**Read tools** (main thread, results fed back to the model): `get_project_summary`,
+`get_tracks`, `get_track_fx`, `get_fx_params`, `get_selected_items`,
+`get_take_fx`, `get_take_fx_params`, `list_installed_fx`, `get_focused_fx`.
 
-Later phases add: safe Undo-wrapped mutations (P3), MIDI composition (P4), the
-shared OpenAI-compatible provider adapter (P5), audio analysis via JSFX probe +
-Rust DSP (P6), screen vision (P7), docking + distribution (P8).
+**Mutating tools** (`add_fx`, `set_fx_param`, `set_fx_enabled`): every change is
+shown to the user for confirmation (a native, screen-reader-accessible Yes/No
+box) and wrapped in a **labelled Undo block** (`AI: …`) so both the user and the
+assistant can revert it. Confirmation is on by default (`RAAI_CONFIRM=off` to
+disable). The assistant can also `undo`/`redo`, and `get_undo_history` returns
+the next undo/redo labels plus a rolling log of recent actions (sampled from
+`Undo_CanUndo2`) so it can comment on the user's workflow.
+
+Later phases add: MIDI composition (P4), the shared OpenAI-compatible provider
+adapter (P5), audio analysis via JSFX probe + Rust DSP (P6), screen vision (P7),
+docking + distribution (P8).
 
 ## Architecture
 

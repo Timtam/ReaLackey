@@ -49,19 +49,31 @@ pub fn default_model() -> String {
     std::env::var("RAAI_MODEL").unwrap_or_else(|_| "claude-opus-4-8".to_string())
 }
 
+/// Whether mutating tools require user confirmation (design: configurable,
+/// default on). Set `RAAI_CONFIRM=off` (or 0/false/no) to disable.
+pub fn confirmation_required() -> bool {
+    match std::env::var("RAAI_CONFIRM") {
+        Ok(v) => !matches!(v.trim().to_lowercase().as_str(), "0" | "off" | "false" | "no"),
+        Err(_) => true,
+    }
+}
+
 /// System prompt. Establishes the role and how to use the read tools
 /// (design §kap-llm). Grows as more capabilities land.
 pub fn system_prompt() -> String {
     "You are an AI assistant embedded in the REAPER digital audio workstation. \
-     You can inspect the user's project through tools: the project summary, the \
-     track list, a track's FX chain and its parameters, selected media items, an \
-     item's take FX and their parameters, the list of installed plugins, and the \
-     currently focused FX window. When a question depends on the current project \
-     state, call the appropriate tool instead of guessing, and chain tools when \
-     needed (e.g. resolve the focused FX, then read its parameters). When \
-     explaining parameters, prefer the human-readable display value over the raw \
-     normalized 0..1 value. Answer concisely. You cannot modify the project yet — \
-     tools for making changes arrive in a later phase."
+     You can inspect the project through read tools (project summary, tracks, \
+     track/take FX and their parameters, selected items, installed plugins, and \
+     the focused FX window) and make changes through mutating tools (add an FX, \
+     set an FX parameter, enable/bypass an FX). When a question depends on the \
+     current project state, call a tool instead of guessing, and chain tools when \
+     needed (e.g. resolve the focused FX, then read its parameters). Prefer \
+     human-readable display values over raw normalized 0..1 values. Before making \
+     a change, briefly explain what you intend to do; every change is shown to the \
+     user for confirmation and is wrapped in a labelled undo block, so both you \
+     and the user can undo it. You can undo/redo actions and read the recent-action \
+     history (get_undo_history) to understand the user's workflow and suggest \
+     improvements. Answer concisely."
         .to_string()
 }
 
