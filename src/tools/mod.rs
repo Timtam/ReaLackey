@@ -901,6 +901,40 @@ pub fn definitions() -> Vec<ToolDef> {
                 json!(["target"]),
             ),
         },
+        // --- track/MIDI creation & deletion ---
+        ToolDef {
+            name: "create_track".into(),
+            description: "Insert a new track. CHANGES the project (confirmed + undo-wrapped). \
+                          'index' is the 0-based position (default: after the last track); 'name' \
+                          is optional. Returns the new track_index."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "index": { "type": "integer", "description": "0-based insert position (default: end)" },
+                    "name": { "type": "string", "description": "track name (optional)" }
+                }),
+                json!([]),
+            ),
+        },
+        ToolDef {
+            name: "delete_midi_notes".into(),
+            description: "Delete MIDI notes from a media item's active take. CHANGES the project \
+                          (confirmed + undo-wrapped). With no filters it deletes ALL notes; \
+                          otherwise only notes matching the pitch range (pitch_min/pitch_max, \
+                          0-127) and/or time range (start_time/end_time in seconds, matched on the \
+                          note's start)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "pitch_min": { "type": "integer", "description": "lowest MIDI pitch to delete (0-127)" },
+                    "pitch_max": { "type": "integer", "description": "highest MIDI pitch to delete (0-127)" },
+                    "start_time": { "type": "number", "description": "only notes starting at/after this time (seconds)" },
+                    "end_time": { "type": "number", "description": "only notes starting at/before this time (seconds)" }
+                }),
+                json!(["item_index"]),
+            ),
+        },
     ]
 }
 
@@ -1184,6 +1218,16 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             input.get("start").and_then(|v| v.as_f64()),
             input.get("length").and_then(|v| v.as_f64()),
         ),
+        // track / MIDI creation & deletion
+        "create_track" => create_track(reaper, opt_u32(input, "index"), opt_str(input, "name")),
+        "delete_midi_notes" => delete_midi_notes(
+            reaper,
+            req_u32(input, "item_index")?,
+            input.get("pitch_min").and_then(|v| v.as_i64()),
+            input.get("pitch_max").and_then(|v| v.as_i64()),
+            input.get("start_time").and_then(|v| v.as_f64()),
+            input.get("end_time").and_then(|v| v.as_f64()),
+        ),
         // undo / history
         "undo" => Ok(undo(reaper)),
         "redo" => Ok(redo(reaper)),
@@ -1371,6 +1415,15 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("src_item_index"),
             show("dest_item_index"),
         )),
+        "create_track" => Some(format!(
+            "Create a track{}",
+            input
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| format!(" named \"{n}\""))
+                .unwrap_or_default(),
+        )),
+        "delete_midi_notes" => Some(format!("Delete MIDI notes from item {}", show("item_index"))),
         _ => None,
     }
 }
@@ -1943,6 +1996,96 @@ fn create_midi_item(
         "track_index": track_index,
         "item_index": item_index,
     }))
+}
+
+fn create_track(
+    reaper: &Reaper<MainThreadScope>,
+    index: Option<u32>,
+    name: Option<&str>,
+) -> Result<Value, String> {
+    if let Some(n) = name {
+        if n.as_bytes().contains(&0) {
+            return Err("name contains a NUL byte".to_string());
+        }
+    }
+    let project = ProjectContext::CurrentProject;
+    let count = reaper.count_tracks(project);
+    let idx = index.unwrap_or(count).min(count);
+    reaper.undo_begin_block_2(project);
+    reaper.insert_track_at_index(idx, TrackDefaultsBehavior::AddDefaultEnvAndFx);
+    if let Some(n) = name {
+        if let Some(track) = reaper.get_track(project, idx) {
+            unsafe { reaper.get_set_media_track_info_set_name(track, n) };
+        }
+    }
+    reaper.undo_end_block_2(project, format!("AI: create track at {idx}"), UndoScope::All);
+    reaper.low().TrackList_AdjustWindows(false);
+    reaper.update_arrange();
+    Ok(json!({ "created": true, "track_index": idx, "name": name }))
+}
+
+fn delete_midi_notes(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    pitch_min: Option<i64>,
+    pitch_max: Option<i64>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let take = unsafe { reaper.get_active_take(item) }.ok_or("item has no active take")?;
+    let t = take.as_ptr();
+    let low = reaper.low();
+    let mut note_count: c_int = 0;
+    let mut cc: c_int = 0;
+    let mut syx: c_int = 0;
+    unsafe { low.MIDI_CountEvts(t, &mut note_count, &mut cc, &mut syx) };
+    let filter_time = start_time.is_some() || end_time.is_some();
+    let mut to_delete = Vec::new();
+    for i in 0..note_count {
+        let mut selected = false;
+        let mut muted = false;
+        let mut sppq = 0.0f64;
+        let mut eppq = 0.0f64;
+        let mut chan: c_int = 0;
+        let mut pitch: c_int = 0;
+        let mut vel: c_int = 0;
+        let ok = unsafe {
+            low.MIDI_GetNote(
+                t, i, &mut selected, &mut muted, &mut sppq, &mut eppq, &mut chan, &mut pitch,
+                &mut vel,
+            )
+        };
+        if !ok {
+            continue;
+        }
+        if pitch_min.is_some_and(|p| (pitch as i64) < p) {
+            continue;
+        }
+        if pitch_max.is_some_and(|p| (pitch as i64) > p) {
+            continue;
+        }
+        if filter_time {
+            let start = unsafe { low.MIDI_GetProjTimeFromPPQPos(t, sppq) };
+            if start_time.is_some_and(|s| start < s) || end_time.is_some_and(|e| start > e) {
+                continue;
+            }
+        }
+        to_delete.push(i);
+    }
+    reaper.undo_begin_block_2(project);
+    // Delete from the highest index down so earlier indices stay valid.
+    for &i in to_delete.iter().rev() {
+        unsafe { low.MIDI_DeleteNote(t, i) };
+    }
+    unsafe { low.MIDI_Sort(t) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete {} MIDI note(s) from item {item_index}", to_delete.len()),
+        UndoScope::All,
+    );
+    Ok(json!({ "deleted": to_delete.len(), "item_index": item_index }))
 }
 
 fn note_name(pitch: c_int) -> String {

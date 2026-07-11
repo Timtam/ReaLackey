@@ -156,11 +156,29 @@ pub fn ensure_created() {
     {
         // Build the webview WITHOUT holding the STATE borrow: creating the child
         // window can synchronously fire WM_SIZE -> on_resize(), which borrows STATE.
-        if let Some(webview) = webview_impl::create() {
-            STATE.with(|c| c.borrow_mut().webview = Some(webview));
-            ffi::set_output_edit_visible(false);
+        match webview_impl::create() {
+            Ok(webview) => {
+                STATE.with(|c| c.borrow_mut().webview = Some(webview));
+                ffi::set_output_edit_visible(false);
+                console("REAPER AI Assistant: HTML output pane active.\n");
+            }
+            Err(e) => {
+                console(&format!(
+                    "REAPER AI Assistant: HTML pane unavailable, using plain text output. \
+                     Reason: {e}\n"
+                ));
+            }
         }
     }
+    #[cfg(not(windows))]
+    {
+        console("REAPER AI Assistant: plain text output (webview only on Windows).\n");
+    }
+}
+
+/// Print a line to REAPER's console (main-thread REAPER handle).
+fn console(msg: &str) {
+    let _ = crate::reaper::api::with(|r| r.show_console_msg(msg));
 }
 
 /// Drop the webview when its parent dialog is destroyed, so it never lingers
@@ -266,16 +284,27 @@ function updateAssistant(h){var c=document.getElementById('cur');if(c){c.innerHT
 function setToolResult(h){var l=document.querySelectorAll('#log details.tool');if(l.length){var t=l[l.length-1].querySelector('.tres');if(t){t.innerHTML=h;sd();}}}
 </script></body></html>"#;
 
-    pub fn create() -> Option<WebView> {
+    // WebView2 is COM and requires the calling (UI) thread to be in a
+    // single-threaded apartment. wry does not initialize COM when hosting in a
+    // foreign HWND, so do it ourselves; harmless if the thread is already STA
+    // (returns S_FALSE) and we deliberately never CoUninitialize.
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
+    }
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
+
+    pub fn create() -> Result<WebView, String> {
         let hwnd = ffi::get_hwnd() as isize;
-        let host = Host(NonZeroIsize::new(hwnd)?);
-        let (x, y, w, h) = ffi::output_bounds()?;
+        let host = Host(NonZeroIsize::new(hwnd).ok_or("dialog window handle is null")?);
+        let (x, y, w, h) = ffi::output_bounds().ok_or("output area bounds unavailable")?;
+        unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
         WebViewBuilder::new()
             .with_bounds(bounds(x, y, w, h))
             .with_html(BASE_HTML)
             .with_transparent(false)
             .build_as_child(&host)
-            .ok()
+            .map_err(|e| e.to_string())
     }
 
     pub fn set_bounds(webview: &WebView, x: i32, y: i32, w: i32, h: i32) {

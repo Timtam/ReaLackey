@@ -77,7 +77,8 @@ pub fn system_prompt() -> String {
      master FX)) and make changes through \
      mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
-     notes, create a MIDI item, add/adjust/remove track sends, write \
+     notes, delete MIDI notes, create a MIDI item, create tracks, \
+     add/adjust/remove track sends, write \
      automation points, add/delete markers and regions, edit the tempo map and \
      project tempo, add/delete take stretch markers, change render settings, \
      edit item properties (fades, length, mute, loop, snap, color), take \
