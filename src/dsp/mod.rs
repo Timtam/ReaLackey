@@ -37,6 +37,14 @@ pub struct AudioFeatures {
     pub silent: bool,
     /// Integrated loudness (BS.1770-4, gated). None if under ~400 ms of audio.
     pub integrated_lufs: Option<f64>,
+    /// Loudness range (EBU Tech 3342), in LU. None under ~a few seconds of audio.
+    pub loudness_range_lu: Option<f64>,
+    /// Maximum momentary (400 ms) loudness, LUFS.
+    pub momentary_lufs_max: Option<f64>,
+    /// Maximum short-term (3 s) loudness, LUFS.
+    pub short_term_lufs_max: Option<f64>,
+    /// True peak in dBTP (4x-oversampled inter-sample peak; can exceed 0).
+    pub true_peak_dbtp: Option<f64>,
     /// Spectral centre of mass in Hz (a rough "brightness" indicator).
     pub spectral_centroid_hz: Option<f64>,
     /// Loudest spectral bin in Hz.
@@ -92,6 +100,12 @@ pub fn analyze(samples: &[f64], channels: usize, sample_rate: f64) -> AudioFeatu
     // the whole serialization, so drop a non-finite result to None instead.
     let integrated_lufs =
         integrated_loudness(samples, channels, frames, sample_rate).filter(|v| v.is_finite());
+    let momentary_lufs_max =
+        momentary_max(samples, channels, frames, sample_rate).filter(|v| v.is_finite());
+    let (lra, st_max) = short_term_stats(samples, channels, frames, sample_rate);
+    let loudness_range_lu = lra.filter(|v| v.is_finite());
+    let short_term_lufs_max = st_max.filter(|v| v.is_finite());
+    let true_peak_dbtp = true_peak_dbtp(samples, channels, frames).filter(|v| v.is_finite());
 
     AudioFeatures {
         sample_rate,
@@ -106,6 +120,10 @@ pub fn analyze(samples: &[f64], channels: usize, sample_rate: f64) -> AudioFeatu
         clipping: clip_count > 0,
         silent: peak_dbfs < -60.0,
         integrated_lufs,
+        loudness_range_lu,
+        momentary_lufs_max,
+        short_term_lufs_max,
+        true_peak_dbtp,
         spectral_centroid_hz: sp.centroid_hz,
         dominant_frequency_hz: sp.dominant_hz,
         band_low_pct: sp.low_pct,
@@ -427,6 +445,188 @@ fn mean_ms(block_ms: &[Vec<f64>], idx: &[usize], channels: usize) -> Vec<f64> {
     acc
 }
 
+// ---- short-term loudness, loudness range (EBU Tech 3342), true peak ---------
+
+/// Per-window K-weighted block loudness (LUFS) for a given window/hop in seconds.
+/// Shared by the momentary (400 ms / 100 ms) and short-term (3 s / 1 s) metrics.
+fn block_loudness_series(
+    samples: &[f64],
+    channels: usize,
+    frames: usize,
+    sample_rate: f64,
+    window_s: f64,
+    hop_s: f64,
+) -> Vec<f64> {
+    let block = (window_s * sample_rate).round() as usize;
+    let step = (hop_s * sample_rate).round() as usize;
+    if block == 0 || step == 0 || frames < block {
+        return Vec::new();
+    }
+    let weighted: Vec<Vec<f64>> = (0..channels)
+        .map(|c| {
+            let ch: Vec<f64> = (0..frames)
+                .map(|f| {
+                    let s = samples[f * channels + c];
+                    if s.is_finite() {
+                        s
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            k_weight(&ch)
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start + block <= frames {
+        let mut sum_ms = 0.0f64;
+        for w in &weighted {
+            let mut s = 0.0f64;
+            for &v in &w[start..start + block] {
+                s += v * v;
+            }
+            sum_ms += s / block as f64;
+        }
+        out.push(loudness_from_ms(sum_ms));
+        start += step;
+    }
+    out
+}
+
+/// Loudness for the linear-energy mean of the given block loudnesses (inverse of
+/// `loudness_from_ms`, average, forward) — used for the EBU 3342 relative gate.
+fn energy_mean_loudness(ls: &[f64]) -> f64 {
+    if ls.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let sum: f64 = ls
+        .iter()
+        .map(|&l| 10f64.powf((l + 0.691) / 10.0))
+        .sum();
+    loudness_from_ms(sum / ls.len() as f64)
+}
+
+/// Percentile (0..100) of a pre-sorted ascending slice, linearly interpolated.
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    match sorted.len() {
+        0 => f64::NAN,
+        1 => sorted[0],
+        n => {
+            let rank = (p / 100.0) * (n - 1) as f64;
+            let lo = rank.floor() as usize;
+            let hi = rank.ceil() as usize;
+            sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
+        }
+    }
+}
+
+/// Maximum momentary (400 ms) loudness, LUFS.
+fn momentary_max(samples: &[f64], channels: usize, frames: usize, sample_rate: f64) -> Option<f64> {
+    block_loudness_series(samples, channels, frames, sample_rate, 0.4, 0.1)
+        .into_iter()
+        .filter(|v| v.is_finite())
+        .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |x| x.max(v))))
+}
+
+/// Loudness range (EBU Tech 3342) and the max short-term (3 s) loudness, from the
+/// short-term loudness distribution. LRA = P95 − P10 of the gated short-term
+/// values (absolute gate −70 LUFS, relative gate −20 LU below their energy mean).
+fn short_term_stats(
+    samples: &[f64],
+    channels: usize,
+    frames: usize,
+    sample_rate: f64,
+) -> (Option<f64>, Option<f64>) {
+    let series = block_loudness_series(samples, channels, frames, sample_rate, 3.0, 1.0);
+    let finite: Vec<f64> = series.into_iter().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return (None, None);
+    }
+    let st_max = finite.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    // Absolute gate at −70 LUFS, then a relative gate 20 LU below the energy mean.
+    let abs_gated: Vec<f64> = finite.iter().cloned().filter(|&v| v > -70.0).collect();
+    if abs_gated.len() < 2 {
+        return (None, Some(st_max));
+    }
+    let rel_gate = energy_mean_loudness(&abs_gated) - 20.0;
+    let mut gated: Vec<f64> = abs_gated.into_iter().filter(|&v| v > rel_gate).collect();
+    if gated.len() < 2 {
+        return (None, Some(st_max));
+    }
+    gated.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let lra = percentile(&gated, 95.0) - percentile(&gated, 10.0);
+    (Some(lra), Some(st_max))
+}
+
+/// True peak in dBTP via 4x oversampling (BS.1770-4 style): each channel is
+/// interpolated with a windowed-sinc polyphase kernel and the largest
+/// inter-sample magnitude across all channels is taken. Can exceed 0 dBTP.
+fn true_peak_dbtp(samples: &[f64], channels: usize, frames: usize) -> Option<f64> {
+    if frames == 0 {
+        return None;
+    }
+    const OS: usize = 4; // oversample factor
+    const HALF: usize = 6; // kernel half-width in input samples
+    const TAPS: usize = 2 * HALF;
+
+    // One kernel per fractional phase p/OS (p in 1..OS). Phase 0 is the exact
+    // sample. Each kernel is a Blackman-windowed sinc, normalised to unity gain.
+    let mut kernels = vec![vec![0.0f64; TAPS]; OS];
+    for (p, ker) in kernels.iter_mut().enumerate() {
+        let frac = p as f64 / OS as f64;
+        let mut sum = 0.0f64;
+        for (j, k) in ker.iter_mut().enumerate() {
+            let x = (j as f64 - (HALF as f64 - 1.0)) - frac;
+            let sinc = if x.abs() < 1e-9 {
+                1.0
+            } else {
+                (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+            };
+            let a = 2.0 * std::f64::consts::PI * j as f64 / (TAPS - 1) as f64;
+            let w = 0.42 - 0.5 * a.cos() + 0.08 * (2.0 * a).cos(); // Blackman
+            *k = sinc * w;
+            sum += *k;
+        }
+        if sum.abs() > 1e-12 {
+            for k in ker.iter_mut() {
+                *k /= sum;
+            }
+        }
+    }
+
+    let mut peak = 0.0f64;
+    for c in 0..channels {
+        for i in 0..frames {
+            // Phase 0: the sample itself.
+            let s = samples[i * channels + c];
+            let a = if s.is_finite() { s.abs() } else { 0.0 };
+            if a > peak {
+                peak = a;
+            }
+            // Phases 1..OS: interpolated inter-sample points.
+            for ker in kernels.iter().skip(1) {
+                let mut acc = 0.0f64;
+                for (j, &k) in ker.iter().enumerate() {
+                    let idx = i as isize - (HALF as isize - 1) + j as isize;
+                    if idx >= 0 && (idx as usize) < frames {
+                        let v = samples[idx as usize * channels + c];
+                        if v.is_finite() {
+                            acc += v * k;
+                        }
+                    }
+                }
+                let a = acc.abs();
+                if a > peak {
+                    peak = a;
+                }
+            }
+        }
+    }
+    Some(to_dbfs(peak))
+}
+
 // ---- WAV decoding (for reading rendered/processed audio back) --------------
 
 /// Decode a canonical PCM / IEEE-float WAV into interleaved f64 samples.
@@ -531,6 +731,26 @@ mod tests {
         // A sine's RMS is -3.01 dB below its peak.
         assert!((f.rms_dbfs + 3.01).abs() < 0.3, "rms {}", f.rms_dbfs);
         assert!(!f.silent);
+    }
+
+    #[test]
+    fn true_peak_at_or_above_sample_peak() {
+        // A 1 kHz sine at -6 dBFS: the oversampled true peak is at/above the sample
+        // peak and close to the sine's amplitude (~-6 dBTP).
+        let f = analyze(&sine(1000.0, 0.5, 1.0, 48000.0), 1, 48000.0);
+        let tp = f.true_peak_dbtp.expect("true peak");
+        assert!(tp >= f.peak_dbfs - 0.05, "tp {tp} vs peak {}", f.peak_dbfs);
+        assert!((tp + 6.02).abs() < 0.6, "tp {tp}");
+    }
+
+    #[test]
+    fn steady_tone_has_near_zero_loudness_range() {
+        // A constant-level tone has essentially no loudness range.
+        let f = analyze(&sine(1000.0, 0.5, 10.0, 48000.0), 1, 48000.0);
+        let lra = f.loudness_range_lu.expect("lra");
+        assert!(lra.abs() < 1.0, "lra {lra}");
+        assert!(f.short_term_lufs_max.is_some());
+        assert!(f.momentary_lufs_max.is_some());
     }
 
     #[test]

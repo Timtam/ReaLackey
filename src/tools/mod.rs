@@ -1120,6 +1120,28 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
             json!(["target"]),
         ),
     });
+    defs.push(ToolDef {
+        name: "measure_loudness".into(),
+        description: "Measure professional loudness of the PROCESSED output: briefly renders the mix \
+                      offline through the FX chain, then measures it with BS.1770 DSP. Returns \
+                      integrated loudness (LUFS-I), loudness range (LRA in LU), true-peak (dBTP), \
+                      momentary/short-term LUFS maxima, sample peak (dBFS), RMS and clipping — the \
+                      EBU R128 / streaming-target metrics. target 'master' measures the full mix \
+                      (incl. master FX); 'track' (with track_index) measures a track's post-FX \
+                      output. Optional start/length seconds (else the time selection, else up to \
+                      30 s of content). Nothing is left in the project and there is no undo point. \
+                      REAPER is briefly unresponsive during the render; not cancellable."
+            .into(),
+        input_schema: obj(
+            json!({
+                "target": { "type": "string", "enum": ["master", "track"], "description": "'master' = full mix, 'track' = one track's processed output" },
+                "track_index": { "type": "integer", "description": "0-based track index (required when target is 'track')" },
+                "start": { "type": "number", "description": "start in seconds (default: time selection or 0)" },
+                "length": { "type": "number", "description": "seconds to measure (default: content/selection, capped at 30 s)" }
+            }),
+            json!(["target"]),
+        ),
+    });
     if !supports_images {
         defs.retain(|d| !is_vision_tool(&d.name));
     }
@@ -1137,6 +1159,19 @@ mod definition_tests {
             defs.iter().any(|d| d.name == "analyze_processed_audio"),
             "analyze_processed_audio must be advertised"
         );
+    }
+
+    #[test]
+    fn loudness_probe_advertised_regardless_of_vision() {
+        // measure_loudness (the Phase-6a JSFX probe) is not a vision tool, so it
+        // must be offered whether or not the model supports images.
+        for supports_images in [true, false] {
+            let defs = super::definitions(supports_images);
+            assert!(
+                defs.iter().any(|d| d.name == "measure_loudness"),
+                "measure_loudness must be advertised (supports_images={supports_images})"
+            );
+        }
     }
 }
 
@@ -1732,6 +1767,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             input.get("length").and_then(|v| v.as_f64()),
         ),
         "analyze_processed_audio" => analyze_processed_audio(reaper, input),
+        "measure_loudness" => measure_loudness(reaper, input),
         // track / MIDI creation & deletion
         "create_track" => create_track(reaper, opt_u32(input, "index"), opt_str(input, "name")),
         "delete_midi_notes" => delete_midi_notes(
@@ -4924,6 +4960,149 @@ fn analyze_processed_audio(
         false,
         features,
     ))
+}
+
+// ---- loudness of the processed output (offline render + BS.1770 DSP) --------
+
+/// Measure professional loudness (integrated LUFS, LRA, true-peak, momentary /
+/// short-term maxima) of the PROCESSED output: briefly render the master mix or a
+/// track's processed output through its FX chain to a temp WAV, then measure the
+/// rendered audio with our own BS.1770 DSP. All render/selection changes and the
+/// temp file are reverted by a Drop guard on every path.
+fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
+    let target = req_str(input, "target")?;
+    let track_index = opt_u32(input, "track_index");
+    let (track, is_master) = match target {
+        "master" => (reaper.get_master_track(ProjectContext::CurrentProject), true),
+        "track" => {
+            let ti =
+                track_index.ok_or_else(|| "target 'track' requires track_index".to_string())?;
+            (track_at(reaper, ti)?, false)
+        }
+        other => {
+            return Err(format!("unknown target '{other}' (use 'master' or 'track')"));
+        }
+    };
+    let low = reaper.low();
+
+    // Window: explicit range, else the time selection, else project content,
+    // capped at the analysis limit.
+    let param_start = input.get("start").and_then(|v| v.as_f64());
+    let param_length = input.get("length").and_then(|v| v.as_f64());
+    let (mut sel_start, mut sel_end) = (0.0f64, 0.0f64);
+    unsafe { low.GetSet_LoopTimeRange(false, false, &mut sel_start, &mut sel_end, false) };
+    let has_selection = sel_end > sel_start;
+    let start = param_start
+        .unwrap_or(if has_selection { sel_start } else { 0.0 })
+        .max(0.0);
+    let default_len = if has_selection && param_start.is_none() {
+        sel_end - sel_start
+    } else {
+        let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
+        let acc = unsafe { low.CreateTrackAudioAccessor(master) };
+        if acc.is_null() {
+            PROCESSED_DEFAULT_SECONDS
+        } else {
+            let end = unsafe { low.GetAudioAccessorEndTime(acc) };
+            unsafe { low.DestroyAudioAccessor(acc) };
+            let content = (end - start).max(0.0);
+            if content > 0.0 {
+                content
+            } else {
+                PROCESSED_DEFAULT_SECONDS
+            }
+        }
+    };
+    let requested_len = param_length.unwrap_or(default_len);
+    let rlen = requested_len.clamp(0.0, MAX_ANALYZE_SECONDS);
+    if !start.is_finite() || !rlen.is_finite() || rlen <= 0.0 {
+        return Err("invalid or empty measurement window".to_string());
+    }
+    let truncated = requested_len.is_finite() && requested_len > MAX_ANALYZE_SECONDS;
+    let (rstart, rend) = (start, start + rlen);
+
+    // Snapshot render state (+ track selection for a track target) BEFORE mutating.
+    let track_selection = (!is_master).then(|| {
+        let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
+        let master_selected = !master.is_null()
+            && unsafe { low.GetMediaTrackInfo_Value(master, c"I_SELECTED".as_ptr()) } != 0.0;
+        (selected_track_set(reaper), master_selected)
+    });
+    let mut guard = RenderStateGuard {
+        reaper,
+        num: RENDER_NUM_KEYS.iter().map(|k| proj_info_get(low, k)).collect(),
+        strs: RENDER_STR_KEYS
+            .iter()
+            .map(|k| proj_info_str_snapshot(low, k))
+            .collect(),
+        track_selection,
+        item_selection: None,
+        path: None,
+    };
+
+    // Configure + run the offline render of the processed output, then measure the
+    // rendered audio with our own BS.1770 DSP. (An earlier design inserted REAPER's
+    // loudness_meter JSFX and read its params, but an offline render does not update
+    // a live FX instance's sliders — it processes a discarded copy — so the meter
+    // read came back as silence. DSP on the rendered file is the reliable path.)
+    let tmp_dir = std::env::temp_dir().to_string_lossy().to_string();
+    let base = format!("raai_loudness_probe_{}", std::process::id());
+    proj_info_str_set(low, c"RENDER_FORMAT", "ZXZhdyAAAQ==");
+    proj_info_set(low, c"RENDER_SETTINGS", if is_master { 0.0 } else { 128.0 });
+    proj_info_set(low, c"RENDER_BOUNDSFLAG", 0.0);
+    proj_info_set(low, c"RENDER_STARTPOS", rstart);
+    proj_info_set(low, c"RENDER_ENDPOS", rend);
+    proj_info_set(low, c"RENDER_SRATE", ANALYZE_SR as f64);
+    proj_info_set(low, c"RENDER_CHANNELS", 2.0);
+    proj_info_set(low, c"RENDER_TAILFLAG", 0.0);
+    proj_info_set(low, c"RENDER_ADDTOPROJ", 0.0);
+    proj_info_set(low, c"RENDER_NORMALIZE", 0.0);
+    proj_info_set(low, c"RENDER_DITHER", 0.0);
+    proj_info_str_set(low, c"RENDER_FILE", &tmp_dir);
+    proj_info_str_set(low, c"RENDER_PATTERN", &base);
+    if !is_master {
+        unsafe { low.SetOnlyTrackSelected(track.as_ptr()) };
+    }
+    let path = proj_info_str_get(low, c"RENDER_TARGETS")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    guard.path = Some(path.clone());
+    if path.is_empty() {
+        return Err("REAPER reported no render target path".to_string());
+    }
+    let _ = std::fs::remove_file(&path);
+    // 42230 = File: Render project, using the most recent render settings.
+    low.Main_OnCommand(42230, 0);
+
+    // `?` here drops `guard`, which restores settings/selection and deletes the file.
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("could not read the rendered file: {e}"))?;
+    let (samples, channels, sr) = crate::dsp::parse_wav(&bytes)?;
+    let f = crate::dsp::analyze(&samples, channels, sr);
+
+    Ok(json!({
+        "target": target,
+        "track_index": track_index,
+        "chain": if is_master { "full mix including master FX" } else { "track FX + master FX" },
+        "measurement_start": rstart,
+        "measurement_length": rlen,
+        "truncated": truncated,
+        "source": "offline render + BS.1770 DSP",
+        "loudness": {
+            "integrated_lufs": f.integrated_lufs,
+            "loudness_range_lu": f.loudness_range_lu,
+            "true_peak_dbtp": f.true_peak_dbtp,
+            "momentary_lufs_max": f.momentary_lufs_max,
+            "short_term_lufs_max": f.short_term_lufs_max,
+            "peak_dbfs": f.peak_dbfs,
+            "rms_dbfs": f.rms_dbfs,
+            "clipping": f.clipping,
+        }
+    }))
+    // Drop guard here: restore render settings/selection, delete temp file.
 }
 
 // ---- helpers ----------------------------------------------------------------

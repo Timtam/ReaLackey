@@ -55,7 +55,9 @@ pub fn system_prompt() -> String {
      and a spectral profile — of a take or track's pre-FX source audio, or, via \
      a brief offline render, of PROCESSED post-FX audio (an item through its \
      take+track FX, a track's processed output, or the full master mix incl. \
-     master FX)) and make changes through \
+     master FX), plus professional loudness metering — integrated LUFS, loudness \
+     range (LRA), true-peak (dBTP), and momentary/short-term maxima — of the \
+     processed master or a track (measure_loudness)) and make changes through \
      mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
      notes, delete MIDI notes, create a MIDI item, create tracks, \
