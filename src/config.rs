@@ -36,7 +36,11 @@ pub fn has_api_key() -> bool {
 /// reflects only whether persistence to the credential store succeeded.
 pub fn set_api_key(key: &str) -> Result<(), String> {
     let key = key.trim().to_string();
-    *CACHED_KEY.write().unwrap() = if key.is_empty() { None } else { Some(key.clone()) };
+    *CACHED_KEY.write().unwrap() = if key.is_empty() {
+        None
+    } else {
+        Some(key.clone())
+    };
     if key.is_empty() {
         keyring_delete()
     } else {
@@ -61,21 +65,14 @@ pub fn max_output_tokens() -> u32 {
         .unwrap_or(8192)
 }
 
-/// Whether the offline post-FX render (`analyze_processed_audio`) is allowed. ON
-/// by default now that it works (the crash was a bad `RENDER_FORMAT` value, now
-/// a valid 32-bit-float WAV config). Kill switch: `RAAI_DISABLE_PROCESSED_RENDER=1`.
-pub fn processed_render_enabled() -> bool {
-    !matches!(
-        std::env::var("RAAI_DISABLE_PROCESSED_RENDER").as_deref(),
-        Ok("1") | Ok("true") | Ok("on") | Ok("yes")
-    )
-}
-
 /// Whether mutating tools require user confirmation (design: configurable,
 /// default on). Set `RAAI_CONFIRM=off` (or 0/false/no) to disable.
 pub fn confirmation_required() -> bool {
     match std::env::var("RAAI_CONFIRM") {
-        Ok(v) => !matches!(v.trim().to_lowercase().as_str(), "0" | "off" | "false" | "no"),
+        Ok(v) => !matches!(
+            v.trim().to_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ),
         Err(_) => true,
     }
 }

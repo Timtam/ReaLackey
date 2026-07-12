@@ -96,9 +96,7 @@ fn is_vision_tool(name: &str) -> bool {
 /// Tool definitions advertised to the model. Vision/pixel tools are only
 /// included when the active model can actually see images.
 pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
-    let obj = |props: Value, required: Value| {
-        json!({ "type": "object", "properties": props, "required": required })
-    };
+    let obj = |props: Value, required: Value| json!({ "type": "object", "properties": props, "required": required });
     let empty = || json!({ "type": "object", "properties": {} });
     let mut defs = vec![
         ToolDef {
@@ -1086,33 +1084,29 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
             input_schema: empty(),
         },
     ];
-    // Post-FX render is opt-in (experimental deferred render): only advertise it
-    // when enabled, so models don't offer it unless the user turned it on.
-    if crate::config::processed_render_enabled() {
-        defs.push(ToolDef {
-            name: "analyze_processed_audio".into(),
-            description: "Analyse PROCESSED (post-FX) audio by doing a short offline render and \
-                          measuring the result — the same metrics as analyze_track_audio (peak/RMS, \
-                          loudness LUFS, clipping, spectral profile) but WITH the FX applied. \
-                          target 'master' = full mix (all track FX + master FX); 'track' (with \
-                          track_index) = that track through its FX + master; 'item' (with \
-                          item_index) = that item through its take + track FX. Briefly renders \
-                          offline (REAPER may be momentarily unresponsive; not cancellable). Window \
-                          capped at 30 s. Use analyze_track_audio / analyze_item_audio for the raw \
-                          pre-FX source."
-                .into(),
-            input_schema: obj(
-                json!({
-                    "target": { "type": "string", "enum": ["master", "track", "item"], "description": "'master' = full mix, 'track' = one track's processed output, 'item' = one item through its take+track FX" },
-                    "track_index": { "type": "integer", "description": "required when target is 'track'" },
-                    "item_index": { "type": "integer", "description": "required when target is 'item'" },
-                    "start": { "type": "number", "description": "start in seconds for master/track (default: time selection or 0)" },
-                    "length": { "type": "number", "description": "seconds to render for master/track (default: content/selection, capped at 30 s)" }
-                }),
-                json!(["target"]),
-            ),
-        });
-    }
+    defs.push(ToolDef {
+        name: "analyze_processed_audio".into(),
+        description: "Analyse PROCESSED (post-FX) audio by doing a short offline render and \
+                      measuring the result — the same metrics as analyze_track_audio (peak/RMS, \
+                      loudness LUFS, clipping, spectral profile) but WITH the FX applied. \
+                      target 'master' = full mix (all track FX + master FX); 'track' (with \
+                      track_index) = that track through its FX + master; 'item' (with \
+                      item_index) = that item through its take + track FX. Briefly renders \
+                      offline (REAPER may be momentarily unresponsive; not cancellable). Window \
+                      capped at 30 s. Use analyze_track_audio / analyze_item_audio for the raw \
+                      pre-FX source."
+            .into(),
+        input_schema: obj(
+            json!({
+                "target": { "type": "string", "enum": ["master", "track", "item"], "description": "'master' = full mix, 'track' = one track's processed output, 'item' = one item through its take+track FX" },
+                "track_index": { "type": "integer", "description": "required when target is 'track'" },
+                "item_index": { "type": "integer", "description": "required when target is 'item'" },
+                "start": { "type": "number", "description": "start in seconds for master/track (default: time selection or 0)" },
+                "length": { "type": "number", "description": "seconds to render for master/track (default: content/selection, capped at 30 s)" }
+            }),
+            json!(["target"]),
+        ),
+    });
     if !supports_images {
         defs.retain(|d| !is_vision_tool(&d.name));
     }
@@ -1122,16 +1116,14 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
 #[cfg(test)]
 mod definition_tests {
     #[test]
-    fn processed_render_tool_advertised_when_enabled() {
+    fn processed_render_tool_advertised() {
         // Guards against a regression where the post-FX render tool is silently
-        // dropped from the advertised set while the feature is enabled.
-        if crate::config::processed_render_enabled() {
-            let defs = super::definitions(true);
-            assert!(
-                defs.iter().any(|d| d.name == "analyze_processed_audio"),
-                "analyze_processed_audio must be advertised when the render is enabled"
-            );
-        }
+        // dropped from the advertised set.
+        let defs = super::definitions(true);
+        assert!(
+            defs.iter().any(|d| d.name == "analyze_processed_audio"),
+            "analyze_processed_audio must be advertised"
+        );
     }
 }
 
@@ -1384,7 +1376,11 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
         )),
         "get_focused_fx" => Ok(get_focused_fx(reaper)),
         // mutating
-        "add_fx" => add_fx(reaper, req_u32(input, "track_index")?, req_str(input, "fx_name")?),
+        "add_fx" => add_fx(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_str(input, "fx_name")?,
+        ),
         "set_fx_param" => set_fx_param(
             reaper,
             req_u32(input, "track_index")?,
@@ -1399,7 +1395,10 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "param_index")?,
             req_str(input, "direction")?,
             opt_u32(input, "step_count").unwrap_or(1),
-            input.get("step_size").and_then(|v| v.as_f64()).unwrap_or(0.01),
+            input
+                .get("step_size")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.01),
         ),
         // Tier B pixel input (arm-gated in the worker before reaching here).
         "plugin_click" => plugin_click(
@@ -1445,7 +1444,9 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
         "insert_midi_notes" => insert_midi_notes(
             reaper,
             req_u32(input, "item_index")?,
-            input.get("notes").ok_or_else(|| "missing 'notes' array".to_string())?,
+            input
+                .get("notes")
+                .ok_or_else(|| "missing 'notes' array".to_string())?,
         ),
         "create_midi_item" => create_midi_item(
             reaper,
@@ -1501,9 +1502,11 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_bool(input, "append").unwrap_or(true),
         )),
         "get_track_notes" => get_track_notes(reaper, req_u32(input, "track_index")?),
-        "set_track_notes" => {
-            set_track_notes(reaper, req_u32(input, "track_index")?, req_str(input, "text")?)
-        }
+        "set_track_notes" => set_track_notes(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_str(input, "text")?,
+        ),
         "get_project_memory" => get_project_memory(reaper, opt_str(input, "key")),
         "set_project_memory" => set_project_memory(
             reaper,
@@ -1517,14 +1520,20 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_f64(input, "position")?,
             opt_str(input, "name").unwrap_or(""),
-            input.get("index_number").and_then(|v| v.as_i64()).unwrap_or(-1) as c_int,
+            input
+                .get("index_number")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1) as c_int,
         ),
         "add_region" => add_region(
             reaper,
             req_f64(input, "start")?,
             req_f64(input, "end")?,
             opt_str(input, "name").unwrap_or(""),
-            input.get("index_number").and_then(|v| v.as_i64()).unwrap_or(-1) as c_int,
+            input
+                .get("index_number")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1) as c_int,
         ),
         "delete_marker" => delete_marker(
             reaper,
@@ -1537,13 +1546,17 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_f64(input, "time")?,
             req_f64(input, "bpm")?,
-            input.get("timesig_num").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
-            input.get("timesig_denom").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
+            input
+                .get("timesig_num")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as c_int,
+            input
+                .get("timesig_denom")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as c_int,
             opt_bool(input, "linear").unwrap_or(false),
         ),
-        "delete_tempo_marker" => {
-            delete_tempo_marker(reaper, req_i64(input, "index")? as c_int)
-        }
+        "delete_tempo_marker" => delete_tempo_marker(reaper, req_i64(input, "index")? as c_int),
         "set_project_tempo" => set_project_tempo(reaper, req_f64(input, "bpm")?),
         // stretch markers
         "get_stretch_markers" => get_stretch_markers(reaper, req_u32(input, "item_index")?),
@@ -1557,7 +1570,10 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_u32(input, "item_index")?,
             req_i64(input, "marker_index")? as c_int,
-            input.get("count").and_then(|v| v.as_i64()).map(|c| c as c_int),
+            input
+                .get("count")
+                .and_then(|v| v.as_i64())
+                .map(|c| c as c_int),
         ),
         // render settings
         "get_render_settings" => Ok(get_render_settings(reaper)),
@@ -1619,8 +1635,15 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
                 .get("item_indices")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| "missing 'item_indices' array".to_string())?;
-            let idxs: Vec<u32> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
-            group_items(reaper, &idxs, input.get("group_id").and_then(|v| v.as_i64()))
+            let idxs: Vec<u32> = arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u32))
+                .collect();
+            group_items(
+                reaper,
+                &idxs,
+                input.get("group_id").and_then(|v| v.as_i64()),
+            )
         }
         // copy / move / delete
         "copy_item" => copy_item(
@@ -1645,17 +1668,18 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_u32(input, "take_index"),
         ),
         // audio analysis
-        "analyze_item_audio" => {
-            analyze_item_audio(reaper, req_u32(input, "item_index")?, opt_u32(input, "take_index"))
-        }
+        "analyze_item_audio" => analyze_item_audio(
+            reaper,
+            req_u32(input, "item_index")?,
+            opt_u32(input, "take_index"),
+        ),
         "analyze_track_audio" => analyze_track_audio(
             reaper,
             req_u32(input, "track_index")?,
             input.get("start").and_then(|v| v.as_f64()),
             input.get("length").and_then(|v| v.as_f64()),
         ),
-        // analyze_processed_audio is handled specially (deferred to the timer) in
-        // the control-surface pump, so it never reaches dispatch/execute.
+        "analyze_processed_audio" => analyze_processed_audio(reaper, input),
         // track / MIDI creation & deletion
         "create_track" => create_track(reaper, opt_u32(input, "index"), opt_str(input, "name")),
         "delete_midi_notes" => delete_midi_notes(
@@ -1727,14 +1751,21 @@ pub fn consent_prompt(name: &str, input: &Value) -> Option<String> {
                 "full_screen" => "the entire screen",
                 _ => "a window",
             };
-            Some(format!("The assistant wants to take a screenshot of {what}"))
+            Some(format!(
+                "The assistant wants to take a screenshot of {what}"
+            ))
         }
         _ => None,
     }
 }
 
 pub fn preview(name: &str, input: &Value) -> Option<String> {
-    let show = |k: &str| input.get(k).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+    let show = |k: &str| {
+        input
+            .get(k)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".into())
+    };
     match name {
         "add_fx" => Some(format!(
             "Add FX {} to track {}",
@@ -1757,12 +1788,22 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("track_index"),
             show("fx_index"),
             show("param_index"),
-            input.get("direction").and_then(|v| v.as_str()).unwrap_or("?"),
-            input.get("step_count").map(|v| v.to_string()).unwrap_or_else(|| "1".into()),
+            input
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
+            input
+                .get("step_count")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "1".into()),
         )),
         "set_fx_enabled" => Some(format!(
             "{} track {} FX {}",
-            if input.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if input
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 "Enable"
             } else {
                 "Bypass"
@@ -1772,7 +1813,11 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         )),
         "insert_midi_notes" => Some(format!(
             "Insert {} MIDI note(s) into item {}",
-            input.get("notes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            input
+                .get("notes")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0),
             show("item_index"),
         )),
         "create_midi_item" => Some(format!(
@@ -1826,7 +1871,11 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         )),
         "delete_marker" => Some(format!(
             "Delete {} number {}",
-            if input.get("is_region").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if input
+                .get("is_region")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 "region"
             } else {
                 "marker"
@@ -1863,12 +1912,18 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         "set_item_property" => Some(format!(
             "Set item {} {} to {}",
             show("item_index"),
-            input.get("property").and_then(|v| v.as_str()).unwrap_or("?"),
+            input
+                .get("property")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
             show("value"),
         )),
         "set_take_property" => Some(format!(
             "Set take {} of item {} to {}",
-            input.get("property").and_then(|v| v.as_str()).unwrap_or("?"),
+            input
+                .get("property")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
             show("item_index"),
             input
                 .get("text")
@@ -1885,7 +1940,10 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         "set_track_property" => Some(format!(
             "Set track {} {} to {}",
             show("track_index"),
-            input.get("property").and_then(|v| v.as_str()).unwrap_or("?"),
+            input
+                .get("property")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
             input
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -1895,7 +1953,11 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         )),
         "set_track_group_membership" => Some(format!(
             "{} track {} {} group {}",
-            if input.get("member").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if input
+                .get("member")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 "Add"
             } else {
                 "Remove"
@@ -1906,7 +1968,11 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         )),
         "group_items" => Some(format!(
             "Group {} item(s)",
-            input.get("item_indices").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            input
+                .get("item_indices")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0),
         )),
         "copy_item" => Some(format!("Copy item {}", show("item_index"))),
         "move_item" => Some(format!("Move item {}", show("item_index"))),
@@ -1926,7 +1992,10 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
                 .map(|n| format!(" named \"{n}\""))
                 .unwrap_or_default(),
         )),
-        "delete_midi_notes" => Some(format!("Delete MIDI notes from item {}", show("item_index"))),
+        "delete_midi_notes" => Some(format!(
+            "Delete MIDI notes from item {}",
+            show("item_index")
+        )),
         _ => None,
     }
 }
@@ -2042,8 +2111,10 @@ fn get_selected_items(reaper: &Reaper<MainThreadScope>) -> Value {
     for s in 0..reaper.count_selected_media_items(project) {
         if let Some(item) = reaper.get_selected_media_item(project, s) {
             // SAFETY: item just obtained from REAPER, used on the main thread.
-            let position = unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Position) };
-            let length = unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Length) };
+            let position =
+                unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Position) };
+            let length =
+                unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Length) };
             let take = unsafe { reaper.get_active_take(item) };
             let take_name = take
                 .map(|t| {
@@ -2109,9 +2180,10 @@ fn get_take_fx_params(
     let cap = (limit as c_int).min(num);
     let mut params = Vec::new();
     for p in 0..cap {
-        let name =
-            read_string(NAME_BUF as usize, |b, s| unsafe { low.TakeFX_GetParamName(t, fx, p, b, s) })
-                .unwrap_or_default();
+        let name = read_string(NAME_BUF as usize, |b, s| unsafe {
+            low.TakeFX_GetParamName(t, fx, p, b, s)
+        })
+        .unwrap_or_default();
         let value = read_string(NAME_BUF as usize, |b, s| unsafe {
             low.TakeFX_GetFormattedParamValue(t, fx, p, b, s)
         })
@@ -2251,22 +2323,30 @@ fn set_fx_param(
     let v = value.clamp(0.0, 1.0);
     reaper.undo_begin_block_2(project);
     let result = unsafe {
-        reaper.track_fx_set_param_normalized(track, loc, param_index, ReaperNormalizedFxParamValue::new(v))
+        reaper.track_fx_set_param_normalized(
+            track,
+            loc,
+            param_index,
+            ReaperNormalizedFxParamValue::new(v),
+        )
     };
-    let display = unsafe { reaper.track_fx_get_formatted_param_value(track, loc, param_index, NAME_BUF) }
-        .ok()
-        .map(|s| reaper_string(s.as_c_str().to_bytes()))
-        .unwrap_or_default();
+    let display =
+        unsafe { reaper.track_fx_get_formatted_param_value(track, loc, param_index, NAME_BUF) }
+            .ok()
+            .map(|s| reaper_string(s.as_c_str().to_bytes()))
+            .unwrap_or_default();
     reaper.undo_end_block_2(
         project,
         format!("AI: set track {track_index} FX {fx_index} param {param_index} to {v:.4}"),
         UndoScope::All,
     );
     result
-        .map(|_| json!({
-            "set": true, "track_index": track_index, "fx_index": fx_index,
-            "param_index": param_index, "normalized": v, "display_value": display
-        }))
+        .map(|_| {
+            json!({
+                "set": true, "track_index": track_index, "fx_index": fx_index,
+                "param_index": param_index, "normalized": v, "display_value": display
+            })
+        })
         .map_err(|_| "failed to set parameter".to_string())
 }
 
@@ -2317,12 +2397,11 @@ fn set_fx_param_by_steps(
             ReaperNormalizedFxParamValue::new(target),
         )
     };
-    let display = unsafe {
-        reaper.track_fx_get_formatted_param_value(track, loc, param_index, NAME_BUF)
-    }
-    .ok()
-    .map(|s| reaper_string(s.as_c_str().to_bytes()))
-    .unwrap_or_default();
+    let display =
+        unsafe { reaper.track_fx_get_formatted_param_value(track, loc, param_index, NAME_BUF) }
+            .ok()
+            .map(|s| reaper_string(s.as_c_str().to_bytes()))
+            .unwrap_or_default();
     reaper.undo_end_block_2(
         project,
         format!("AI: nudge track {track_index} FX {fx_index} param {param_index} {direction} by {steps}x{step:.4}"),
@@ -2367,11 +2446,15 @@ fn set_fx_enabled(
 // ---- undo / history ---------------------------------------------------------
 
 fn undo_label(reaper: &Reaper<MainThreadScope>, project: ProjectContext) -> Option<String> {
-    reaper.undo_can_undo_2(project, |s: &ReaperStr| reaper_string(s.as_c_str().to_bytes()))
+    reaper.undo_can_undo_2(project, |s: &ReaperStr| {
+        reaper_string(s.as_c_str().to_bytes())
+    })
 }
 
 fn redo_label(reaper: &Reaper<MainThreadScope>, project: ProjectContext) -> Option<String> {
-    reaper.undo_can_redo_2(project, |s: &ReaperStr| reaper_string(s.as_c_str().to_bytes()))
+    reaper.undo_can_redo_2(project, |s: &ReaperStr| {
+        reaper_string(s.as_c_str().to_bytes())
+    })
 }
 
 fn undo(reaper: &Reaper<MainThreadScope>) -> Value {
@@ -2419,7 +2502,14 @@ fn read_take_notes(reaper: &Reaper<MainThreadScope>, take: MediaItemTake) -> Vec
         let mut vel: c_int = 0;
         let ok = unsafe {
             low.MIDI_GetNote(
-                t, i, &mut selected, &mut muted, &mut sppq, &mut eppq, &mut chan, &mut pitch,
+                t,
+                i,
+                &mut selected,
+                &mut muted,
+                &mut sppq,
+                &mut eppq,
+                &mut chan,
+                &mut pitch,
                 &mut vel,
             )
         };
@@ -2456,10 +2546,14 @@ fn get_take_midi(
         let this_idx = unsafe { reaper.get_media_item_track(item) }
             .and_then(|tr| track_index_of.get(&tr).copied());
         let start = unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Position) };
-        let end = start + unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Length) };
+        let end =
+            start + unsafe { reaper.get_media_item_info_value(item, ItemAttributeKey::Length) };
         let mut neighbors = Vec::new();
         if let Some(ti) = this_idx {
-            let want: Vec<u32> = [ti.checked_sub(1), Some(ti + 1)].into_iter().flatten().collect();
+            let want: Vec<u32> = [ti.checked_sub(1), Some(ti + 1)]
+                .into_iter()
+                .flatten()
+                .collect();
             for i in 0..reaper.count_media_items(project) {
                 let Some(other) = reaper.get_media_item(project, i) else {
                     continue;
@@ -2472,8 +2566,10 @@ fn get_take_midi(
                 let Some(oi) = oidx.filter(|oi| want.contains(oi)) else {
                     continue;
                 };
-                let os = unsafe { reaper.get_media_item_info_value(other, ItemAttributeKey::Position) };
-                let oe = os + unsafe { reaper.get_media_item_info_value(other, ItemAttributeKey::Length) };
+                let os =
+                    unsafe { reaper.get_media_item_info_value(other, ItemAttributeKey::Position) };
+                let oe = os
+                    + unsafe { reaper.get_media_item_info_value(other, ItemAttributeKey::Length) };
                 if oe <= start || os >= end {
                     continue; // no time overlap
                 }
@@ -2527,7 +2623,8 @@ fn insert_midi_notes(
         let chan = n.get("channel").and_then(|v| v.as_i64()).unwrap_or(0) as c_int;
         let sppq = unsafe { low.MIDI_GetPPQPosFromProjQN(t, item_start_qn + start_qn) };
         let eppq = unsafe { low.MIDI_GetPPQPosFromProjQN(t, item_start_qn + start_qn + length_qn) };
-        let ok = unsafe { low.MIDI_InsertNote(t, false, false, sppq, eppq, chan, pitch, vel, &no_sort) };
+        let ok =
+            unsafe { low.MIDI_InsertNote(t, false, false, sppq, eppq, chan, pitch, vel, &no_sort) };
         if ok {
             inserted += 1;
         }
@@ -2591,7 +2688,11 @@ fn create_track(
             unsafe { reaper.get_set_media_track_info_set_name(track, n) };
         }
     }
-    reaper.undo_end_block_2(project, format!("AI: create track at {idx}"), UndoScope::All);
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: create track at {idx}"),
+        UndoScope::All,
+    );
     reaper.low().TrackList_AdjustWindows(false);
     reaper.update_arrange();
     Ok(json!({ "created": true, "track_index": idx, "name": name }))
@@ -2626,7 +2727,14 @@ fn delete_midi_notes(
         let mut vel: c_int = 0;
         let ok = unsafe {
             low.MIDI_GetNote(
-                t, i, &mut selected, &mut muted, &mut sppq, &mut eppq, &mut chan, &mut pitch,
+                t,
+                i,
+                &mut selected,
+                &mut muted,
+                &mut sppq,
+                &mut eppq,
+                &mut chan,
+                &mut pitch,
                 &mut vel,
             )
         };
@@ -2655,7 +2763,10 @@ fn delete_midi_notes(
     unsafe { low.MIDI_Sort(t) };
     reaper.undo_end_block_2(
         project,
-        format!("AI: delete {} MIDI note(s) from item {item_index}", to_delete.len()),
+        format!(
+            "AI: delete {} MIDI note(s) from item {item_index}",
+            to_delete.len()
+        ),
         UndoScope::All,
     );
     Ok(json!({ "deleted": to_delete.len(), "item_index": item_index }))
@@ -2686,9 +2797,10 @@ fn get_track_sends(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result
             .ok()
             .map(|s| reaper_string(s.as_c_str().to_bytes()))
             .unwrap_or_default();
-        let dest = unsafe { reaper.get_track_send_info_desttrack(track, TrackSendDirection::Send, i) }
-            .ok()
-            .and_then(|d| track_index_of.get(&d).copied());
+        let dest =
+            unsafe { reaper.get_track_send_info_desttrack(track, TrackSendDirection::Send, i) }
+                .ok()
+                .and_then(|d| track_index_of.get(&d).copied());
         sends.push(json!({
             "index": i,
             "name": name,
@@ -2701,9 +2813,10 @@ fn get_track_sends(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result
 
     let mut receives = Vec::new();
     for i in 0..unsafe { reaper.get_track_num_sends(track, TrackSendCategory::Receive) } {
-        let src = unsafe { reaper.get_track_send_info_desttrack(track, TrackSendDirection::Receive, i) }
-            .ok()
-            .and_then(|d| track_index_of.get(&d).copied());
+        let src =
+            unsafe { reaper.get_track_send_info_desttrack(track, TrackSendDirection::Receive, i) }
+                .ok()
+                .and_then(|d| track_index_of.get(&d).copied());
         receives.push(json!({
             "index": i,
             "src_track_index": src,
@@ -2732,10 +2845,12 @@ fn add_send(
         format!("AI: add send from track {src_track_index} to track {dest_track_index}"),
         UndoScope::All,
     );
-    res.map(|idx| json!({
-        "added": true, "src_track_index": src_track_index,
-        "dest_track_index": dest_track_index, "send_index": idx
-    }))
+    res.map(|idx| {
+        json!({
+            "added": true, "src_track_index": src_track_index,
+            "dest_track_index": dest_track_index, "send_index": idx
+        })
+    })
     .map_err(|_| "failed to create send".to_string())
 }
 
@@ -2750,7 +2865,11 @@ fn set_send_param(
         "volume" | "vol" => TrackSendAttributeKey::Vol,
         "pan" => TrackSendAttributeKey::Pan,
         "mute" => TrackSendAttributeKey::Mute,
-        other => return Err(format!("unknown send param '{other}' (use volume, pan, or mute)")),
+        other => {
+            return Err(format!(
+                "unknown send param '{other}' (use volume, pan, or mute)"
+            ))
+        }
     };
     let project = ProjectContext::CurrentProject;
     let track = reaper
@@ -2765,10 +2884,12 @@ fn set_send_param(
         format!("AI: set send {send_index} {param} on track {track_index}"),
         UndoScope::All,
     );
-    res.map(|_| json!({
-        "set": true, "track_index": track_index, "send_index": send_index,
-        "param": param, "value": value
-    }))
+    res.map(|_| {
+        json!({
+            "set": true, "track_index": track_index, "send_index": send_index,
+            "param": param, "value": value
+        })
+    })
     .map_err(|_| "failed to set send parameter".to_string())
 }
 
@@ -2794,7 +2915,10 @@ fn remove_send(
 
 // ---- automation / envelopes (Phase 5) ---------------------------------------
 
-fn get_track_envelopes(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Value, String> {
+fn get_track_envelopes(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+) -> Result<Value, String> {
     let track = reaper
         .get_track(ProjectContext::CurrentProject, track_index)
         .ok_or_else(|| format!("no track at index {track_index}"))?;
@@ -2807,8 +2931,10 @@ fn get_track_envelopes(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Re
         if env.is_null() {
             continue;
         }
-        let name = read_string(NAME_BUF as usize, |b, s| unsafe { low.GetEnvelopeName(env, b, s) })
-            .unwrap_or_default();
+        let name = read_string(NAME_BUF as usize, |b, s| unsafe {
+            low.GetEnvelopeName(env, b, s)
+        })
+        .unwrap_or_default();
         envs.push(json!({
             "index": i,
             "name": name,
@@ -2843,7 +2969,15 @@ fn get_envelope_points(
         let mut tension = 0.0f64;
         let mut selected = false;
         let ok = unsafe {
-            low.GetEnvelopePoint(env, i, &mut time, &mut value, &mut shape, &mut tension, &mut selected)
+            low.GetEnvelopePoint(
+                env,
+                i,
+                &mut time,
+                &mut value,
+                &mut shape,
+                &mut tension,
+                &mut selected,
+            )
         };
         if !ok {
             continue;
@@ -2876,7 +3010,9 @@ fn get_automation_items(
         return Err(format!("no envelope at index {envelope_index}"));
     }
     let count = unsafe { low.CountAutomationItems(env) };
-    let get = |i: c_int, key: &CStr| unsafe { low.GetSetAutomationItemInfo(env, i, key.as_ptr(), 0.0, false) };
+    let get = |i: c_int, key: &CStr| unsafe {
+        low.GetSetAutomationItemInfo(env, i, key.as_ptr(), 0.0, false)
+    };
     let mut items = Vec::new();
     for i in 0..count {
         items.push(json!({
@@ -2972,7 +3108,11 @@ fn set_project_notes(reaper: &Reaper<MainThreadScope>, text: &str, append: bool)
             bytes.len() as c_int,
         );
     }
-    reaper.undo_end_block_2(project, "AI: update project notes".to_string(), UndoScope::All);
+    reaper.undo_end_block_2(
+        project,
+        "AI: update project notes".to_string(),
+        UndoScope::All,
+    );
     json!({ "saved": true, "appended": append })
 }
 
@@ -3010,13 +3150,22 @@ fn set_track_notes(
     Ok(json!({ "saved": true, "track_index": track_index }))
 }
 
-fn get_project_memory(reaper: &Reaper<MainThreadScope>, key: Option<&str>) -> Result<Value, String> {
+fn get_project_memory(
+    reaper: &Reaper<MainThreadScope>,
+    key: Option<&str>,
+) -> Result<Value, String> {
     let low = reaper.low();
     match key {
         Some(k) => {
             let key_c = CString::new(k).map_err(|_| "invalid key".to_string())?;
             let value = read_string(NOTES_BUF, |b, s| unsafe {
-                low.GetProjExtState(std::ptr::null_mut(), MEMORY_EXT.as_ptr(), key_c.as_ptr(), b, s) > 0
+                low.GetProjExtState(
+                    std::ptr::null_mut(),
+                    MEMORY_EXT.as_ptr(),
+                    key_c.as_ptr(),
+                    b,
+                    s,
+                ) > 0
             })
             .unwrap_or_default();
             Ok(json!({ "key": k, "value": value }))
@@ -3076,7 +3225,12 @@ fn delete_project_memory(reaper: &Reaper<MainThreadScope>, key: &str) -> Result<
     let key_c = CString::new(key).map_err(|_| "invalid key".to_string())?;
     // An empty value removes the key.
     unsafe {
-        low.SetProjExtState(std::ptr::null_mut(), MEMORY_EXT.as_ptr(), key_c.as_ptr(), c"".as_ptr());
+        low.SetProjExtState(
+            std::ptr::null_mut(),
+            MEMORY_EXT.as_ptr(),
+            key_c.as_ptr(),
+            c"".as_ptr(),
+        );
     }
     Ok(json!({ "deleted": true, "key": key }))
 }
@@ -3149,7 +3303,15 @@ fn add_marker(
     let project = ProjectContext::CurrentProject;
     reaper.undo_begin_block_2(project);
     let id = unsafe {
-        low.AddProjectMarker2(CUR_PROJ, false, position, 0.0, name_c.as_ptr(), want_index, 0)
+        low.AddProjectMarker2(
+            CUR_PROJ,
+            false,
+            position,
+            0.0,
+            name_c.as_ptr(),
+            want_index,
+            0,
+        )
     };
     reaper.undo_end_block_2(
         project,
@@ -3310,10 +3472,7 @@ fn set_project_tempo(reaper: &Reaper<MainThreadScope>, bpm: f64) -> Result<Value
     Ok(json!({ "set": true, "bpm": bpm }))
 }
 
-fn get_stretch_markers(
-    reaper: &Reaper<MainThreadScope>,
-    item_index: u32,
-) -> Result<Value, String> {
+fn get_stretch_markers(reaper: &Reaper<MainThreadScope>, item_index: u32) -> Result<Value, String> {
     let item = reaper
         .get_media_item(ProjectContext::CurrentProject, item_index)
         .ok_or_else(|| format!("no media item at index {item_index}"))?;
@@ -3634,7 +3793,8 @@ fn resolve_take(
             let ptr = unsafe { reaper.low().GetTake(item.as_ptr(), i as c_int) };
             MediaItemTake::new(ptr).ok_or_else(|| format!("no take at index {i}"))
         }
-        None => unsafe { reaper.get_active_take(item) }.ok_or_else(|| "item has no active take".to_string()),
+        None => unsafe { reaper.get_active_take(item) }
+            .ok_or_else(|| "item has no active take".to_string()),
     }
 }
 
@@ -3813,7 +3973,9 @@ fn get_track_properties(
         let v = unsafe { low.GetMediaTrackInfo_Value(trp, key.as_ptr()) };
         props.insert(name.to_string(), json!(v));
     }
-    Ok(json!({ "track_index": track_index, "name": track_name(reaper, track), "properties": props }))
+    Ok(
+        json!({ "track_index": track_index, "name": track_name(reaper, track), "properties": props }),
+    )
 }
 
 fn set_track_property(
@@ -3838,7 +4000,9 @@ fn set_track_property(
             format!("AI: rename track {track_index}"),
             UndoScope::All,
         );
-        return Ok(json!({ "set": true, "track_index": track_index, "property": "name", "text": text }));
+        return Ok(
+            json!({ "set": true, "track_index": track_index, "property": "name", "text": text }),
+        );
     }
     let key = lookup_key(TRACK_PROPS, property)
         .ok_or_else(|| format!("unknown track property '{property}'"))?;
@@ -3957,8 +4121,9 @@ fn group_items(
             let mut max_g = 0i64;
             for i in 0..reaper.count_media_items(project) {
                 if let Some(it) = reaper.get_media_item(project, i) {
-                    let g = unsafe { low.GetMediaItemInfo_Value(it.as_ptr(), c"I_GROUPID".as_ptr()) }
-                        as i64;
+                    let g =
+                        unsafe { low.GetMediaItemInfo_Value(it.as_ptr(), c"I_GROUPID".as_ptr()) }
+                            as i64;
                     max_g = max_g.max(g);
                 }
             }
@@ -4018,7 +4183,11 @@ fn copy_item(
         }
         None => false,
     };
-    reaper.undo_end_block_2(project, format!("AI: copy item {item_index}"), UndoScope::All);
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: copy item {item_index}"),
+        UndoScope::All,
+    );
     reaper.update_arrange();
     if !ok {
         return Err("failed to copy item".to_string());
@@ -4053,7 +4222,11 @@ fn move_item(
         unsafe { low.SetMediaItemInfo_Value(item.as_ptr(), c"D_POSITION".as_ptr(), pos) };
     }
     unsafe { low.UpdateItemInProject(item.as_ptr()) };
-    reaper.undo_end_block_2(project, format!("AI: move item {item_index}"), UndoScope::All);
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: move item {item_index}"),
+        UndoScope::All,
+    );
     reaper.update_arrange();
     let new_index = media_item_index_map(reaper).get(&item).copied();
     Ok(json!({ "moved": true, "item_index": new_index, "track_changed": reparented }))
@@ -4067,7 +4240,11 @@ fn delete_item(reaper: &Reaper<MainThreadScope>, item_index: u32) -> Result<Valu
         .ok_or_else(|| "could not resolve the item's track".to_string())?;
     reaper.undo_begin_block_2(project);
     let ok = unsafe { low.DeleteTrackMediaItem(track.as_ptr(), item.as_ptr()) };
-    reaper.undo_end_block_2(project, format!("AI: delete item {item_index}"), UndoScope::All);
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete item {item_index}"),
+        UndoScope::All,
+    );
     reaper.update_arrange();
     if ok {
         Ok(json!({ "deleted": true, "item_index": item_index }))
@@ -4076,10 +4253,7 @@ fn delete_item(reaper: &Reaper<MainThreadScope>, item_index: u32) -> Result<Valu
     }
 }
 
-fn duplicate_track(
-    reaper: &Reaper<MainThreadScope>,
-    track_index: u32,
-) -> Result<Value, String> {
+fn duplicate_track(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Value, String> {
     let project = ProjectContext::CurrentProject;
     let src = track_at(reaper, track_index)?;
     let low = reaper.low();
@@ -4117,7 +4291,11 @@ fn delete_track(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Va
     let track = track_at(reaper, track_index)?;
     reaper.undo_begin_block_2(project);
     unsafe { reaper.delete_track(track) };
-    reaper.undo_end_block_2(project, format!("AI: delete track {track_index}"), UndoScope::All);
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete track {track_index}"),
+        UndoScope::All,
+    );
     reaper.low().TrackList_AdjustWindows(false);
     reaper.update_arrange();
     Ok(json!({ "deleted": true, "track_index": track_index }))
@@ -4142,7 +4320,9 @@ fn copy_take(
     // Recreating from the file loses section/reverse trimming, so refuse those.
     let src_type = {
         let mut buf = vec![0u8; 64];
-        unsafe { low.GetMediaSourceType(source, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+        unsafe {
+            low.GetMediaSourceType(source, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int)
+        };
         buf_to_string(&buf)
     };
     if src_type.eq_ignore_ascii_case("SECTION") {
@@ -4164,7 +4344,8 @@ fn copy_take(
                 .to_string(),
         );
     }
-    let file_c = CString::new(file).map_err(|_| "source filename contains a NUL byte".to_string())?;
+    let file_c =
+        CString::new(file).map_err(|_| "source filename contains a NUL byte".to_string())?;
     let take_name_src = take_name(reaper, src_take);
     // Remember the destination's active take so the copy lands as an inactive take.
     let prior_active = unsafe { reaper.get_active_take(dest_item) };
@@ -4177,13 +4358,21 @@ fn copy_take(
     let new_take_ptr = unsafe { low.AddTakeToMediaItem(dest_item.as_ptr()) };
     if new_take_ptr.is_null() {
         unsafe { low.PCM_Source_Destroy(new_src) };
-        reaper.undo_end_block_2(project, "AI: copy take (failed)".to_string(), UndoScope::All);
+        reaper.undo_end_block_2(
+            project,
+            "AI: copy take (failed)".to_string(),
+            UndoScope::All,
+        );
         return Err("could not add a take to the destination item".to_string());
     }
     if !unsafe { low.SetMediaItemTake_Source(new_take_ptr, new_src) } {
         // Source not adopted — free it so we don't leak, and report failure.
         unsafe { low.PCM_Source_Destroy(new_src) };
-        reaper.undo_end_block_2(project, "AI: copy take (failed)".to_string(), UndoScope::All);
+        reaper.undo_end_block_2(
+            project,
+            "AI: copy take (failed)".to_string(),
+            UndoScope::All,
+        );
         return Err("could not attach the source to the new take".to_string());
     }
     for key in TAKE_COPY_KEYS {
@@ -4339,9 +4528,9 @@ fn analyze_track_audio(
 ) -> Result<Value, String> {
     let track = track_at(reaper, track_index)?;
     let low = reaper.low();
-    let channels =
-        (unsafe { low.GetMediaTrackInfo_Value(track.as_ptr(), c"I_NCHAN".as_ptr()) } as c_int)
-            .clamp(1, 2);
+    let channels = (unsafe { low.GetMediaTrackInfo_Value(track.as_ptr(), c"I_NCHAN".as_ptr()) }
+        as c_int)
+        .clamp(1, 2);
     let acc = unsafe { low.CreateTrackAudioAccessor(track.as_ptr()) };
     if acc.is_null() {
         return Err("could not create an audio accessor for the track".to_string());
@@ -4427,7 +4616,12 @@ fn proj_info_str_set(low: &reaper_low::Reaper, key: &CStr, value: &str) {
     let mut bytes = value.as_bytes().to_vec();
     bytes.push(0);
     unsafe {
-        low.GetSetProjectInfo_String(CUR_PROJ, key.as_ptr(), bytes.as_mut_ptr() as *mut c_char, true)
+        low.GetSetProjectInfo_String(
+            CUR_PROJ,
+            key.as_ptr(),
+            bytes.as_mut_ptr() as *mut c_char,
+            true,
+        )
     };
 }
 
@@ -4493,26 +4687,22 @@ impl Drop for RenderStateGuard<'_> {
 /// Analyse PROCESSED (post-FX) audio: briefly render the master mix, a track's
 /// processed output, or a single item (through its take + track FX) to a temp
 /// WAV, decode + analyse it. All settings/selection changes are undone (and the
-/// temp file removed) by a Drop guard on every path.
-pub fn prepare_render(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<RenderJob, String> {
+/// temp file removed) by a Drop guard on every path. Runs synchronously on the
+/// main thread (REAPER is briefly unresponsive during the render).
+fn analyze_processed_audio(
+    reaper: &Reaper<MainThreadScope>,
+    input: &Value,
+) -> Result<Value, String> {
     let target = req_str(input, "target")?;
     let track_index = opt_u32(input, "track_index");
     let item_index = opt_u32(input, "item_index");
     let param_start = input.get("start").and_then(|v| v.as_f64());
     let param_length = input.get("length").and_then(|v| v.as_f64());
-    // Disabled by default: opt in with RAAI_ENABLE_PROCESSED_RENDER=1 to test the
-    // deferred (off-run()-stack) render path.
-    if !crate::config::processed_render_enabled() {
-        return Err(
-            "Post-FX (processed) audio analysis is disabled: the offline render can crash REAPER \
-             from the extension. Use analyze_track_audio or analyze_item_audio for pre-FX analysis."
-                .to_string(),
-        );
-    }
     let (track, item) = match target {
         "master" => (None, None),
         "track" => {
-            let ti = track_index.ok_or_else(|| "target 'track' requires track_index".to_string())?;
+            let ti =
+                track_index.ok_or_else(|| "target 'track' requires track_index".to_string())?;
             (Some(track_at(reaper, ti)?), None)
         }
         "item" => {
@@ -4520,7 +4710,9 @@ pub fn prepare_render(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result
             (None, Some(item_at(reaper, ii)?))
         }
         other => {
-            return Err(format!("unknown target '{other}' (use 'master', 'track', or 'item')"))
+            return Err(format!(
+                "unknown target '{other}' (use 'master', 'track', or 'item')"
+            ))
         }
     };
     let low = reaper.low();
@@ -4596,96 +4788,6 @@ pub fn prepare_render(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result
     }
     let rend = rstart + rlen;
 
-    // Read-only: return the computed job; the render itself runs later, on the
-    // timer (execute_render), off the control-surface run() stack.
-    Ok(RenderJob {
-        target: target.to_string(),
-        track_index,
-        item_index,
-        render_settings,
-        bounds_flag,
-        rstart,
-        rend,
-        rlen,
-        truncated,
-        chain: chain.to_string(),
-    })
-}
-
-/// A prepared post-FX render, computed read-only by [`prepare_render`] and queued
-/// for the timer to run. Targets are stored by index (not pointer) so a stale
-/// project state errors cleanly rather than crashing.
-pub struct RenderJob {
-    target: String,
-    track_index: Option<u32>,
-    item_index: Option<u32>,
-    render_settings: f64,
-    bounds_flag: f64,
-    rstart: f64,
-    rend: f64,
-    rlen: f64,
-    truncated: bool,
-    chain: String,
-}
-
-thread_local! {
-    /// A prepared render awaiting the timer, with the channel to reply on.
-    static PENDING_RENDER: std::cell::RefCell<Option<(RenderJob, oneshot::Sender<ToolOutcome>)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// True if a prepared render is waiting for the timer to run it.
-pub fn has_pending_render() -> bool {
-    PENDING_RENDER.with(|c| c.borrow().is_some())
-}
-
-/// Queue a prepared render and the channel to reply on (main thread, from the
-/// tool dispatch). The timer picks it up on a later tick and replies then.
-pub fn enqueue_render(job: RenderJob, reply: oneshot::Sender<ToolOutcome>) {
-    PENDING_RENDER.with(|c| {
-        let mut slot = c.borrow_mut();
-        if slot.is_some() {
-            let _ = reply.send(ToolOutcome::error(
-                json!({ "error": "a processed-audio render is already in progress" }).to_string(),
-            ));
-        } else {
-            *slot = Some((job, reply));
-        }
-    });
-}
-
-/// Run the queued render, if any, on the CALLER's stack — this MUST be the
-/// separate timer callback, not the control-surface run(), so the render's
-/// message pump is not nested inside run(). Reads/analyses the result and replies.
-pub fn run_pending_render() {
-    let Some((job, reply)) = PENDING_RENDER.with(|c| c.borrow_mut().take()) else {
-        return;
-    };
-    let outcome = crate::reaper::api::with(|reaper| match execute_render(reaper, &job) {
-        Ok(v) => ToolOutcome::ok(v.to_string()),
-        Err(e) => ToolOutcome::error(json!({ "error": e }).to_string()),
-    })
-    .unwrap_or_else(|| {
-        ToolOutcome::error(json!({ "error": "REAPER API unavailable" }).to_string())
-    });
-    let _ = reply.send(outcome);
-}
-
-/// Apply the render settings/selection, run the offline render, read + analyse
-/// the result, then restore everything (Drop guard). Runs on the timer.
-fn execute_render(reaper: &Reaper<MainThreadScope>, job: &RenderJob) -> Result<Value, String> {
-    // Re-resolve targets by index — they may have changed since prepare, so this
-    // errors cleanly instead of dereferencing a stale pointer.
-    let track = match job.track_index {
-        Some(i) if job.target == "track" => Some(track_at(reaper, i)?),
-        _ => None,
-    };
-    let item = match job.item_index {
-        Some(i) if job.target == "item" => Some(item_at(reaper, i)?),
-        _ => None,
-    };
-    let low = reaper.low();
-
     // Snapshot BEFORE mutating; the guard restores everything on drop.
     let track_selection = track.map(|_| {
         let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
@@ -4696,15 +4798,21 @@ fn execute_render(reaper: &Reaper<MainThreadScope>, job: &RenderJob) -> Result<V
     let item_selection = item.map(|_| selected_item_set(reaper));
     let mut guard = RenderStateGuard {
         reaper,
-        num: RENDER_NUM_KEYS.iter().map(|k| proj_info_get(low, k)).collect(),
-        strs: RENDER_STR_KEYS.iter().map(|k| proj_info_str_snapshot(low, k)).collect(),
+        num: RENDER_NUM_KEYS
+            .iter()
+            .map(|k| proj_info_get(low, k))
+            .collect(),
+        strs: RENDER_STR_KEYS
+            .iter()
+            .map(|k| proj_info_str_snapshot(low, k))
+            .collect(),
         track_selection,
         item_selection,
         path: None,
     };
 
-    // Configure the render: WAV, 48 kHz stereo, no tail/normalize/dither, don't
-    // add to project.
+    // Configure the render: 32-bit float WAV, 48 kHz stereo, no tail/normalize/
+    // dither, don't add to project.
     let tmp_dir = std::env::temp_dir().to_string_lossy().to_string();
     let base = format!("raai_render_probe_{}", std::process::id());
     // 32-bit float WAV, as REAPER's own base64 render-config: fourcc "evaw" +
@@ -4713,10 +4821,10 @@ fn execute_render(reaper: &Reaper<MainThreadScope>, job: &RenderJob) -> Result<V
     // corrupted the heap (this was the crash). Float avoids render-time clamping,
     // so peak/clip analysis stays accurate. RENDER_FORMAT2 is left untouched.
     proj_info_str_set(low, c"RENDER_FORMAT", "ZXZhdyAAAQ==");
-    proj_info_set(low, c"RENDER_SETTINGS", job.render_settings);
-    proj_info_set(low, c"RENDER_BOUNDSFLAG", job.bounds_flag);
-    proj_info_set(low, c"RENDER_STARTPOS", job.rstart);
-    proj_info_set(low, c"RENDER_ENDPOS", job.rend);
+    proj_info_set(low, c"RENDER_SETTINGS", render_settings);
+    proj_info_set(low, c"RENDER_BOUNDSFLAG", bounds_flag);
+    proj_info_set(low, c"RENDER_STARTPOS", rstart);
+    proj_info_set(low, c"RENDER_ENDPOS", rend);
     proj_info_set(low, c"RENDER_SRATE", ANALYZE_SR as f64);
     proj_info_set(low, c"RENDER_CHANNELS", 2.0);
     proj_info_set(low, c"RENDER_TAILFLAG", 0.0);
@@ -4756,10 +4864,10 @@ fn execute_render(reaper: &Reaper<MainThreadScope>, job: &RenderJob) -> Result<V
     let (samples, channels, sr) = outcome?;
     let features = crate::dsp::analyze(&samples, channels, sr);
     Ok(audio_result_json(
-        json!({ "target": job.target, "track_index": job.track_index, "item_index": job.item_index, "chain": job.chain }),
-        job.rstart,
-        job.rlen,
-        job.truncated,
+        json!({ "target": target, "track_index": track_index, "item_index": item_index, "chain": chain }),
+        rstart,
+        rlen,
+        truncated,
         false,
         false,
         features,
@@ -4829,7 +4937,8 @@ fn track_name(reaper: &Reaper<MainThreadScope>, track: MediaTrack) -> String {
 /// form, which has no length argument and would overflow on a long name.
 fn take_name(reaper: &Reaper<MainThreadScope>, take: MediaItemTake) -> String {
     reaper.get_take_name(take, |r| {
-        r.map(|s| reaper_string(s.as_c_str().to_bytes())).unwrap_or_default()
+        r.map(|s| reaper_string(s.as_c_str().to_bytes()))
+            .unwrap_or_default()
     })
 }
 

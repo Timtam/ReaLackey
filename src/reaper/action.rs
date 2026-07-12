@@ -25,16 +25,6 @@ struct Commands;
 impl HookCommand for Commands {
     fn call(command_id: CommandId, _flag: i32) -> bool {
         let id = command_id.get();
-        let is_ours =
-            Some(id) == CMD_OPEN.get().copied() || Some(id) == CMD_SETKEY.get().copied();
-        // If a main-thread operation is pumping the message loop (e.g. an offline
-        // render), REAPER may dispatch our action nested inside it. Running it
-        // now — opening the window / a modal / any REAPER API call — would
-        // re-enter REAPER mid-operation and crash. Swallow it; the user can retry
-        // once the operation finishes (a moment later).
-        if is_ours && crate::reaper::reentry::is_busy() {
-            return true;
-        }
         if Some(id) == CMD_OPEN.get().copied() {
             if let Some(h) = MAIN_HWND.get().copied() {
                 ui::ffi::show(h as *mut c_void);

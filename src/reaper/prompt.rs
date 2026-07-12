@@ -23,7 +23,8 @@ static GET_USER_INPUTS: OnceLock<GetUserInputsFn> = OnceLock::new();
 pub fn init(context: &PluginContext) {
     let ptr = unsafe { context.GetFunc(c"GetUserInputs".as_ptr()) };
     if !ptr.is_null() {
-        let f: GetUserInputsFn = unsafe { std::mem::transmute::<*mut c_void, GetUserInputsFn>(ptr) };
+        let f: GetUserInputsFn =
+            unsafe { std::mem::transmute::<*mut c_void, GetUserInputsFn>(ptr) };
         let _ = GET_USER_INPUTS.set(f);
     }
 }
@@ -37,10 +38,6 @@ pub fn get_user_input(title: &str, caption: &str) -> Option<String> {
 
     const CAP: usize = 4096;
     let mut buf = vec![0u8; CAP];
-    // This modal pumps REAPER's message loop; mark the main thread busy so our
-    // other callbacks (the pump, hook commands) skip re-entrant REAPER API calls
-    // while it is up.
-    let _busy = crate::reaper::reentry::enter();
     let ok = unsafe {
         f(
             title_c.as_ptr(),

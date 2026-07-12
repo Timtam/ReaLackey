@@ -60,7 +60,15 @@ async fn run(
         match task {
             MainTask::Cancel => { /* nothing in flight */ }
             MainTask::Prompt(prompt) => {
-                handle_prompt(&provider, &mut history, &ui_tx, &mut task_rx, &op_tx, prompt).await;
+                handle_prompt(
+                    &provider,
+                    &mut history,
+                    &ui_tx,
+                    &mut task_rx,
+                    &op_tx,
+                    prompt,
+                )
+                .await;
             }
         }
     }
@@ -331,7 +339,9 @@ async fn run_tool(
                 );
             }
             tools::arm_pixel_control();
-            let _ = ui_tx.send(UiEvent::Notice("Pixel control armed for this session.".into()));
+            let _ = ui_tx.send(UiEvent::Notice(
+                "Pixel control armed for this session.".into(),
+            ));
             let _ = ui_tx.send(UiEvent::Announce("Pixel control armed.".into()));
         }
         // Announce each action so a synthesized click is never silent.
@@ -411,7 +421,12 @@ async fn confirm_apply_changes(
     )
     .await;
     let _ = ui_tx.send(UiEvent::Notice(
-        if approved { "Applying changes." } else { "Declined." }.into(),
+        if approved {
+            "Applying changes."
+        } else {
+            "Declined."
+        }
+        .into(),
     ));
     approved
 }
@@ -421,7 +436,11 @@ fn pixel_action_desc(name: &str, input: &Value) -> String {
     let n = |k: &str| input.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
     match name {
         "plugin_click" => {
-            let kind = if input.get("double").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let kind = if input
+                .get("double")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 "Double-clicking"
             } else {
                 "Clicking"
@@ -459,7 +478,10 @@ fn truncate_summary(s: &str) -> String {
 /// Ask the user to confirm a change via a native message box (main thread).
 async fn confirm(op_tx: &CbSender<ReaperOp>, message: String) -> bool {
     let (tx, rx) = oneshot::channel();
-    if op_tx.send(ReaperOp::Confirm { message, reply: tx }).is_err() {
+    if op_tx
+        .send(ReaperOp::Confirm { message, reply: tx })
+        .is_err()
+    {
         return false;
     }
     rx.await.unwrap_or(false)
@@ -478,9 +500,10 @@ async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> To
     {
         return ToolOutcome::error("{\"error\":\"main thread unavailable\"}");
     }
-    // Bounded wait: nearly all tools reply within a tick; the deferred render is
-    // the slow case (its window is capped at 30 s). A generous ceiling means a
-    // main-thread callback that never fires can't hang the agent forever.
+    // Bounded wait: nearly all tools reply within a tick; the post-FX render is
+    // the slow case (it renders synchronously on the main thread, window capped
+    // at 30 s). A generous ceiling means a main-thread callback that never fires
+    // can't hang the agent forever.
     match tokio::time::timeout(std::time::Duration::from_secs(90), reply_rx).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => ToolOutcome::error("{\"error\":\"no reply from main thread\"}"),

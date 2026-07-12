@@ -5,34 +5,35 @@
 //! confirmation prompts), and periodically samples the undo label to build the
 //! activity trail.
 
+use std::cell::Cell;
+
 use crossbeam_channel::Receiver;
 use reaper_medium::{ControlSurface, MessageBoxResult, MessageBoxType};
-use serde_json::json;
 
 use crate::ai::protocol::UiEvent;
-use crate::reaper::{api, history, osara, reentry};
+use crate::reaper::{api, history, osara};
 use crate::tools::{self, ReaperOp, ToolOutcome};
 use crate::ui;
 
-/// REAPER timer callback, registered separately from the control surface so it
-/// is NOT nested inside `run()`. It runs a queued offline render off the `run()`
-/// call stack (invoking the render from within `run()` crashes REAPER). Panic-
-/// guarded so a fault never unwinds across the C ABI.
-pub extern "C" fn render_timer() {
-    let _ = std::panic::catch_unwind(|| {
-        if !tools::has_pending_render() {
-            return;
-        }
-        // Mark busy so the render's message pump can't re-enter run()/hook commands.
-        let Some(_guard) = reentry::enter() else {
-            return;
-        };
-        tools::run_pending_render();
-    });
-}
-
 /// Poll the undo label every N ticks (~30 ticks/sec, so ~2x/second).
 const UNDO_POLL_TICKS: u32 = 15;
+
+thread_local! {
+    /// Set while `run()` is on the stack. A tool invoked from `run()` — the
+    /// offline post-FX render, or a modal confirmation — pumps REAPER's message
+    /// loop, and REAPER re-invokes `run()` from inside it. The nested call must
+    /// return immediately: a second `&mut self` is unsound, and we must not touch
+    /// the REAPER API while a render is mid-flight.
+    static IN_RUN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Clears [`IN_RUN`] when the outer `run()` returns.
+struct RunGuard;
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        IN_RUN.with(|c| c.set(false));
+    }
+}
 
 #[derive(Debug)]
 pub struct PumpSurface {
@@ -57,7 +58,9 @@ impl PumpSurface {
             UiEvent::AssistantStart => output::assistant_start(),
             UiEvent::AssistantDelta(s) => output::assistant_delta(&s),
             UiEvent::ToolStarted { name, input } => output::tool_started(&name, &input),
-            UiEvent::ToolFinished { is_error, summary } => output::tool_finished(is_error, &summary),
+            UiEvent::ToolFinished { is_error, summary } => {
+                output::tool_finished(is_error, &summary)
+            }
             UiEvent::Notice(s) => output::notice(&s),
             UiEvent::Status(s) => ui::ffi::set_status(&s),
             UiEvent::Announce(s) => {
@@ -81,26 +84,10 @@ impl PumpSurface {
     fn handle_op(&self, op: ReaperOp) {
         match op {
             ReaperOp::Tool { name, input, reply } => {
-                // The post-FX render is DEFERRED: prepare it here (read-only), then
-                // queue it for the timer, which runs the actual render off this
-                // run() call stack (rendering from within run() crashes REAPER).
-                if name == "analyze_processed_audio" {
-                    match api::with(|reaper| tools::prepare_render(reaper, &input)) {
-                        Some(Ok(job)) => tools::enqueue_render(job, reply),
-                        Some(Err(e)) => {
-                            let _ = reply
-                                .send(ToolOutcome::error(json!({ "error": e }).to_string()));
-                        }
-                        None => {
-                            let _ = reply.send(ToolOutcome::error(
-                                "{\"error\":\"REAPER API unavailable\"}",
-                            ));
-                        }
-                    }
-                    return;
-                }
                 let outcome = api::with(|reaper| tools::execute(reaper, &name, &input))
-                    .unwrap_or_else(|| ToolOutcome::error("{\"error\":\"REAPER API unavailable\"}"));
+                    .unwrap_or_else(|| {
+                        ToolOutcome::error("{\"error\":\"REAPER API unavailable\"}")
+                    });
                 let _ = reply.send(outcome);
             }
             ReaperOp::Confirm { message, reply } => {
@@ -137,13 +124,12 @@ impl PumpSurface {
 
 impl ControlSurface for PumpSurface {
     fn run(&mut self) {
-        // If a tool is pumping the message loop (e.g. an offline render), REAPER
-        // may re-enter run() — skip it, so we never call the REAPER API while it
-        // is mid-operation (which crashes the host). This same flag also blocks
-        // our hook-command actions (see action.rs) from re-entering.
-        let Some(_guard) = reentry::enter() else {
+        // Skip re-entrant calls (REAPER pumps its loop during a render/modal that
+        // we started from here, and re-invokes run() nested — see IN_RUN).
+        if IN_RUN.with(|c| c.replace(true)) {
             return;
-        };
+        }
+        let _run_guard = RunGuard;
 
         // Bounded drains so a burst never starves REAPER's main loop.
         for _ in 0..512 {

@@ -7,4 +7,3 @@ pub mod control_surface;
 pub mod history;
 pub mod osara;
 pub mod prompt;
-pub mod reentry;
