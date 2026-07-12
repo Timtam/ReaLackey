@@ -1119,6 +1119,22 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
     defs
 }
 
+#[cfg(test)]
+mod definition_tests {
+    #[test]
+    fn processed_render_tool_advertised_when_enabled() {
+        // Guards against a regression where the post-FX render tool is silently
+        // dropped from the advertised set while the feature is enabled.
+        if crate::config::processed_render_enabled() {
+            let defs = super::definitions(true);
+            assert!(
+                defs.iter().any(|d| d.name == "analyze_processed_audio"),
+                "analyze_processed_audio must be advertised when the render is enabled"
+            );
+        }
+    }
+}
+
 /// Execute a tool by name on the main thread. Never panics.
 pub fn execute(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> ToolOutcome {
     // Vision tools return an image alongside their text, so they bypass the
