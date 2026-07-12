@@ -5,9 +5,13 @@
 //! base URL, model and key differ (design §kap-llm). Raw REST/SSE via reqwest +
 //! serde; no vendor SDK.
 //!
-//! Vision note: OpenAI's tool-result messages are plain strings, so image tool
-//! results (our `capture_view`) can't be delivered the way Anthropic allows;
-//! `supports_images` is therefore false here and `capture_view` isn't offered.
+//! Vision note: OpenAI's `role:"tool"` messages are text-only, so an image tool
+//! result (our `capture_view`) can't ride in the tool reply the way Anthropic
+//! allows. When the configured model supports vision we bridge it the standard
+//! way: the tool reply stays text, and the image is appended as a FOLLOWING
+//! `role:"user"` message with an `image_url` data-URI part (see `build_messages`).
+//! `supports_images` is per-account (vision is per-model) and gates both this
+//! bridge and whether `capture_view` is offered at all.
 
 use std::collections::BTreeMap;
 
@@ -29,10 +33,12 @@ pub struct OpenAiCompatProvider {
     base_url: String,
     /// Optional bearer key (local servers are keyless).
     api_key: Option<String>,
+    /// Whether the configured model accepts image input (per-account, per-model).
+    supports_images: bool,
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, api_key: Option<String>, supports_images: bool) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let client = reqwest::Client::builder()
             .build()
@@ -41,6 +47,7 @@ impl OpenAiCompatProvider {
             client,
             base_url,
             api_key,
+            supports_images,
         }
     }
 
@@ -56,9 +63,10 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Conservative: tool-result images aren't representable in this API.
+        // Vision is per-model: the account config decides (image tool results are
+        // bridged into a following user message — see build_messages).
         Capabilities {
-            supports_images: false,
+            supports_images: self.supports_images,
             supports_audio: false,
         }
     }
@@ -69,7 +77,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tx: Sender<ChatEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ProviderError> {
-        let body = build_body(&req);
+        let body = build_body(&req, self.supports_images);
 
         let mut builder = self
             .client
@@ -210,12 +218,12 @@ fn map_finish(reason: &str) -> StopReason {
 
 // ---- request building (neutral ChatRequest -> OpenAI body) -------------------
 
-fn build_body(req: &ChatRequest) -> Value {
+fn build_body(req: &ChatRequest, vision: bool) -> Value {
     let mut body = json!({
         "model": req.model,
         "max_tokens": req.max_tokens,
         "stream": true,
-        "messages": build_messages(req),
+        "messages": build_messages(req, vision),
     });
     if !req.tools.is_empty() {
         body["tools"] = json!(req
@@ -236,8 +244,10 @@ fn build_body(req: &ChatRequest) -> Value {
 
 /// Flatten our messages into OpenAI's role model. A single neutral message can
 /// expand to several: assistant tool calls become one assistant message with
-/// `tool_calls`; each tool result becomes its own `role:"tool"` message.
-fn build_messages(req: &ChatRequest) -> Vec<Value> {
+/// `tool_calls`; each tool result becomes its own `role:"tool"` message. Because
+/// tool messages are text-only, any image in a tool result is bridged (when
+/// `vision`) into a trailing `role:"user"` message with `image_url` parts.
+fn build_messages(req: &ChatRequest, vision: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     if let Some(system) = &req.system {
         out.push(json!({ "role": "system", "content": system }));
@@ -246,6 +256,11 @@ fn build_messages(req: &ChatRequest) -> Vec<Value> {
         match m.role {
             Role::User => {
                 let mut text = String::new();
+                // Images pulled out of tool results, to append AFTER all the tool
+                // replies for this turn (OpenAI requires the tool messages to
+                // directly answer the assistant's tool_calls; a following user
+                // message carrying the pixels is then valid).
+                let mut image_parts: Vec<Value> = Vec::new();
                 for c in &m.content {
                     match c {
                         Content::Text(t) => {
@@ -264,14 +279,38 @@ fn build_messages(req: &ChatRequest) -> Vec<Value> {
                             out.push(json!({
                                 "role": "tool",
                                 "tool_call_id": tool_use_id,
-                                "content": result_blocks_to_text(content),
+                                "content": result_blocks_to_text(content, vision),
                             }));
+                            if vision {
+                                for b in content {
+                                    if let ResultBlock::Image {
+                                        media_type,
+                                        data_base64,
+                                    } = b
+                                    {
+                                        image_parts.push(json!({
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": format!("data:{media_type};base64,{data_base64}")
+                                            }
+                                        }));
+                                    }
+                                }
+                            }
                         }
                         Content::ToolUse { .. } => {}
                     }
                 }
                 if !text.is_empty() {
                     out.push(json!({ "role": "user", "content": text }));
+                }
+                if !image_parts.is_empty() {
+                    let mut parts = vec![json!({
+                        "type": "text",
+                        "text": "Image(s) returned by the tool call(s) above:"
+                    })];
+                    parts.extend(image_parts);
+                    out.push(json!({ "role": "user", "content": parts }));
                 }
             }
             Role::Assistant => {
@@ -310,14 +349,21 @@ fn build_messages(req: &ChatRequest) -> Vec<Value> {
     out
 }
 
-/// OpenAI tool-result content is a plain string. Join text blocks; note any
-/// image block textually (images can't ride in a tool result here).
-fn result_blocks_to_text(blocks: &[ResultBlock]) -> String {
+/// OpenAI tool-result content is a plain string. Join text blocks; replace any
+/// image block with a textual note. When `vision` is on the image is delivered
+/// in a following user message (see build_messages); otherwise it's dropped.
+fn result_blocks_to_text(blocks: &[ResultBlock], vision: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     for b in blocks {
         match b {
             ResultBlock::Text(t) => parts.push(t.clone()),
-            ResultBlock::Image { .. } => parts.push("[image omitted: not supported by this provider]".into()),
+            ResultBlock::Image { .. } => parts.push(
+                if vision {
+                    "[image provided in the following message]".into()
+                } else {
+                    "[image omitted: this model has no vision]".into()
+                },
+            ),
         }
     }
     parts.join("\n")
@@ -443,7 +489,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             }],
         };
-        let body = build_body(&req);
+        let body = build_body(&req, false);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["role"], "user");
@@ -460,6 +506,69 @@ mod tests {
         // Tools advertised in OpenAI function shape.
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "get_tracks");
+    }
+
+    /// Build a one-turn history where capture_view returned a text+image result.
+    fn image_tool_req() -> ChatRequest {
+        ChatRequest {
+            model: "gpt-4o".into(),
+            system: None,
+            max_tokens: 100,
+            messages: vec![
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: "call_1".into(),
+                        name: "capture_view".into(),
+                        input: json!({}),
+                    }],
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: vec![Content::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: vec![
+                            ResultBlock::Text("captured".into()),
+                            ResultBlock::Image {
+                                media_type: "image/png".into(),
+                                data_base64: "AAAA".into(),
+                            },
+                        ],
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![],
+        }
+    }
+
+    #[test]
+    fn image_tool_result_bridges_to_a_following_user_message() {
+        let body = build_body(&image_tool_req(), true);
+        let msgs = body["messages"].as_array().unwrap();
+        // assistant tool call, then the (text-only) tool reply, then a user
+        // message carrying the image as an image_url data-URI part.
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_1");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("captured"));
+        assert!(msgs[1]["content"].is_string()); // tool content stays text
+        assert_eq!(msgs[2]["role"], "user");
+        let parts = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn image_tool_result_dropped_when_vision_off() {
+        let body = build_body(&image_tool_req(), false);
+        let msgs = body["messages"].as_array().unwrap();
+        // No trailing user image message; the tool reply notes the omission.
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1]["role"], "tool");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("omitted"));
     }
 
     #[test]

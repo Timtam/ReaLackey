@@ -40,6 +40,13 @@ static on_cancel_cb  g_on_cancel  = NULL;
 static on_resize_cb  g_on_resize  = NULL;
 static on_destroy_cb g_on_destroy = NULL;
 static on_webview_focus_cb g_on_webview_focus = NULL;
+static prov_list_cb   g_prov_list   = NULL;
+static prov_action_cb g_prov_action = NULL;
+static HWND        g_prov_dlg = NULL;  // provider LIST dialog, while open
+static HWND        g_pe_dlg   = NULL;  // provider settings dialog, while open
+static pe_init_cb  g_pe_init  = NULL;
+static pe_fetch_cb g_pe_fetch = NULL;
+static pe_ok_cb    g_pe_ok    = NULL;
 
 // Classic subclass of the webview host so focus entering it (Tab) is forwarded
 // into the web content via Rust (WebView2 MoveFocus). Windows-only.
@@ -191,6 +198,108 @@ static RAAI_DLGRET DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
       return TRUE;
   }
   return FALSE;  // not handled: default processing
+}
+
+// ---- provider management dialog (Phase 5, M4) -------------------------------
+// Add a UTF-8 string to a listbox or menu using the platform-correct call.
+static void add_list_item(HWND lb, const char* utf8) {
+#ifdef _WIN32
+  SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)to_wide(utf8).c_str());
+#else
+  SendMessage(lb, LB_ADDSTRING, 0, (LPARAM)utf8);
+#endif
+}
+
+// Repopulate the listbox from Rust, preserving the selection index if possible.
+static void populate_prov_list(HWND hwnd) {
+  HWND lb = GetDlgItem(hwnd, ID_PROV_LIST);
+  if (!lb) return;
+  int sel = (int)SendMessage(lb, LB_GETCURSEL, 0, 0);
+  SendMessage(lb, LB_RESETCONTENT, 0, 0);
+  if (g_prov_list) {
+    char buf[8192];
+    buf[0] = 0;
+    g_prov_list(buf, (int)sizeof(buf));
+    std::string s(buf);
+    size_t start = 0;
+    while (start <= s.size()) {
+      size_t nl = s.find('\n', start);
+      std::string line =
+          (nl == std::string::npos) ? s.substr(start) : s.substr(start, nl - start);
+      if (!line.empty()) add_list_item(lb, line.c_str());
+      if (nl == std::string::npos) break;
+      start = nl + 1;
+    }
+  }
+  int count = (int)SendMessage(lb, LB_GETCOUNT, 0, 0);
+  if (count > 0) {
+    if (sel < 0) sel = 0;
+    if (sel >= count) sel = count - 1;
+    SendMessage(lb, LB_SETCURSEL, (WPARAM)sel, 0);
+  }
+}
+
+// Run a provider action in Rust for the selected row; repopulate if it changed.
+static void do_prov_action(HWND hwnd, int action) {
+  if (!g_prov_action) return;
+  HWND lb = GetDlgItem(hwnd, ID_PROV_LIST);
+  int sel = lb ? (int)SendMessage(lb, LB_GETCURSEL, 0, 0) : -1;
+  if (g_prov_action(action, sel)) populate_prov_list(hwnd);
+}
+
+static RAAI_DLGRET ProvidersProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_INITDIALOG:
+      g_prov_dlg = hwnd;  // so the settings dialog can own (disable) this one
+      populate_prov_list(hwnd);
+      return TRUE;
+    case WM_COMMAND:
+      switch (LOWORD(wParam)) {
+        case ID_PROV_ADD:     do_prov_action(hwnd, 0); return TRUE;
+        case ID_PROV_EDIT:    do_prov_action(hwnd, 1); return TRUE;
+        case ID_PROV_DELETE:  do_prov_action(hwnd, 2); return TRUE;
+        case ID_PROV_DEFAULT: do_prov_action(hwnd, 3); return TRUE;
+        case ID_PROV_LIST:
+          if (HIWORD(wParam) == LBN_DBLCLK) { do_prov_action(hwnd, 1); return TRUE; }
+          return FALSE;
+        case IDCANCEL:
+          EndDialog(hwnd, 0);
+          return TRUE;
+      }
+      return FALSE;
+    case WM_DESTROY:
+      g_prov_dlg = NULL;
+      return FALSE;
+  }
+  return FALSE;
+}
+
+// ---- provider settings dialog (Phase 5, M5) ---------------------------------
+static RAAI_DLGRET ProviderEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_INITDIALOG:
+      g_pe_dlg = hwnd;
+      if (g_pe_init) g_pe_init();  // Rust prefills the fields
+      return TRUE;                 // default focus (first tabstop)
+    case WM_COMMAND:
+      switch (LOWORD(wParam)) {
+        case ID_PE_FETCH:
+          if (g_pe_fetch) g_pe_fetch();
+          return TRUE;
+        case IDOK:
+          // Rust saves and decides whether to close (0 = keep open on error).
+          if (!g_pe_ok || g_pe_ok()) EndDialog(hwnd, 1);
+          return TRUE;
+        case IDCANCEL:
+          EndDialog(hwnd, 0);
+          return TRUE;
+      }
+      return FALSE;
+    case WM_DESTROY:
+      g_pe_dlg = NULL;
+      return FALSE;
+  }
+  return FALSE;
 }
 
 // ---- C-ABI ------------------------------------------------------------------
@@ -395,4 +504,105 @@ extern "C" void ui_attach_submenu(void* parent_hmenu, void* submenu, const char*
 #else
   AppendMenu(parent, MF_POPUP, (UINT_PTR)submenu, title);
 #endif
+}
+
+extern "C" void ui_set_provider_cbs(prov_list_cb on_list, prov_action_cb on_action) {
+  g_prov_list   = on_list;
+  g_prov_action = on_action;
+}
+
+extern "C" void ui_show_providers(void) {
+  // Modal, parented to the assistant window if it exists (else REAPER's front
+  // window). Rust owns the list/action logic via the registered callbacks.
+  HWND parent = g_dlg ? g_dlg : GetForegroundWindow();
+  DialogBoxParam(g_hinst, MAKEINTRESOURCE(ID_PROVIDERS_DLG), parent, ProvidersProc, 0);
+}
+
+extern "C" int ui_popup_menu(const char* items_newline) {
+  if (!items_newline) return 0;
+  HMENU menu = CreatePopupMenu();
+  if (!menu) return 0;
+  std::string s(items_newline);
+  size_t start = 0;
+  int idx = 1;
+  while (start <= s.size()) {
+    size_t nl = s.find('\n', start);
+    std::string line =
+        (nl == std::string::npos) ? s.substr(start) : s.substr(start, nl - start);
+    if (!line.empty()) {
+#ifdef _WIN32
+      AppendMenuW(menu, MF_STRING, (UINT_PTR)idx, to_wide(line.c_str()).c_str());
+#else
+      AppendMenu(menu, MF_STRING, (UINT_PTR)idx, line.c_str());
+#endif
+      idx++;
+    }
+    if (nl == std::string::npos) break;
+    start = nl + 1;
+  }
+  HWND owner = g_pe_dlg ? g_pe_dlg : (g_prov_dlg ? g_prov_dlg : (g_dlg ? g_dlg : GetForegroundWindow()));
+  POINT pt;
+  GetCursorPos(&pt);
+  int chosen = (int)TrackPopupMenu(
+      menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+      pt.x, pt.y, 0, owner, NULL);
+  DestroyMenu(menu);
+  return chosen;  // 0 = cancelled, else 1-based index
+}
+
+extern "C" int ui_message_box(const char* title, const char* text, int flags) {
+  HWND owner = g_pe_dlg ? g_pe_dlg : (g_prov_dlg ? g_prov_dlg : (g_dlg ? g_dlg : GetForegroundWindow()));
+  UINT type = (flags == 1) ? (MB_YESNO | MB_ICONQUESTION) : (MB_OK | MB_ICONINFORMATION);
+#ifdef _WIN32
+  int r = MessageBoxW(owner, to_wide(text ? text : "").c_str(),
+                      to_wide(title ? title : "").c_str(), type);
+#else
+  int r = MessageBox(owner, text ? text : "", title ? title : "", type);
+#endif
+  return (r == IDYES || r == IDOK) ? 1 : 0;
+}
+
+extern "C" void ui_set_provider_edit_cbs(pe_init_cb on_init, pe_fetch_cb on_fetch,
+                                         pe_ok_cb on_ok) {
+  g_pe_init  = on_init;
+  g_pe_fetch = on_fetch;
+  g_pe_ok    = on_ok;
+}
+
+extern "C" int ui_show_provider_edit(void) {
+  // Own the provider LIST dialog (its actual parent modal) so it's disabled
+  // while settings is open; fall back to the assistant window, then foreground.
+  HWND parent = g_prov_dlg ? g_prov_dlg : (g_dlg ? g_dlg : GetForegroundWindow());
+  INT_PTR r = DialogBoxParam(g_hinst, MAKEINTRESOURCE(ID_PROVIDER_EDIT_DLG), parent,
+                             ProviderEditProc, 0);
+  return r == 1 ? 1 : 0;
+}
+
+extern "C" void ui_pe_set_text(int ctrl, const char* utf8) {
+  if (g_pe_dlg) set_ctrl_text(g_pe_dlg, ctrl, utf8);
+}
+
+extern "C" void ui_pe_get_text(int ctrl, char* buf, int buf_sz) {
+  if (!buf || buf_sz <= 0) return;
+  buf[0] = 0;
+  if (!g_pe_dlg) return;
+  std::string s = get_ctrl_text(g_pe_dlg, ctrl);
+  int n = (int)s.size();
+  if (n > buf_sz - 1) n = buf_sz - 1;
+  if (n > 0) memcpy(buf, s.data(), (size_t)n);
+  buf[n] = 0;
+}
+
+extern "C" void ui_pe_set_check(int ctrl, int checked) {
+  if (g_pe_dlg) CheckDlgButton(g_pe_dlg, ctrl, checked ? BST_CHECKED : BST_UNCHECKED);
+}
+
+extern "C" int ui_pe_get_check(int ctrl) {
+  return (g_pe_dlg && IsDlgButtonChecked(g_pe_dlg, ctrl) == BST_CHECKED) ? 1 : 0;
+}
+
+extern "C" void ui_pe_show(int ctrl, int visible) {
+  if (!g_pe_dlg) return;
+  HWND c = GetDlgItem(g_pe_dlg, ctrl);
+  if (c) ShowWindow(c, visible ? SW_SHOW : SW_HIDE);
 }

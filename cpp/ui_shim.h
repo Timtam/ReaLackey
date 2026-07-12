@@ -75,6 +75,43 @@ void ui_add_menu_item(void* hmenu, const char* label, int command_id);
 void* ui_create_submenu(void);
 void ui_attach_submenu(void* parent_hmenu, void* submenu, const char* title);
 
+// --- provider management dialog (Phase 5, M4) --------------------------------
+// Rust fills `buf` (UTF-8, NUL-terminated, capacity `buf_sz`) with the provider
+// labels, one per line, in list order; the default provider is marked ("* ").
+typedef void (*prov_list_cb)(char* buf, int buf_sz);
+// Rust performs an action on the selected row: action 0=add, 1=edit, 2=delete,
+// 3=set-default; `index` is the selected row (or -1 if none). Returns 1 if the
+// list changed (the dialog then repopulates the listbox), 0 otherwise. Rust may
+// open nested modal dialogs (ui_popup_menu, GetUserInputs) inside this call.
+typedef int (*prov_action_cb)(int action, int index);
+void ui_set_provider_cbs(prov_list_cb on_list, prov_action_cb on_action);
+// Show the modal provider-management dialog. Main thread only.
+void ui_show_providers(void);
+// Show a modal popup menu of newline-separated items at the cursor and return
+// the 1-based index of the chosen item, or 0 if cancelled. Used for the "Add"
+// preset picker. Main thread only.
+int ui_popup_menu(const char* items_newline);
+// Show a modal message box. flags: 0 = info/OK box, 1 = Yes/No question. Returns
+// 1 for OK/Yes, 0 for No/Cancel. Main thread only.
+int ui_message_box(const char* title, const char* text, int flags);
+
+// --- provider settings dialog (Phase 5, M5) ----------------------------------
+// A real dialog (add / edit one account) with a Model field next to a "Fetch
+// models" button. Rust drives it through these callbacks + control accessors.
+typedef void (*pe_init_cb)(void);   // WM_INITDIALOG: Rust prefills the fields
+typedef void (*pe_fetch_cb)(void);  // "Fetch models" clicked: Rust fetches+picks
+typedef int (*pe_ok_cb)(void);      // OK clicked: Rust saves; returns 1=close, 0=keep open
+void ui_set_provider_edit_cbs(pe_init_cb on_init, pe_fetch_cb on_fetch, pe_ok_cb on_ok);
+// Show the modal settings dialog; returns 1 if the user pressed OK, 0 on cancel.
+int ui_show_provider_edit(void);
+// Field accessors, valid only from the callbacks while the dialog is open. `ctrl`
+// is an ID_PE_* control id.
+void ui_pe_set_text(int ctrl, const char* utf8);
+void ui_pe_get_text(int ctrl, char* buf, int buf_sz);
+void ui_pe_set_check(int ctrl, int checked);
+int ui_pe_get_check(int ctrl);
+void ui_pe_show(int ctrl, int visible);
+
 #ifdef __cplusplus
 }
 #endif

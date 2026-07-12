@@ -19,6 +19,7 @@ use crate::{config, ui};
 
 static CMD_OPEN: OnceLock<u32> = OnceLock::new();
 static CMD_SETKEY: OnceLock<u32> = OnceLock::new();
+static CMD_PROVIDERS: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<usize> = OnceLock::new();
 
 struct Commands;
@@ -36,6 +37,9 @@ impl HookCommand for Commands {
             true
         } else if Some(id) == CMD_SETKEY.get().copied() {
             prompt_and_store_key();
+            true
+        } else if Some(id) == CMD_PROVIDERS.get().copied() {
+            ui::ffi::show_providers();
             true
         } else {
             false
@@ -114,6 +118,9 @@ impl HookCustomMenu for ExtMenu {
         if let Some(id) = CMD_OPEN.get().copied() {
             ui::ffi::add_menu_item(submenu, "Open window", id as i32);
         }
+        if let Some(id) = CMD_PROVIDERS.get().copied() {
+            ui::ffi::add_menu_item(submenu, "Providers\u{2026}", id as i32);
+        }
         if let Some(id) = CMD_SETKEY.get().copied() {
             ui::ffi::add_menu_item(submenu, "Set Anthropic API key", id as i32);
         }
@@ -140,6 +147,14 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
         cmd_key,
         "REAPER AI Assistant: Set Anthropic API key",
+    ))?;
+
+    // Action: manage providers (add / edit / delete / set-default).
+    let cmd_providers = session.plugin_register_add_command_id("RAAI_Providers")?;
+    let _ = CMD_PROVIDERS.set(cmd_providers.get());
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        cmd_providers,
+        "REAPER AI Assistant: Providers",
     ))?;
 
     // One handler dispatches both command ids.

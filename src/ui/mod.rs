@@ -5,4 +5,5 @@ pub mod bridge;
 pub mod ffi;
 pub mod input;
 pub mod output;
+pub mod providers_ui;
 pub mod screenshot;

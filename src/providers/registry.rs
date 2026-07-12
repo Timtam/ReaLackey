@@ -41,6 +41,12 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     pub model: String,
     pub max_tokens: u32,
+    /// Whether the chosen model accepts image input (vision). Per-MODEL, not
+    /// per-provider (gpt-4o yes, plain Llama no), so it lives here rather than as
+    /// an adapter constant. Anthropic accounts are always vision-capable; this is
+    /// only consulted for OpenAI-compatible accounts (see `build_provider`).
+    #[serde(default)]
+    pub supports_images: bool,
 }
 
 impl ProviderConfig {
@@ -74,8 +80,7 @@ pub fn init() {
     LazyLock::force(&STORE);
 }
 
-/// The configured accounts, in list order. (Used by the M4 dialog.)
-#[allow(dead_code)]
+/// The configured accounts, in list order (drives the provider dialog).
 pub fn list() -> Vec<ProviderConfig> {
     STORE.read().unwrap().providers.clone()
 }
@@ -93,13 +98,11 @@ pub fn active() -> Option<ProviderConfig> {
 }
 
 /// Look up one account by id.
-#[allow(dead_code)]
 pub fn get(id: &str) -> Option<ProviderConfig> {
     STORE.read().unwrap().providers.iter().find(|p| p.id == id).cloned()
 }
 
-/// Set the default account. Errors if the id is unknown. (M4 dialog.)
-#[allow(dead_code)]
+/// Set the default account. Errors if the id is unknown.
 pub fn set_default(id: &str) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
     if !s.providers.iter().any(|p| p.id == id) {
@@ -110,8 +113,7 @@ pub fn set_default(id: &str) -> Result<(), String> {
 }
 
 /// Add a new account (optionally with a key). Errors on a duplicate id. Becomes
-/// the default if it is the first account. (M4 dialog.)
-#[allow(dead_code)]
+/// the default if it is the first account.
 pub fn add(cfg: ProviderConfig, key: Option<&str>) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
     if s.providers.iter().any(|p| p.id == cfg.id) {
@@ -128,8 +130,7 @@ pub fn add(cfg: ProviderConfig, key: Option<&str>) -> Result<(), String> {
 }
 
 /// Update an existing account's config. `key_change`: `None` = leave the key
-/// as-is, `Some(None)` = clear it, `Some(Some(k))` = set it. (M4 dialog.)
-#[allow(dead_code)]
+/// as-is, `Some(None)` = clear it, `Some(Some(k))` = set it.
 pub fn update(cfg: ProviderConfig, key_change: Option<Option<&str>>) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
     let slot = s
@@ -147,8 +148,7 @@ pub fn update(cfg: ProviderConfig, key_change: Option<Option<&str>>) -> Result<(
 }
 
 /// Remove an account (and its stored key). If it was the default, the default
-/// moves to the first remaining account (or none). (M4 dialog.)
-#[allow(dead_code)]
+/// moves to the first remaining account (or none).
 pub fn remove(id: &str) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
     let before = s.providers.len();
@@ -257,8 +257,9 @@ fn config_path() -> Option<PathBuf> {
 fn load_or_seed() -> Store {
     if let Some(path) = config_path() {
         if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(store) = serde_json::from_str::<Store>(&text) {
+            if let Ok(mut store) = serde_json::from_str::<Store>(&text) {
                 if !store.providers.is_empty() {
+                    migrate(&mut store);
                     return store;
                 }
             }
@@ -274,10 +275,22 @@ fn load_or_seed() -> Store {
             base_url: None,
             model: default_anthropic_model(),
             max_tokens: 8192,
+            supports_images: true,
         }],
     };
     let _ = save(&store);
     store
+}
+
+/// In-memory migration for configs written before a field existed. Anthropic
+/// (Claude) models are all vision-capable, so ensure the flag is set for them
+/// even when an older `providers.json` omitted it (`serde` would default false).
+fn migrate(store: &mut Store) {
+    for p in &mut store.providers {
+        if p.kind == AdapterKind::Anthropic {
+            p.supports_images = true;
+        }
+    }
 }
 
 fn save(store: &Store) -> Result<(), String> {

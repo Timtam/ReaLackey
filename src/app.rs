@@ -51,6 +51,8 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // Bring up the C++/SWELL UI shim and wire the dialog callbacks.
     ui::ffi::init(hinst, get_func);
     ui::ffi::install_callbacks();
+    ui::ffi::install_provider_cbs();
+    ui::ffi::install_provider_edit_cbs();
 
     // Channels: worker -> main (crossbeam) for UI events and tool ops;
     // main/UI -> worker (tokio mpsc) for user intents.

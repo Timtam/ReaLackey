@@ -30,7 +30,35 @@ extern "C" {
     fn ui_set_destroy_cb(on_destroy: extern "C" fn());
     fn ui_enable_webview_tabstop();
     fn ui_set_webview_focus_cb(on_focus: extern "C" fn());
+    fn ui_set_provider_cbs(
+        on_list: extern "C" fn(*mut c_char, c_int),
+        on_action: extern "C" fn(c_int, c_int) -> c_int,
+    );
+    fn ui_show_providers();
+    fn ui_popup_menu(items_newline: *const c_char) -> c_int;
+    fn ui_message_box(title: *const c_char, text: *const c_char, flags: c_int) -> c_int;
+    fn ui_set_provider_edit_cbs(
+        on_init: extern "C" fn(),
+        on_fetch: extern "C" fn(),
+        on_ok: extern "C" fn() -> c_int,
+    );
+    fn ui_show_provider_edit() -> c_int;
+    fn ui_pe_set_text(ctrl: c_int, utf8: *const c_char);
+    fn ui_pe_get_text(ctrl: c_int, buf: *mut c_char, buf_sz: c_int);
+    fn ui_pe_set_check(ctrl: c_int, checked: c_int);
+    fn ui_pe_get_check(ctrl: c_int) -> c_int;
+    fn ui_pe_show(ctrl: c_int, visible: c_int);
 }
+
+// Provider settings dialog control ids — MUST match cpp/resource.h.
+pub const PE_LABEL: c_int = 1021;
+pub const PE_BASEURL: c_int = 1022;
+pub const PE_BASEURL_LBL: c_int = 1023;
+pub const PE_MODEL: c_int = 1024;
+pub const PE_MAXTOK: c_int = 1026;
+pub const PE_VISION: c_int = 1027;
+pub const PE_KEY: c_int = 1028;
+pub const PE_KEYHINT: c_int = 1029;
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
 /// non-Windows; ignored on Windows).
@@ -106,6 +134,123 @@ pub fn enable_webview_tabstop() {
 /// Register the "webview host focused" thunk (forwards focus into the content).
 pub fn install_webview_focus_cb() {
     unsafe { ui_set_webview_focus_cb(on_webview_focus) }
+}
+
+/// Register the provider-dialog callbacks (list + row actions). Call once at init.
+pub fn install_provider_cbs() {
+    unsafe { ui_set_provider_cbs(prov_list, prov_action) }
+}
+
+/// Register the provider *settings* dialog callbacks. Call once at init.
+pub fn install_provider_edit_cbs() {
+    unsafe { ui_set_provider_edit_cbs(pe_init, pe_fetch, pe_ok) }
+}
+
+/// Show the modal provider settings dialog; true if the user pressed OK.
+pub fn show_provider_edit() -> bool {
+    unsafe { ui_show_provider_edit() != 0 }
+}
+
+/// Set a settings-dialog text control (valid only from the dialog callbacks).
+pub fn pe_set_text(ctrl: c_int, text: &str) {
+    if let Some(c) = to_cstring(text) {
+        unsafe { ui_pe_set_text(ctrl, c.as_ptr()) }
+    }
+}
+
+/// Read a settings-dialog text control (valid only from the dialog callbacks).
+pub fn pe_get_text(ctrl: c_int) -> String {
+    const CAP: usize = 8192;
+    let mut buf = vec![0u8; CAP];
+    unsafe { ui_pe_get_text(ctrl, buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(CAP);
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+/// Set a settings-dialog checkbox.
+pub fn pe_set_check(ctrl: c_int, checked: bool) {
+    unsafe { ui_pe_set_check(ctrl, checked as c_int) }
+}
+
+/// Read a settings-dialog checkbox.
+pub fn pe_get_check(ctrl: c_int) -> bool {
+    unsafe { ui_pe_get_check(ctrl) != 0 }
+}
+
+/// Show/hide a settings-dialog control (used to hide base-URL/vision for Anthropic).
+pub fn pe_show(ctrl: c_int, visible: bool) {
+    unsafe { ui_pe_show(ctrl, visible as c_int) }
+}
+
+extern "C" fn pe_init() {
+    let _ = std::panic::catch_unwind(crate::ui::providers_ui::edit_dialog_init);
+}
+
+extern "C" fn pe_fetch() {
+    let _ = std::panic::catch_unwind(crate::ui::providers_ui::edit_dialog_fetch);
+}
+
+extern "C" fn pe_ok() -> c_int {
+    // On panic, close the dialog (1) rather than leaving it stuck open.
+    std::panic::catch_unwind(|| crate::ui::providers_ui::edit_dialog_ok() as c_int).unwrap_or(1)
+}
+
+/// Show the modal provider-management dialog (main thread only).
+pub fn show_providers() {
+    unsafe { ui_show_providers() }
+}
+
+/// Show a modal popup menu of `items` at the cursor; returns the 1-based index of
+/// the chosen item, or 0 if cancelled. Main thread only.
+pub fn popup_menu(items: &[&str]) -> usize {
+    let Some(c) = to_cstring(&items.join("\n")) else {
+        return 0;
+    };
+    let r = unsafe { ui_popup_menu(c.as_ptr()) };
+    if r > 0 {
+        r as usize
+    } else {
+        0
+    }
+}
+
+/// Show a modal message box. `question` = Yes/No (returns true on Yes); otherwise
+/// an OK box (returns true on OK). Main thread only.
+pub fn message_box(title: &str, text: &str, question: bool) -> bool {
+    match (to_cstring(title), to_cstring(text)) {
+        (Some(t), Some(m)) => {
+            unsafe { ui_message_box(t.as_ptr(), m.as_ptr(), question as c_int) != 0 }
+        }
+        _ => false,
+    }
+}
+
+/// Fill `buf` (capacity `buf_sz`, incl. NUL) with `s`, truncated on a char
+/// boundary. No-op on a null/zero buffer.
+unsafe fn write_cstr(buf: *mut c_char, buf_sz: c_int, s: &str) {
+    if buf.is_null() || buf_sz <= 0 {
+        return;
+    }
+    let cap = buf_sz as usize;
+    let mut end = s.len().min(cap - 1);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bytes = &s.as_bytes()[..end];
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
+    *buf.add(bytes.len()) = 0;
+}
+
+extern "C" fn prov_list(buf: *mut c_char, buf_sz: c_int) {
+    let _ = std::panic::catch_unwind(|| {
+        let text = crate::ui::providers_ui::list_text();
+        unsafe { write_cstr(buf, buf_sz, &text) };
+    });
+}
+
+extern "C" fn prov_action(action: c_int, index: c_int) -> c_int {
+    std::panic::catch_unwind(|| crate::ui::providers_ui::on_action(action, index) as c_int)
+        .unwrap_or(0)
 }
 
 extern "C" fn on_webview_focus() {

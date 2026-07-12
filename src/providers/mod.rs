@@ -3,6 +3,7 @@
 //! (design §kap-llm).
 
 pub mod anthropic;
+pub mod models_api;
 pub mod openai_compat;
 pub mod registry;
 
@@ -186,6 +187,7 @@ pub fn build_provider(cfg: &registry::ProviderConfig) -> Box<dyn LlmProvider> {
             Box::new(openai_compat::OpenAiCompatProvider::new(
                 cfg.base_url.clone().unwrap_or_default(),
                 registry::key_for(&cfg.id),
+                cfg.supports_images,
             ))
         }
     }

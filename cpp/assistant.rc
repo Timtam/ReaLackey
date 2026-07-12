@@ -24,3 +24,40 @@ BEGIN
     DEFPUSHBUTTON   "&Send", ID_SUBMIT_BTN, 334, 262, 60, 14
     PUSHBUTTON      "&Close", IDCANCEL, 334, 280, 60, 14
 END
+
+ID_PROVIDERS_DLG DIALOGEX 0, 0, 340, 176
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "AI Providers"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "Configured providers. The default (*) drives the conversation.", -1, 6, 6, 328, 9, SS_LEFTNOWORDWRAP
+    LISTBOX         ID_PROV_LIST, 6, 18, 328, 116,
+                    LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+    PUSHBUTTON      "&Add...", ID_PROV_ADD, 6, 140, 54, 16
+    PUSHBUTTON      "&Edit...", ID_PROV_EDIT, 64, 140, 54, 16
+    PUSHBUTTON      "De&lete", ID_PROV_DELETE, 122, 140, 54, 16
+    PUSHBUTTON      "Set De&fault", ID_PROV_DEFAULT, 180, 140, 74, 16
+    DEFPUSHBUTTON   "&Close", IDCANCEL, 280, 140, 54, 16
+END
+
+ID_PROVIDER_EDIT_DLG DIALOGEX 0, 0, 300, 150
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Provider settings"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "&Name:", -1, 6, 9, 58, 9
+    EDITTEXT        ID_PE_LABEL, 66, 6, 228, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
+    LTEXT           "Base &URL:", ID_PE_BASEURL_LBL, 6, 27, 58, 9
+    EDITTEXT        ID_PE_BASEURL, 66, 24, 228, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
+    LTEXT           "&Model:", -1, 6, 45, 58, 9
+    EDITTEXT        ID_PE_MODEL, 66, 42, 170, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
+    PUSHBUTTON      "&Fetch models...", ID_PE_FETCH, 240, 42, 54, 13
+    LTEXT           "Max &tokens:", -1, 6, 63, 58, 9
+    EDITTEXT        ID_PE_MAXTOK, 66, 60, 60, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP | WS_BORDER
+    AUTOCHECKBOX    "Supports &images (vision)", ID_PE_VISION, 66, 80, 160, 10, WS_TABSTOP
+    LTEXT           "API &key:", -1, 6, 99, 58, 9
+    EDITTEXT        ID_PE_KEY, 66, 96, 228, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
+    LTEXT           "(blank = keep the current key)", ID_PE_KEYHINT, 66, 110, 228, 9, SS_LEFTNOWORDWRAP
+    DEFPUSHBUTTON   "OK", IDOK, 186, 130, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 240, 130, 50, 14
+END

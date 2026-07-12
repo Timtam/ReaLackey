@@ -1,0 +1,545 @@
+//! Provider management dialog logic (Phase 5, M4/M5).
+//!
+//! Two native dialogs live in the C++ shim:
+//!   * the provider *list* (`ui_show_providers`) — this module supplies its label
+//!     list and row actions (add / edit / delete / set-default);
+//!   * the provider *settings* dialog (`ui_show_provider_edit`) — a real dialog
+//!     with a Model field next to a "Fetch models" button; this module drives it
+//!     through the `edit_dialog_*` callbacks below.
+//!
+//! Everything here runs on the REAPER main thread (the dialogs are modal and open
+//! nested modal menus / boxes, all main-thread only), so the in-flight edit
+//! session is kept in a thread-local.
+
+use std::cell::RefCell;
+
+use crate::providers::models_api;
+use crate::providers::registry::{self, AdapterKind, ProviderConfig};
+use crate::reaper::osara;
+use crate::ui;
+
+/// A ready-made account the "Add" picker offers. Model ids are sensible defaults
+/// the user can edit; endpoints are the providers' OpenAI-compatible bases.
+struct Preset {
+    /// Label shown in the Add popup menu.
+    menu: &'static str,
+    /// Stable id base (uniquified if it collides).
+    id: &'static str,
+    /// Default provider label.
+    label: &'static str,
+    kind: AdapterKind,
+    /// OpenAI-compatible endpoint (empty for Anthropic / a blank custom slot).
+    base_url: &'static str,
+    model: &'static str,
+    max_tokens: u32,
+    /// Default vision support for the preset's default model (overridable, and
+    /// re-derived when the user picks a model via "Fetch models…").
+    vision: bool,
+}
+
+/// The shipped presets. Claude is included so it can be re-added if deleted; the
+/// rest are OpenAI-compatible endpoints plus a blank custom slot.
+const PRESETS: &[Preset] = &[
+    Preset {
+        menu: "Claude (Anthropic)",
+        id: "anthropic",
+        label: "Claude (Anthropic)",
+        kind: AdapterKind::Anthropic,
+        base_url: "",
+        model: "claude-opus-4-8",
+        max_tokens: 8192,
+        vision: true,
+    },
+    Preset {
+        menu: "OpenAI",
+        id: "openai",
+        label: "OpenAI",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "https://api.openai.com/v1",
+        model: "gpt-4o",
+        max_tokens: 4096,
+        vision: true,
+    },
+    Preset {
+        menu: "Groq",
+        id: "groq",
+        label: "Groq",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "https://api.groq.com/openai/v1",
+        model: "llama-3.3-70b-versatile",
+        max_tokens: 4096,
+        vision: false,
+    },
+    Preset {
+        menu: "OpenRouter",
+        id: "openrouter",
+        label: "OpenRouter",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "https://openrouter.ai/api/v1",
+        model: "openai/gpt-4o",
+        max_tokens: 4096,
+        vision: true,
+    },
+    Preset {
+        menu: "DeepSeek",
+        id: "deepseek",
+        label: "DeepSeek",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "https://api.deepseek.com",
+        model: "deepseek-chat",
+        max_tokens: 4096,
+        vision: false,
+    },
+    Preset {
+        menu: "xAI (Grok)",
+        id: "xai",
+        label: "xAI (Grok)",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "https://api.x.ai/v1",
+        model: "grok-2-latest",
+        max_tokens: 4096,
+        vision: false,
+    },
+    Preset {
+        menu: "Gemini (OpenAI-compatible)",
+        id: "gemini",
+        label: "Gemini",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+        model: "gemini-2.0-flash",
+        max_tokens: 4096,
+        vision: true,
+    },
+    Preset {
+        menu: "Ollama (local)",
+        id: "ollama",
+        label: "Ollama (local)",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "http://localhost:11434/v1",
+        model: "llama3.2",
+        max_tokens: 4096,
+        vision: false,
+    },
+    Preset {
+        menu: "LM Studio (local)",
+        id: "lmstudio",
+        label: "LM Studio (local)",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "http://localhost:1234/v1",
+        model: "local-model",
+        max_tokens: 4096,
+        vision: false,
+    },
+    Preset {
+        menu: "Custom endpoint\u{2026}",
+        id: "custom",
+        label: "Custom",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "",
+        model: "",
+        max_tokens: 4096,
+        vision: false,
+    },
+];
+
+/// Newline-separated labels for the listbox, in registry order. The default
+/// account is marked with a leading `*`; accounts that can't yet send show why.
+pub fn list_text() -> String {
+    let default = registry::default_id();
+    registry::list()
+        .iter()
+        .map(|p| {
+            let is_default = default.as_deref() == Some(p.id.as_str());
+            let mark = if is_default { "* " } else { "   " };
+            let status = if p.can_send() {
+                ""
+            } else if p.kind == AdapterKind::Anthropic {
+                "  \u{2014} needs API key"
+            } else if p.base_url.is_none() {
+                "  \u{2014} needs endpoint URL"
+            } else {
+                ""
+            };
+            format!("{mark}{}  ({}){}", p.label, p.model, status)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Run a row action (0=add, 1=edit, 2=delete, 3=set-default). Returns true if
+/// the provider list changed (the dialog then repopulates its listbox).
+pub fn on_action(action: i32, index: i32) -> bool {
+    match action {
+        0 => add_provider(),
+        1 => edit_provider(index),
+        2 => delete_provider(index),
+        3 => set_default(index),
+        _ => false,
+    }
+}
+
+// ---- the in-flight edit/add session -----------------------------------------
+
+/// State for one run of the settings dialog. Held in a thread-local because the
+/// dialog's init/fetch/ok callbacks (fired by the C++ modal loop on the main
+/// thread) need it, and it must outlive each individual callback.
+struct ProvSession {
+    /// Adding a new account vs. editing an existing one.
+    is_new: bool,
+    /// Existing id (edit) or a pre-generated unique id (add).
+    id: String,
+    kind: AdapterKind,
+    // Prefill values for the fields (used by `edit_dialog_init`).
+    label: String,
+    base_url: String,
+    model: String,
+    max_tokens: u32,
+    vision: bool,
+    /// Set true once the account was successfully saved (so the list repopulates).
+    changed: bool,
+}
+
+thread_local! {
+    static SESSION: RefCell<Option<ProvSession>> = const { RefCell::new(None) };
+}
+
+// ---- actions ----------------------------------------------------------------
+
+fn add_provider() -> bool {
+    let labels: Vec<&str> = PRESETS.iter().map(|p| p.menu).collect();
+    let choice = ui::ffi::popup_menu(&labels);
+    if choice == 0 || choice > PRESETS.len() {
+        return false; // cancelled
+    }
+    let preset = &PRESETS[choice - 1];
+    run_settings_dialog(ProvSession {
+        is_new: true,
+        id: unique_id(preset.id),
+        kind: preset.kind,
+        label: preset.label.to_string(),
+        base_url: preset.base_url.to_string(),
+        model: preset.model.to_string(),
+        max_tokens: preset.max_tokens,
+        vision: preset.vision,
+        changed: false,
+    })
+}
+
+fn edit_provider(index: i32) -> bool {
+    let Some(cfg) = provider_at(index) else {
+        return false;
+    };
+    run_settings_dialog(ProvSession {
+        is_new: false,
+        id: cfg.id.clone(),
+        kind: cfg.kind,
+        label: cfg.label.clone(),
+        base_url: cfg.base_url.clone().unwrap_or_default(),
+        model: cfg.model.clone(),
+        max_tokens: cfg.max_tokens,
+        vision: cfg.supports_images,
+        changed: false,
+    })
+}
+
+/// Show the modal settings dialog for `session`; returns whether it changed the
+/// registry (so the list dialog repopulates).
+fn run_settings_dialog(session: ProvSession) -> bool {
+    SESSION.with(|s| *s.borrow_mut() = Some(session));
+    let _ = ui::ffi::show_provider_edit(); // modal; fires the edit_dialog_* callbacks
+    SESSION.with(|s| s.borrow_mut().take().map(|x| x.changed).unwrap_or(false))
+}
+
+fn delete_provider(index: i32) -> bool {
+    let Some(cfg) = provider_at(index) else {
+        return false;
+    };
+    if registry::list().len() <= 1 {
+        ui::ffi::message_box(
+            "Delete provider",
+            "This is the only provider. Add another before deleting it.",
+            false,
+        );
+        return false;
+    }
+    let confirmed = ui::ffi::message_box(
+        "Delete provider",
+        &format!(
+            "Delete provider \"{}\"? Its stored API key will be removed.",
+            cfg.label
+        ),
+        true,
+    );
+    if !confirmed {
+        return false;
+    }
+    match registry::remove(&cfg.id) {
+        Ok(()) => {
+            osara::announce("Provider deleted.");
+            true
+        }
+        Err(e) => {
+            ui::ffi::message_box("Delete provider", &format!("Could not delete provider: {e}"), false);
+            false
+        }
+    }
+}
+
+fn set_default(index: i32) -> bool {
+    let Some(cfg) = provider_at(index) else {
+        return false;
+    };
+    if registry::default_id().as_deref() == Some(cfg.id.as_str()) {
+        osara::announce(&format!("{} is already the default.", cfg.label));
+        return false; // no change
+    }
+    match registry::set_default(&cfg.id) {
+        Ok(()) => {
+            osara::announce(&format!("{} is now the default provider.", cfg.label));
+            true
+        }
+        Err(e) => {
+            ui::ffi::message_box("Set default", &format!("Could not set default: {e}"), false);
+            false
+        }
+    }
+}
+
+// ---- settings dialog callbacks (fired by the C++ modal loop) -----------------
+
+/// Prefill the settings dialog fields from the session (WM_INITDIALOG).
+pub fn edit_dialog_init() {
+    SESSION.with(|s| {
+        let b = s.borrow();
+        let Some(sess) = b.as_ref() else {
+            return;
+        };
+        ui::ffi::pe_set_text(ui::ffi::PE_LABEL, &sess.label);
+        ui::ffi::pe_set_text(ui::ffi::PE_MODEL, &sess.model);
+        ui::ffi::pe_set_text(ui::ffi::PE_MAXTOK, &sess.max_tokens.to_string());
+        ui::ffi::pe_set_text(ui::ffi::PE_KEY, "");
+        ui::ffi::pe_set_text(
+            ui::ffi::PE_KEYHINT,
+            if sess.is_new {
+                "(blank for keyless local servers)"
+            } else {
+                "(blank = keep the current key)"
+            },
+        );
+        // Anthropic uses a fixed endpoint and its models are always vision-capable,
+        // so hide the base-URL row and the vision checkbox for it.
+        if sess.kind == AdapterKind::Anthropic {
+            ui::ffi::pe_show(ui::ffi::PE_BASEURL, false);
+            ui::ffi::pe_show(ui::ffi::PE_BASEURL_LBL, false);
+            ui::ffi::pe_show(ui::ffi::PE_VISION, false);
+        } else {
+            ui::ffi::pe_set_text(ui::ffi::PE_BASEURL, &sess.base_url);
+            ui::ffi::pe_set_check(ui::ffi::PE_VISION, sess.vision);
+        }
+    });
+}
+
+/// "Fetch models" clicked: fetch the list using the endpoint + key currently in
+/// the dialog, let the user pick, and set the Model field + vision checkbox.
+pub fn edit_dialog_fetch() {
+    let Some((kind, id)) =
+        SESSION.with(|s| s.borrow().as_ref().map(|sess| (sess.kind, sess.id.clone())))
+    else {
+        return;
+    };
+
+    // Read live (possibly-unsaved) endpoint + key from the dialog. For Anthropic
+    // the base-URL field is hidden/empty; models_api uses the fixed endpoint.
+    let base = ui::ffi::pe_get_text(ui::ffi::PE_BASEURL);
+    let key_field = ui::ffi::pe_get_text(ui::ffi::PE_KEY);
+    let key = if key_field.trim().is_empty() {
+        registry::key_for(&id) // fall back to the stored key (edit)
+    } else {
+        Some(key_field.trim().to_string())
+    };
+
+    if kind == AdapterKind::OpenAiCompatible && base.trim().is_empty() {
+        ui::ffi::message_box(
+            "Fetch models",
+            "Enter the Base URL first, then fetch the model list.",
+            false,
+        );
+        return;
+    }
+
+    osara::announce("Fetching models\u{2026}");
+    let models = match models_api::fetch_models(kind, base.trim(), key.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            ui::ffi::message_box("Fetch models", &format!("Could not fetch models: {e}"), false);
+            return;
+        }
+    };
+    if models.is_empty() {
+        osara::announce("The provider returned no models.");
+        return;
+    }
+
+    let refs: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+    let choice = ui::ffi::popup_menu(&refs);
+    if choice == 0 || choice > models.len() {
+        return; // cancelled — user can still type a model by hand
+    }
+    let mi = &models[choice - 1];
+    // Trust the provider's reported vision flag; infer from the id otherwise.
+    let vision = mi.vision.unwrap_or_else(|| infer_vision(&mi.id));
+    ui::ffi::pe_set_text(ui::ffi::PE_MODEL, &mi.id);
+    if kind != AdapterKind::Anthropic {
+        ui::ffi::pe_set_check(ui::ffi::PE_VISION, vision);
+    }
+    osara::announce(&format!("Model set to {}.", mi.id));
+}
+
+/// OK clicked: read the fields, save (add or update), and report whether the
+/// dialog should close (true = close; false = keep open so the user can fix an
+/// error).
+pub fn edit_dialog_ok() -> bool {
+    let Some((is_new, id, kind, def_label, def_model, def_max)) = SESSION.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|x| (x.is_new, x.id.clone(), x.kind, x.label.clone(), x.model.clone(), x.max_tokens))
+    }) else {
+        return true;
+    };
+
+    let label = nonempty(ui::ffi::pe_get_text(ui::ffi::PE_LABEL), def_label);
+    let model = nonempty(ui::ffi::pe_get_text(ui::ffi::PE_MODEL), def_model);
+    // Max tokens: empty keeps the current value; a non-empty but invalid entry is
+    // rejected with feedback (silent revert would be invisible to a screen reader).
+    let max_raw = ui::ffi::pe_get_text(ui::ffi::PE_MAXTOK);
+    let max_trimmed = max_raw.trim();
+    let max_tokens = if max_trimmed.is_empty() {
+        def_max
+    } else {
+        match max_trimmed.parse::<u32>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                ui::ffi::message_box(
+                    "Provider settings",
+                    "Max tokens must be a positive whole number.",
+                    false,
+                );
+                return false; // keep the dialog open so the user can fix it
+            }
+        }
+    };
+    let (base_url, vision) = if kind == AdapterKind::Anthropic {
+        (None, true)
+    } else {
+        let b = ui::ffi::pe_get_text(ui::ffi::PE_BASEURL).trim().to_string();
+        (
+            (!b.is_empty()).then_some(b),
+            ui::ffi::pe_get_check(ui::ffi::PE_VISION),
+        )
+    };
+    let key = ui::ffi::pe_get_text(ui::ffi::PE_KEY).trim().to_string();
+
+    let name = label.clone(); // for the announcement (cfg takes ownership of label)
+    let cfg = ProviderConfig {
+        id,
+        label,
+        kind,
+        base_url,
+        model,
+        max_tokens,
+        supports_images: vision,
+    };
+
+    let result = if is_new {
+        registry::add(cfg, (!key.is_empty()).then_some(key.as_str()))
+    } else {
+        // Blank key = keep the existing key (we never display it).
+        let key_change = (!key.is_empty()).then_some(Some(key.as_str()));
+        registry::update(cfg, key_change)
+    };
+
+    match result {
+        Ok(()) => {
+            osara::announce(&format!(
+                "Provider {name} {}.",
+                if is_new { "added" } else { "updated" }
+            ));
+            SESSION.with(|s| {
+                if let Some(x) = s.borrow_mut().as_mut() {
+                    x.changed = true;
+                }
+            });
+            true // close
+        }
+        Err(e) => {
+            ui::ffi::message_box(
+                if is_new { "Add provider" } else { "Edit provider" },
+                &format!("Could not save provider: {e}"),
+                false,
+            );
+            false // keep the dialog open so the user can correct it
+        }
+    }
+}
+
+// ---- helpers ----------------------------------------------------------------
+
+/// The provider at a listbox row (registry order), if the index is valid.
+fn provider_at(index: i32) -> Option<ProviderConfig> {
+    let i = usize::try_from(index).ok()?;
+    registry::list().into_iter().nth(i)
+}
+
+/// A trimmed value, or `fallback` if it was left empty.
+fn nonempty(v: String, fallback: String) -> String {
+    let t = v.trim();
+    if t.is_empty() {
+        fallback
+    } else {
+        t.to_string()
+    }
+}
+
+/// Guess whether a model accepts image input from its id — the fallback when the
+/// provider's model list doesn't report vision explicitly. Overridable by the
+/// user via the vision checkbox in the settings dialog.
+fn infer_vision(model: &str) -> bool {
+    let m = model.to_lowercase();
+    const HINTS: &[&str] = &[
+        "vision",
+        "-vl",
+        "vl-",
+        "llava",
+        "pixtral",
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "gemini",
+        "claude",
+        "grok-2-vision",
+        "grok-3",
+        "grok-4",
+        "llama-4",
+        "llama3.2-vision",
+        "internvl",
+        "moondream",
+        "minicpm-v",
+    ];
+    HINTS.iter().any(|h| m.contains(h))
+}
+
+/// A provider id derived from `base`, uniquified against the existing ids.
+fn unique_id(base: &str) -> String {
+    let existing: Vec<String> = registry::list().into_iter().map(|p| p.id).collect();
+    if !existing.iter().any(|e| e == base) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let cand = format!("{base}-{n}");
+        if !existing.iter().any(|e| e == &cand) {
+            return cand;
+        }
+        n += 1;
+    }
+}
