@@ -41,7 +41,14 @@ pub fn confirmation_required() -> bool {
 
 /// System prompt. Establishes the role and how to use the read tools
 /// (design §kap-llm). Grows as more capabilities land.
-pub fn system_prompt() -> String {
+///
+/// The audio (`listen_to_audio`) and vision (`capture_view`, pixel control)
+/// paragraphs are included ONLY when the active model actually has that
+/// capability — mirroring the tool-list gating in [`crate::tools::definitions`].
+/// Otherwise a text-only model reads that it can hear/see, offers the tool to
+/// the user, and then discovers the tool was never in its toolset.
+pub fn system_prompt(supports_images: bool, supports_audio: bool) -> String {
+    let mut prompt = String::from(
     "You are an AI assistant embedded in the REAPER digital audio workstation. \
      You can inspect the project through read tools (project summary — including \
      the project name and file path, which often hint at the project's intent — \
@@ -95,12 +102,24 @@ pub fn system_prompt() -> String {
      project file: at the START of a session call get_project_memory to recall \
      context, and use set_project_memory to record decisions, TODOs, and \
      progress as you work. You can also read/append the project's Notes and \
-     per-track notes. \
-     If your model can HEAR audio, you can LISTEN to a short rendered clip of the \
+     per-track notes. ",
+    );
+
+    // Audio: only advertise listening when the active model can actually hear.
+    if supports_audio {
+        prompt.push_str(
+    "You can LISTEN to a short rendered clip of the \
      processed master or a track (listen_to_audio) to judge tone, balance, noise \
      and artifacts directly — use it only when hearing genuinely helps, and (like \
-     screenshots) each listen asks the user for consent. \
-     For plugin GUIs a screen reader cannot read (custom-drawn interfaces, meters, \
+     screenshots) each listen asks the user for consent. ",
+        );
+    }
+
+    // Vision + pixel control: only advertise seeing/clicking GUIs when the active
+    // model can actually process images.
+    if supports_images {
+        prompt.push_str(
+    "For plugin GUIs a screen reader cannot read (custom-drawn interfaces, meters, \
      waveforms), you can SEE them with capture_view (each capture asks the user for \
      consent). To look at a SPECIFIC plugin the user hasn't focused (e.g. one you \
      just added), pass its track_index and fx_index to capture_view — it opens the \
@@ -113,7 +132,47 @@ pub fn system_prompt() -> String {
      image of that plugin; the user must arm pixel control first (they are prompted \
      once). Those synthesized clicks are NOT undoable by REAPER, so after each one \
      call capture_view again to verify, and work in small steps. When the user says \
-     to stop operating the GUI, or you are done, call disable_pixel_control. \
-     Answer concisely."
-        .to_string()
+     to stop operating the GUI, or you are done, call disable_pixel_control. ",
+        );
+    }
+
+    prompt.push_str("Answer concisely.");
+    prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::system_prompt;
+
+    // The system prompt must never advertise a capability whose tool is gated
+    // out of the toolset — otherwise the model offers e.g. listen_to_audio to a
+    // text-only account, the user accepts, and the tool isn't there.
+    #[test]
+    fn prompt_hides_audio_without_support() {
+        let p = system_prompt(true, false);
+        assert!(!p.contains("listen_to_audio"), "must not mention audio tool");
+        assert!(!p.contains("LISTEN"), "must not offer listening");
+    }
+
+    #[test]
+    fn prompt_hides_vision_without_support() {
+        let p = system_prompt(false, true);
+        assert!(!p.contains("capture_view"), "must not mention vision tool");
+        assert!(!p.contains("plugin_click"), "must not mention pixel control");
+    }
+
+    #[test]
+    fn prompt_shows_capabilities_when_supported() {
+        let p = system_prompt(true, true);
+        assert!(p.contains("listen_to_audio"), "audio-capable: offer it");
+        assert!(p.contains("capture_view"), "vision-capable: offer it");
+    }
+
+    #[test]
+    fn prompt_text_only_offers_neither() {
+        let p = system_prompt(false, false);
+        assert!(!p.contains("listen_to_audio"));
+        assert!(!p.contains("capture_view"));
+        assert!(p.ends_with("Answer concisely."));
+    }
 }

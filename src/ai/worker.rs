@@ -166,7 +166,10 @@ async fn handle_prompt(
     for turn in 0..MAX_TURNS {
         let req = ChatRequest {
             model: cfg.model.clone(),
-            system: Some(config::system_prompt()),
+            system: Some(config::system_prompt(
+                caps.supports_images,
+                caps.supports_audio,
+            )),
             max_tokens: cfg.max_tokens,
             messages: history.clone(),
             tools: tools.clone(),
