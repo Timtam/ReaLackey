@@ -4707,8 +4707,12 @@ fn execute_render(reaper: &Reaper<MainThreadScope>, job: &RenderJob) -> Result<V
     // add to project.
     let tmp_dir = std::env::temp_dir().to_string_lossy().to_string();
     let base = format!("raai_render_probe_{}", std::process::id());
-    proj_info_str_set(low, c"RENDER_FORMAT", "evaw");
-    proj_info_str_set(low, c"RENDER_FORMAT2", "");
+    // 32-bit float WAV, as REAPER's own base64 render-config: fourcc "evaw" +
+    // 0x20 (32-bit) + float flag. A BARE "evaw" base64-decodes to only 3 bytes —
+    // too short for the config struct — so REAPER read past the buffer and
+    // corrupted the heap (this was the crash). Float avoids render-time clamping,
+    // so peak/clip analysis stays accurate. RENDER_FORMAT2 is left untouched.
+    proj_info_str_set(low, c"RENDER_FORMAT", "ZXZhdyAAAQ==");
     proj_info_set(low, c"RENDER_SETTINGS", job.render_settings);
     proj_info_set(low, c"RENDER_BOUNDSFLAG", job.bounds_flag);
     proj_info_set(low, c"RENDER_STARTPOS", job.rstart);
@@ -4728,7 +4732,6 @@ fn execute_render(reaper: &Reaper<MainThreadScope>, job: &RenderJob) -> Result<V
         unsafe { low.SelectAllMediaItems(CUR_PROJ, false) };
         unsafe { low.SetMediaItemSelected(it.as_ptr(), true) };
     }
-
     let path = proj_info_str_get(low, c"RENDER_TARGETS")
         .split(';')
         .next()

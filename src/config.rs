@@ -62,10 +62,8 @@ pub fn max_output_tokens() -> u32 {
 }
 
 /// Whether the offline post-FX render (`analyze_processed_audio`) is allowed. ON
-/// by default now that the render is DEFERRED to a timer callback off the
-/// control-surface `run()` call stack (see control_surface::render_timer). This
-/// is still experimental (a render from the extension may yet be fragile), so it
-/// keeps a kill switch: set `RAAI_DISABLE_PROCESSED_RENDER=1` to turn it off.
+/// by default now that it works (the crash was a bad `RENDER_FORMAT` value, now
+/// a valid 32-bit-float WAV config). Kill switch: `RAAI_DISABLE_PROCESSED_RENDER=1`.
 pub fn processed_render_enabled() -> bool {
     !matches!(
         std::env::var("RAAI_DISABLE_PROCESSED_RENDER").as_deref(),
