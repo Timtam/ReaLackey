@@ -61,8 +61,12 @@ pub fn system_prompt() -> String {
      mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
      notes, delete MIDI notes, create a MIDI item, create tracks, \
-     add/adjust/remove track sends, write \
-     automation points, add/delete markers and regions, edit the tempo map and \
+     add/adjust/remove track sends, create automation envelopes (an FX parameter \
+     via create_fx_envelope, or a track volume/pan/mute envelope via \
+     create_track_envelope) and write/edit/delete their points (insert_envelope_point, \
+     set_envelope_point, delete_envelope_point/delete_envelope_points, clear_envelope) \
+     — create the envelope first if it does not exist yet, then add points; \
+     add/delete markers and regions, edit the tempo map and \
      project tempo, add/delete take stretch markers, change render settings, \
      edit item properties (fades, length, mute, loop, snap, color), take \
      properties (start offset, rate, pitch, pan, channel mode, name), and track \

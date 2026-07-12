@@ -1359,6 +1359,86 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             json!(["track_index", "envelope_index", "start", "end"]),
         ),
     });
+    defs.push(ToolDef {
+        name: "create_fx_envelope".into(),
+        description: "Create (or get, if it already exists) the automation envelope for a track FX \
+                      PARAMETER, so it can then be automated with insert_envelope_point. CHANGES \
+                      the project (confirmed + undo-wrapped). Returns the new envelope_index. \
+                      Indices from get_track_fx / get_fx_params."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "fx_index": { "type": "integer" },
+                "param_index": { "type": "integer" }
+            }),
+            json!(["track_index", "fx_index", "param_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "create_track_envelope".into(),
+        description: "Create a built-in track automation envelope so insert_envelope_point can \
+                      target it. kind: volume, pan, or mute. If it already exists it is returned \
+                      unchanged (never hidden). CHANGES the project (confirmed + undo-wrapped). \
+                      Returns envelope_index."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "kind": { "type": "string", "enum": ["volume", "pan", "mute"] }
+            }),
+            json!(["track_index", "kind"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "set_envelope_point".into(),
+        description: "Edit an existing envelope point by its 0-based point_index (order from \
+                      get_envelope_points). Optionally set time (seconds), value, and/or shape \
+                      (0=linear, 1=square, 2=slow start/end, 3=fast start, 4=fast end, 5=bezier); \
+                      omitted fields are left unchanged. CHANGES the project (confirmed + \
+                      undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "envelope_index": { "type": "integer" },
+                "point_index": { "type": "integer" },
+                "time": { "type": "number" },
+                "value": { "type": "number" },
+                "shape": { "type": "integer" }
+            }),
+            json!(["track_index", "envelope_index", "point_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "delete_envelope_point".into(),
+        description: "Delete a single envelope point by its 0-based point_index. (To delete a time \
+                      range of points, use delete_envelope_points.) CHANGES the project (confirmed \
+                      + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "envelope_index": { "type": "integer" },
+                "point_index": { "type": "integer" }
+            }),
+            json!(["track_index", "envelope_index", "point_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "clear_envelope".into(),
+        description: "Remove ALL points from an envelope, clearing its automation. NOTE: REAPER has \
+                      no API to delete the envelope lane object itself — the (empty) lane remains; \
+                      it can be hidden manually. CHANGES the project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "envelope_index": { "type": "integer" }
+            }),
+            json!(["track_index", "envelope_index"]),
+        ),
+    });
     if !supports_images {
         defs.retain(|d| !is_vision_tool(&d.name));
     }
@@ -1416,6 +1496,28 @@ mod definition_tests {
             assert!(
                 defs.iter().any(|d| d.name == name),
                 "{name} must be advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_tools_advertised_and_gated() {
+        use serde_json::json;
+        let defs = super::definitions(false, false);
+        for name in [
+            "create_fx_envelope",
+            "create_track_envelope",
+            "set_envelope_point",
+            "delete_envelope_point",
+            "clear_envelope",
+        ] {
+            assert!(
+                defs.iter().any(|d| d.name == name),
+                "{name} must be advertised"
+            );
+            assert!(
+                super::preview(name, &json!({})).is_some(),
+                "{name} must be confirmation-gated"
             );
         }
     }
@@ -1880,6 +1982,35 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_f64(input, "start")?,
             req_f64(input, "end")?,
         ),
+        "create_fx_envelope" => create_fx_envelope(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+            req_u32(input, "param_index")?,
+        ),
+        "create_track_envelope" => {
+            create_track_envelope(reaper, req_u32(input, "track_index")?, req_str(input, "kind")?)
+        }
+        "set_envelope_point" => set_envelope_point(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "envelope_index")?,
+            req_u32(input, "point_index")?,
+            input.get("time").and_then(|v| v.as_f64()),
+            input.get("value").and_then(|v| v.as_f64()),
+            input.get("shape").and_then(|v| v.as_i64()).map(|s| s as c_int),
+        ),
+        "delete_envelope_point" => delete_envelope_point(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "envelope_index")?,
+            req_u32(input, "point_index")?,
+        ),
+        "clear_envelope" => clear_envelope(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "envelope_index")?,
+        ),
         // transport / timeline / global settings
         "get_transport" => Ok(get_transport(reaper)),
         "transport" => transport(reaper, req_str(input, "action")?),
@@ -2304,6 +2435,34 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("envelope_index"),
             show("start"),
             show("end"),
+        )),
+        "create_fx_envelope" => Some(format!(
+            "Create an automation envelope for FX {} param {} on track {}",
+            show("fx_index"),
+            show("param_index"),
+            show("track_index"),
+        )),
+        "create_track_envelope" => Some(format!(
+            "Create the {} envelope on track {}",
+            show("kind"),
+            show("track_index"),
+        )),
+        "set_envelope_point" => Some(format!(
+            "Edit point {} of envelope {} on track {}",
+            show("point_index"),
+            show("envelope_index"),
+            show("track_index"),
+        )),
+        "delete_envelope_point" => Some(format!(
+            "Delete point {} of envelope {} on track {}",
+            show("point_index"),
+            show("envelope_index"),
+            show("track_index"),
+        )),
+        "clear_envelope" => Some(format!(
+            "Clear all points from envelope {} on track {}",
+            show("envelope_index"),
+            show("track_index"),
         )),
         "remove_fx" => Some(format!(
             "Remove FX {} from track {}",
@@ -4205,6 +4364,225 @@ fn delete_envelope_points(
         "deleted": ok, "track_index": track_index, "envelope_index": envelope_index,
         "start": start, "end": end
     }))
+}
+
+// ---- envelope create / edit / clear -----------------------------------------
+
+/// Find a track envelope's 0-based index in the track's envelope list.
+fn envelope_index_of(
+    low: &reaper_low::Reaper,
+    track: MediaTrack,
+    env: *mut reaper_low::raw::TrackEnvelope,
+) -> Option<u32> {
+    if env.is_null() {
+        return None;
+    }
+    let count = unsafe { low.CountTrackEnvelopes(track.as_ptr()) };
+    for i in 0..count {
+        if unsafe { low.GetTrackEnvelope(track.as_ptr(), i) } == env {
+            return Some(i as u32);
+        }
+    }
+    None
+}
+
+fn create_fx_envelope(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+    param_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    reaper.undo_begin_block_2(project);
+    // create=true: creates the parameter envelope if it doesn't exist yet.
+    let env = unsafe {
+        low.GetFXEnvelope(track.as_ptr(), fx_index as c_int, param_index as c_int, true)
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: create FX envelope (track {track_index} fx {fx_index} param {param_index})"),
+        UndoScope::All,
+    );
+    if env.is_null() {
+        return Err("could not create the FX parameter envelope (bad fx/param index?)".into());
+    }
+    Ok(json!({
+        "created": true,
+        "track_index": track_index,
+        "fx_index": fx_index,
+        "param_index": param_index,
+        "envelope_index": envelope_index_of(low, track, env),
+    }))
+}
+
+fn create_track_envelope(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    kind: &str,
+) -> Result<Value, String> {
+    // Built-in envelope name (for GetTrackEnvelopeByName) + the "toggle visible"
+    // action that creates it when it doesn't exist yet.
+    let (name, action): (&str, c_int) = match kind {
+        "volume" => ("Volume", 40406),
+        "pan" => ("Pan", 40407),
+        "mute" => ("Mute", 40866),
+        other => return Err(format!("unknown envelope kind '{other}' (use volume, pan, or mute)")),
+    };
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let name_c = CString::new(name).map_err(|_| "bad envelope name".to_string())?;
+
+    // Already exists? Return it — never toggle (that would HIDE a visible one).
+    let existing = unsafe { low.GetTrackEnvelopeByName(track.as_ptr(), name_c.as_ptr()) };
+    if !existing.is_null() {
+        return Ok(json!({
+            "created": false,
+            "already_existed": true,
+            "track_index": track_index,
+            "kind": kind,
+            "envelope_index": envelope_index_of(low, track, existing),
+        }));
+    }
+
+    // Create via the toggle-visible action (operates on the selected track);
+    // restore the prior track selection afterwards.
+    let prior = selected_track_set(reaper);
+    reaper.undo_begin_block_2(project);
+    unsafe { low.SetOnlyTrackSelected(track.as_ptr()) };
+    low.Main_OnCommand(action, 0);
+    for i in 0..reaper.count_tracks(project) {
+        if let Some(t) = reaper.get_track(project, i) {
+            unsafe { low.SetTrackSelected(t.as_ptr(), prior.contains(&t)) };
+        }
+    }
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: create {name} envelope on track {track_index}"),
+        UndoScope::All,
+    );
+    let env = unsafe { low.GetTrackEnvelopeByName(track.as_ptr(), name_c.as_ptr()) };
+    Ok(json!({
+        "created": !env.is_null(),
+        "track_index": track_index,
+        "kind": kind,
+        "envelope_index": envelope_index_of(low, track, env),
+    }))
+}
+
+fn set_envelope_point(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    envelope_index: u32,
+    point_index: u32,
+    time: Option<f64>,
+    value: Option<f64>,
+    shape: Option<c_int>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let env = unsafe { low.GetTrackEnvelope(track.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!("no envelope at index {envelope_index}"));
+    }
+    // SetEnvelopePointEx: a null in-pointer leaves that field unchanged.
+    let mut t = time.unwrap_or(0.0);
+    let mut v = value.unwrap_or(0.0);
+    let mut s = shape.unwrap_or(0);
+    let time_ptr = if time.is_some() { &mut t as *mut f64 } else { std::ptr::null_mut() };
+    let value_ptr = if value.is_some() { &mut v as *mut f64 } else { std::ptr::null_mut() };
+    let shape_ptr = if shape.is_some() { &mut s as *mut c_int } else { std::ptr::null_mut() };
+    let mut no_sort = false;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe {
+        low.SetEnvelopePointEx(
+            env,
+            -1,
+            point_index as c_int,
+            time_ptr,
+            value_ptr,
+            shape_ptr,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut no_sort,
+        )
+    };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: edit envelope point {point_index} (track {track_index} env {envelope_index})"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "updated": true, "point_index": point_index }))
+    } else {
+        Err(format!("no point at index {point_index}"))
+    }
+}
+
+fn delete_envelope_point(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    envelope_index: u32,
+    point_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let env = unsafe { low.GetTrackEnvelope(track.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!("no envelope at index {envelope_index}"));
+    }
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.DeleteEnvelopePointEx(env, -1, point_index as c_int) };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete envelope point {point_index}"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "deleted": true, "point_index": point_index }))
+    } else {
+        Err(format!("no point at index {point_index}"))
+    }
+}
+
+fn clear_envelope(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    envelope_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let env = unsafe { low.GetTrackEnvelope(track.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!("no envelope at index {envelope_index}"));
+    }
+    reaper.undo_begin_block_2(project);
+    // Delete every point (a range spanning the whole project timeline).
+    let ok = unsafe { low.DeleteEnvelopePointRange(env, -1.0e18, 1.0e18) };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: clear envelope {envelope_index} on track {track_index}"),
+        UndoScope::All,
+    );
+    Ok(json!({ "cleared": ok, "track_index": track_index, "envelope_index": envelope_index }))
 }
 
 fn get_tempo_markers(reaper: &Reaper<MainThreadScope>) -> Value {
