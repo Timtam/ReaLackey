@@ -103,6 +103,10 @@ async fn handle_prompt(
     let cancel = CancellationToken::new();
     let mut final_answer = String::new();
     let mut truncated = false;
+    // Approve applying changes ONCE per user request (not once per change): the
+    // model reveals changes across turns, so a per-turn prompt still asks many
+    // times. None = not yet asked; Some(v) = the user's decision for this request.
+    let mut changes_decision: Option<bool> = None;
 
     for turn in 0..MAX_TURNS {
         let req = ChatRequest {
@@ -145,10 +149,20 @@ async fn handle_prompt(
 
         // Continue the loop only if the model asked for tools.
         if result.stop_reason == StopReason::ToolUse && !result.tool_calls.is_empty() {
-            // Confirm ALL mutating tool calls in this turn with a SINGLE prompt,
-            // rather than one message box per change (which is punishing when the
-            // assistant configures many parameters at once).
-            let mutations_ok = confirm_mutations(ui_tx, op_tx, &result.tool_calls).await;
+            // Ask for permission to apply changes ONCE per request — the first
+            // turn that proposes a change — then remember the decision for the
+            // rest of the request (further changes just proceed, each announced).
+            if changes_decision.is_none()
+                && config::confirmation_required()
+                && result
+                    .tool_calls
+                    .iter()
+                    .any(|(_, n, i)| tools::preview(n, i).is_some())
+            {
+                changes_decision =
+                    Some(confirm_apply_changes(ui_tx, op_tx, &result.tool_calls).await);
+            }
+            let mutations_ok = changes_decision.unwrap_or(true);
 
             let mut results = Vec::new();
             for (id, name, input) in result.tool_calls {
@@ -359,24 +373,19 @@ async fn run_tool(
     exec_tool(op_tx, name.to_string(), input).await
 }
 
-/// Confirm every mutating tool call in a turn with ONE prompt. Returns whether
-/// they were approved (always `true` when confirmation is off or there are no
-/// mutations). Screenshot/pixel tools are gated separately, not here.
-async fn confirm_mutations(
+/// Ask the user ONCE per request whether the assistant may apply changes. Lists
+/// the changes proposed so far; the model may make more this request, each
+/// announced and undo-wrapped. The caller only invokes this when confirmation is
+/// on and a change is actually proposed.
+async fn confirm_apply_changes(
     ui_tx: &CbSender<UiEvent>,
     op_tx: &CbSender<ReaperOp>,
     calls: &[(String, String, Value)],
 ) -> bool {
-    if !config::confirmation_required() {
-        return true;
-    }
     let previews: Vec<String> = calls
         .iter()
         .filter_map(|(_, name, input)| tools::preview(name, input))
         .collect();
-    if previews.is_empty() {
-        return true;
-    }
     let list = previews
         .iter()
         .enumerate()
@@ -384,24 +393,27 @@ async fn confirm_mutations(
         .collect::<Vec<_>>()
         .join("\n");
     let count = previews.len();
-    let (noun, apply) = if count == 1 {
-        ("change", "Apply it?")
+    let lead = if count == 1 {
+        "The assistant wants to make this change".to_string()
     } else {
-        ("changes", "Apply all of them?")
+        format!("The assistant wants to make these {count} changes")
     };
-    let _ = ui_tx.send(UiEvent::Notice(format!("Proposed {count} {noun}:\n{list}")));
+    let _ = ui_tx.send(UiEvent::Notice(format!("{lead}:\n{list}")));
     let _ = ui_tx.send(UiEvent::Announce(format!(
-        "The assistant proposes {count} {noun}. {apply}"
+        "{lead}, and possibly more for this request. Allow it to apply changes?"
     )));
-    let confirmed = confirm(
+    let approved = confirm(
         op_tx,
-        format!("The assistant proposes {count} {noun}:\n\n{list}\n\n{apply}"),
+        format!(
+            "{lead}:\n\n{list}\n\nIt may make further changes for this request; each is announced \
+             and can be undone. Allow the assistant to apply changes?"
+        ),
     )
     .await;
     let _ = ui_tx.send(UiEvent::Notice(
-        if confirmed { "Applying." } else { "Declined." }.into(),
+        if approved { "Applying changes." } else { "Declined." }.into(),
     ));
-    confirmed
+    approved
 }
 
 /// A short, spoken-friendly description of a pixel action for the announcement.

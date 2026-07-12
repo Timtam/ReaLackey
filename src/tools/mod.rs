@@ -924,31 +924,11 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
                 json!(["track_index"]),
             ),
         },
-        ToolDef {
-            name: "analyze_processed_audio".into(),
-            description: "Analyse PROCESSED (post-FX) audio by doing a short offline render and \
-                          measuring the result — the same metrics as analyze_track_audio (peak/RMS, \
-                          loudness LUFS, clipping, spectral profile) but WITH the FX applied. \
-                          target 'master' renders the full mix (all track FX + master FX); 'track' \
-                          (with track_index) renders that track through its FX and the master; \
-                          'item' (with item_index) renders that item through its take FX and its \
-                          track's FX (no master). This performs a brief offline render (REAPER may \
-                          be momentarily unresponsive; it cannot be cancelled once started) and \
-                          saves/restores your render settings and selection. The rendered window \
-                          is capped at 30 s. Use this for the processed/final sound; use \
-                          analyze_track_audio or analyze_item_audio for the raw pre-FX source."
-                .into(),
-            input_schema: obj(
-                json!({
-                    "target": { "type": "string", "enum": ["master", "track", "item"], "description": "'master' = full mix, 'track' = one track's processed output, 'item' = one item through its take+track FX" },
-                    "track_index": { "type": "integer", "description": "required when target is 'track'" },
-                    "item_index": { "type": "integer", "description": "required when target is 'item'" },
-                    "start": { "type": "number", "description": "start in seconds for master/track (default: time selection or 0)" },
-                    "length": { "type": "number", "description": "seconds to render for master/track (default: content/selection, capped at 30 s)" }
-                }),
-                json!(["target"]),
-            ),
-        },
+        // analyze_processed_audio (offline post-FX render) is NOT advertised: the
+        // render still crashed the host after the re-entrancy guard, so rendering
+        // synchronously from the extension is unsafe and needs a different design.
+        // Handler is hard-guarded off too (config::processed_render_enabled).
+        // Pre-FX analysis (analyze_track_audio / analyze_item_audio) is unaffected.
         // --- track/MIDI creation & deletion ---
         ToolDef {
             name: "create_track".into(),
@@ -4482,12 +4462,12 @@ fn analyze_processed_audio(
     param_start: Option<f64>,
     param_length: Option<f64>,
 ) -> Result<Value, String> {
-    // Escape hatch (see config): normally on. The control-surface re-entrancy
-    // guard is what makes the render below safe.
+    // Disabled by default: the offline render still crashed the host, so it is
+    // not advertised and this guard refuses it. Pre-FX analysis stays available.
     if !crate::config::processed_render_enabled() {
         return Err(
-            "Post-FX (processed) audio analysis is turned off (RAAI_DISABLE_PROCESSED_RENDER). \
-             Use analyze_track_audio or analyze_item_audio for pre-FX analysis."
+            "Post-FX (processed) audio analysis is disabled: the offline render can crash REAPER \
+             from the extension. Use analyze_track_audio or analyze_item_audio for pre-FX analysis."
                 .to_string(),
         );
     }
