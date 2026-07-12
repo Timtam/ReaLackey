@@ -58,6 +58,8 @@ pub fn set_status(text: &str) {
     }
 }
 
+/// Destroy the dialog window. Currently unused (the window persists for the
+/// process; see the webview `ManuallyDrop` note in `output.rs`).
 #[allow(dead_code)]
 pub fn close() {
     unsafe { ui_close() }

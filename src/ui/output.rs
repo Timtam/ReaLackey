@@ -214,7 +214,9 @@ fn console(msg: &str) {
 pub fn on_destroy() {
     #[cfg(windows)]
     {
-        // Take the webview out (releasing the borrow) before dropping it.
+        // Take the webview out (releasing the borrow) before dropping it. Dropping
+        // it closes the WebView2 controller, which must happen while the module is
+        // still attached (never at DLL detach) — see `control_surface::close_no_reset`.
         let webview = STATE.with(|c| c.borrow_mut().webview.take());
         drop(webview);
     }
