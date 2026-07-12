@@ -924,11 +924,6 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
                 json!(["track_index"]),
             ),
         },
-        // analyze_processed_audio (offline post-FX render) is NOT advertised: the
-        // render still crashed the host after the re-entrancy guard, so rendering
-        // synchronously from the extension is unsafe and needs a different design.
-        // Handler is hard-guarded off too (config::processed_render_enabled).
-        // Pre-FX analysis (analyze_track_audio / analyze_item_audio) is unaffected.
         // --- track/MIDI creation & deletion ---
         ToolDef {
             name: "create_track".into(),
@@ -1091,6 +1086,33 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
             input_schema: empty(),
         },
     ];
+    // Post-FX render is opt-in (experimental deferred render): only advertise it
+    // when enabled, so models don't offer it unless the user turned it on.
+    if crate::config::processed_render_enabled() {
+        defs.push(ToolDef {
+            name: "analyze_processed_audio".into(),
+            description: "Analyse PROCESSED (post-FX) audio by doing a short offline render and \
+                          measuring the result — the same metrics as analyze_track_audio (peak/RMS, \
+                          loudness LUFS, clipping, spectral profile) but WITH the FX applied. \
+                          target 'master' = full mix (all track FX + master FX); 'track' (with \
+                          track_index) = that track through its FX + master; 'item' (with \
+                          item_index) = that item through its take + track FX. Briefly renders \
+                          offline (REAPER may be momentarily unresponsive; not cancellable). Window \
+                          capped at 30 s. Use analyze_track_audio / analyze_item_audio for the raw \
+                          pre-FX source."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "target": { "type": "string", "enum": ["master", "track", "item"], "description": "'master' = full mix, 'track' = one track's processed output, 'item' = one item through its take+track FX" },
+                    "track_index": { "type": "integer", "description": "required when target is 'track'" },
+                    "item_index": { "type": "integer", "description": "required when target is 'item'" },
+                    "start": { "type": "number", "description": "start in seconds for master/track (default: time selection or 0)" },
+                    "length": { "type": "number", "description": "seconds to render for master/track (default: content/selection, capped at 30 s)" }
+                }),
+                json!(["target"]),
+            ),
+        });
+    }
     if !supports_images {
         defs.retain(|d| !is_vision_tool(&d.name));
     }
@@ -1616,14 +1638,8 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             input.get("start").and_then(|v| v.as_f64()),
             input.get("length").and_then(|v| v.as_f64()),
         ),
-        "analyze_processed_audio" => analyze_processed_audio(
-            reaper,
-            req_str(input, "target")?,
-            opt_u32(input, "track_index"),
-            opt_u32(input, "item_index"),
-            input.get("start").and_then(|v| v.as_f64()),
-            input.get("length").and_then(|v| v.as_f64()),
-        ),
+        // analyze_processed_audio is handled specially (deferred to the timer) in
+        // the control-surface pump, so it never reaches dispatch/execute.
         // track / MIDI creation & deletion
         "create_track" => create_track(reaper, opt_u32(input, "index"), opt_str(input, "name")),
         "delete_midi_notes" => delete_midi_notes(
@@ -4429,9 +4445,17 @@ impl Drop for RenderStateGuard<'_> {
             }
         }
         if let Some(items) = &self.item_selection {
+            let project = ProjectContext::CurrentProject;
             unsafe { low.SelectAllMediaItems(CUR_PROJ, false) };
-            for it in items {
-                unsafe { low.SetMediaItemSelected(it.as_ptr(), true) };
+            // Iterate CURRENT items and re-select by set membership, so a stored
+            // pointer for an item deleted meanwhile is never dereferenced (mirrors
+            // the track restore above).
+            for i in 0..self.reaper.count_media_items(project) {
+                if let Some(it) = self.reaper.get_media_item(project, i) {
+                    if items.contains(&it) {
+                        unsafe { low.SetMediaItemSelected(it.as_ptr(), true) };
+                    }
+                }
             }
         }
         for (k, v) in RENDER_NUM_KEYS.iter().zip(&self.num) {
@@ -4454,16 +4478,14 @@ impl Drop for RenderStateGuard<'_> {
 /// processed output, or a single item (through its take + track FX) to a temp
 /// WAV, decode + analyse it. All settings/selection changes are undone (and the
 /// temp file removed) by a Drop guard on every path.
-fn analyze_processed_audio(
-    reaper: &Reaper<MainThreadScope>,
-    target: &str,
-    track_index: Option<u32>,
-    item_index: Option<u32>,
-    param_start: Option<f64>,
-    param_length: Option<f64>,
-) -> Result<Value, String> {
-    // Disabled by default: the offline render still crashed the host, so it is
-    // not advertised and this guard refuses it. Pre-FX analysis stays available.
+pub fn prepare_render(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<RenderJob, String> {
+    let target = req_str(input, "target")?;
+    let track_index = opt_u32(input, "track_index");
+    let item_index = opt_u32(input, "item_index");
+    let param_start = input.get("start").and_then(|v| v.as_f64());
+    let param_length = input.get("length").and_then(|v| v.as_f64());
+    // Disabled by default: opt in with RAAI_ENABLE_PROCESSED_RENDER=1 to test the
+    // deferred (off-run()-stack) render path.
     if !crate::config::processed_render_enabled() {
         return Err(
             "Post-FX (processed) audio analysis is disabled: the offline render can crash REAPER \
@@ -4558,6 +4580,96 @@ fn analyze_processed_audio(
     }
     let rend = rstart + rlen;
 
+    // Read-only: return the computed job; the render itself runs later, on the
+    // timer (execute_render), off the control-surface run() stack.
+    Ok(RenderJob {
+        target: target.to_string(),
+        track_index,
+        item_index,
+        render_settings,
+        bounds_flag,
+        rstart,
+        rend,
+        rlen,
+        truncated,
+        chain: chain.to_string(),
+    })
+}
+
+/// A prepared post-FX render, computed read-only by [`prepare_render`] and queued
+/// for the timer to run. Targets are stored by index (not pointer) so a stale
+/// project state errors cleanly rather than crashing.
+pub struct RenderJob {
+    target: String,
+    track_index: Option<u32>,
+    item_index: Option<u32>,
+    render_settings: f64,
+    bounds_flag: f64,
+    rstart: f64,
+    rend: f64,
+    rlen: f64,
+    truncated: bool,
+    chain: String,
+}
+
+thread_local! {
+    /// A prepared render awaiting the timer, with the channel to reply on.
+    static PENDING_RENDER: std::cell::RefCell<Option<(RenderJob, oneshot::Sender<ToolOutcome>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// True if a prepared render is waiting for the timer to run it.
+pub fn has_pending_render() -> bool {
+    PENDING_RENDER.with(|c| c.borrow().is_some())
+}
+
+/// Queue a prepared render and the channel to reply on (main thread, from the
+/// tool dispatch). The timer picks it up on a later tick and replies then.
+pub fn enqueue_render(job: RenderJob, reply: oneshot::Sender<ToolOutcome>) {
+    PENDING_RENDER.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.is_some() {
+            let _ = reply.send(ToolOutcome::error(
+                json!({ "error": "a processed-audio render is already in progress" }).to_string(),
+            ));
+        } else {
+            *slot = Some((job, reply));
+        }
+    });
+}
+
+/// Run the queued render, if any, on the CALLER's stack — this MUST be the
+/// separate timer callback, not the control-surface run(), so the render's
+/// message pump is not nested inside run(). Reads/analyses the result and replies.
+pub fn run_pending_render() {
+    let Some((job, reply)) = PENDING_RENDER.with(|c| c.borrow_mut().take()) else {
+        return;
+    };
+    let outcome = crate::reaper::api::with(|reaper| match execute_render(reaper, &job) {
+        Ok(v) => ToolOutcome::ok(v.to_string()),
+        Err(e) => ToolOutcome::error(json!({ "error": e }).to_string()),
+    })
+    .unwrap_or_else(|| {
+        ToolOutcome::error(json!({ "error": "REAPER API unavailable" }).to_string())
+    });
+    let _ = reply.send(outcome);
+}
+
+/// Apply the render settings/selection, run the offline render, read + analyse
+/// the result, then restore everything (Drop guard). Runs on the timer.
+fn execute_render(reaper: &Reaper<MainThreadScope>, job: &RenderJob) -> Result<Value, String> {
+    // Re-resolve targets by index — they may have changed since prepare, so this
+    // errors cleanly instead of dereferencing a stale pointer.
+    let track = match job.track_index {
+        Some(i) if job.target == "track" => Some(track_at(reaper, i)?),
+        _ => None,
+    };
+    let item = match job.item_index {
+        Some(i) if job.target == "item" => Some(item_at(reaper, i)?),
+        _ => None,
+    };
+    let low = reaper.low();
+
     // Snapshot BEFORE mutating; the guard restores everything on drop.
     let track_selection = track.map(|_| {
         let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
@@ -4575,16 +4687,16 @@ fn analyze_processed_audio(
         path: None,
     };
 
-    // Configure the render: WAV, 48 kHz stereo, no tail/normalize/dither/secondary,
-    // don't add to project.
+    // Configure the render: WAV, 48 kHz stereo, no tail/normalize/dither, don't
+    // add to project.
     let tmp_dir = std::env::temp_dir().to_string_lossy().to_string();
     let base = format!("raai_render_probe_{}", std::process::id());
     proj_info_str_set(low, c"RENDER_FORMAT", "evaw");
     proj_info_str_set(low, c"RENDER_FORMAT2", "");
-    proj_info_set(low, c"RENDER_SETTINGS", render_settings);
-    proj_info_set(low, c"RENDER_BOUNDSFLAG", bounds_flag);
-    proj_info_set(low, c"RENDER_STARTPOS", rstart);
-    proj_info_set(low, c"RENDER_ENDPOS", rend);
+    proj_info_set(low, c"RENDER_SETTINGS", job.render_settings);
+    proj_info_set(low, c"RENDER_BOUNDSFLAG", job.bounds_flag);
+    proj_info_set(low, c"RENDER_STARTPOS", job.rstart);
+    proj_info_set(low, c"RENDER_ENDPOS", job.rend);
     proj_info_set(low, c"RENDER_SRATE", ANALYZE_SR as f64);
     proj_info_set(low, c"RENDER_CHANNELS", 2.0);
     proj_info_set(low, c"RENDER_TAILFLAG", 0.0);
@@ -4601,8 +4713,6 @@ fn analyze_processed_audio(
         unsafe { low.SetMediaItemSelected(it.as_ptr(), true) };
     }
 
-    // The target path reflects the settings we just applied; hand it to the guard
-    // so the file is cleaned up on any path.
     let path = proj_info_str_get(low, c"RENDER_TARGETS")
         .split(';')
         .next()
@@ -4614,8 +4724,7 @@ fn analyze_processed_audio(
     let outcome: Result<(Vec<f64>, usize, f64), String> = if path.is_empty() {
         Err("REAPER reported no render target path".to_string())
     } else {
-        // Pre-delete so an existing file can't trigger a modal overwrite prompt
-        // (which would block Main_OnCommand and freeze the host).
+        // Pre-delete so an existing file can't trigger a modal overwrite prompt.
         let _ = std::fs::remove_file(&path);
         // 42230 = File: Render project, using the most recent render settings.
         low.Main_OnCommand(42230, 0);
@@ -4628,10 +4737,10 @@ fn analyze_processed_audio(
     let (samples, channels, sr) = outcome?;
     let features = crate::dsp::analyze(&samples, channels, sr);
     Ok(audio_result_json(
-        json!({ "target": target, "track_index": track_index, "item_index": item_index, "chain": chain }),
-        rstart,
-        rlen,
-        truncated,
+        json!({ "target": job.target, "track_index": job.track_index, "item_index": job.item_index, "chain": job.chain }),
+        job.rstart,
+        job.rlen,
+        job.truncated,
         false,
         false,
         features,

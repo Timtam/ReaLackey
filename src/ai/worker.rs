@@ -478,7 +478,12 @@ async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> To
     {
         return ToolOutcome::error("{\"error\":\"main thread unavailable\"}");
     }
-    reply_rx
-        .await
-        .unwrap_or_else(|_| ToolOutcome::error("{\"error\":\"no reply from main thread\"}"))
+    // Bounded wait: nearly all tools reply within a tick; the deferred render is
+    // the slow case (its window is capped at 30 s). A generous ceiling means a
+    // main-thread callback that never fires can't hang the agent forever.
+    match tokio::time::timeout(std::time::Duration::from_secs(90), reply_rx).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => ToolOutcome::error("{\"error\":\"no reply from main thread\"}"),
+        Err(_) => ToolOutcome::error("{\"error\":\"the tool timed out\"}"),
+    }
 }

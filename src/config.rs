@@ -61,14 +61,14 @@ pub fn max_output_tokens() -> u32 {
         .unwrap_or(8192)
 }
 
-/// Whether the offline post-FX render (`analyze_processed_audio`) is allowed.
-/// OFF by default: it still crashed the host even after the main-thread
-/// re-entrancy guard, so rendering synchronously from the extension's execution
-/// context is unsafe and needs a different mechanism (a deferred off-stack render
-/// or a JSFX meter). Opt in only for testing with `RAAI_ENABLE_PROCESSED_RENDER=1`.
+/// Whether the offline post-FX render (`analyze_processed_audio`) is allowed. ON
+/// by default now that the render is DEFERRED to a timer callback off the
+/// control-surface `run()` call stack (see control_surface::render_timer). This
+/// is still experimental (a render from the extension may yet be fragile), so it
+/// keeps a kill switch: set `RAAI_DISABLE_PROCESSED_RENDER=1` to turn it off.
 pub fn processed_render_enabled() -> bool {
-    matches!(
-        std::env::var("RAAI_ENABLE_PROCESSED_RENDER").as_deref(),
+    !matches!(
+        std::env::var("RAAI_DISABLE_PROCESSED_RENDER").as_deref(),
         Ok("1") | Ok("true") | Ok("on") | Ok("yes")
     )
 }

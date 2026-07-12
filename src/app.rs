@@ -67,6 +67,10 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // executions) ~30x/s — the only place the dialog / OSARA / REAPER API run.
     session.plugin_register_add_csurf_inst(Box::new(PumpSurface::new(ui_rx, op_rx)))?;
 
+    // Timer callback (separate from the pump, so it is NOT nested in run()): runs
+    // the deferred offline render off the run() call stack.
+    session.plugin_register_add_timer(crate::reaper::control_surface::render_timer)?;
+
     // "Open Assistant" action.
     action::register(&mut session)?;
 

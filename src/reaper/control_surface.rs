@@ -7,11 +7,29 @@
 
 use crossbeam_channel::Receiver;
 use reaper_medium::{ControlSurface, MessageBoxResult, MessageBoxType};
+use serde_json::json;
 
 use crate::ai::protocol::UiEvent;
 use crate::reaper::{api, history, osara, reentry};
 use crate::tools::{self, ReaperOp, ToolOutcome};
 use crate::ui;
+
+/// REAPER timer callback, registered separately from the control surface so it
+/// is NOT nested inside `run()`. It runs a queued offline render off the `run()`
+/// call stack (invoking the render from within `run()` crashes REAPER). Panic-
+/// guarded so a fault never unwinds across the C ABI.
+pub extern "C" fn render_timer() {
+    let _ = std::panic::catch_unwind(|| {
+        if !tools::has_pending_render() {
+            return;
+        }
+        // Mark busy so the render's message pump can't re-enter run()/hook commands.
+        let Some(_guard) = reentry::enter() else {
+            return;
+        };
+        tools::run_pending_render();
+    });
+}
 
 /// Poll the undo label every N ticks (~30 ticks/sec, so ~2x/second).
 const UNDO_POLL_TICKS: u32 = 15;
@@ -63,6 +81,24 @@ impl PumpSurface {
     fn handle_op(&self, op: ReaperOp) {
         match op {
             ReaperOp::Tool { name, input, reply } => {
+                // The post-FX render is DEFERRED: prepare it here (read-only), then
+                // queue it for the timer, which runs the actual render off this
+                // run() call stack (rendering from within run() crashes REAPER).
+                if name == "analyze_processed_audio" {
+                    match api::with(|reaper| tools::prepare_render(reaper, &input)) {
+                        Some(Ok(job)) => tools::enqueue_render(job, reply),
+                        Some(Err(e)) => {
+                            let _ = reply
+                                .send(ToolOutcome::error(json!({ "error": e }).to_string()));
+                        }
+                        None => {
+                            let _ = reply.send(ToolOutcome::error(
+                                "{\"error\":\"REAPER API unavailable\"}",
+                            ));
+                        }
+                    }
+                    return;
+                }
                 let outcome = api::with(|reaper| tools::execute(reaper, &name, &input))
                     .unwrap_or_else(|| ToolOutcome::error("{\"error\":\"REAPER API unavailable\"}"));
                 let _ = reply.send(outcome);
