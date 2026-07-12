@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ai::protocol::{MainTask, UiEvent};
 use crate::config;
-use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::registry::{self, AdapterKind};
 use crate::providers::{
     ChatEvent, ChatMessage, ChatRequest, Content, LlmProvider, ResultBlock, Role, StopReason,
 };
@@ -81,22 +81,13 @@ async fn run(
     ui_tx: CbSender<UiEvent>,
     op_tx: CbSender<ReaperOp>,
 ) {
-    let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicProvider::new());
     let mut history: Vec<ChatMessage> = Vec::new();
 
     while let Some(task) = task_rx.recv().await {
         match task {
             MainTask::Cancel => { /* nothing in flight */ }
             MainTask::Prompt(prompt) => {
-                handle_prompt(
-                    &provider,
-                    &mut history,
-                    &ui_tx,
-                    &mut task_rx,
-                    &op_tx,
-                    prompt,
-                )
-                .await;
+                handle_prompt(&mut history, &ui_tx, &mut task_rx, &op_tx, prompt).await;
             }
         }
     }
@@ -111,24 +102,43 @@ struct TurnResult {
 }
 
 async fn handle_prompt(
-    provider: &Arc<dyn LlmProvider>,
     history: &mut Vec<ChatMessage>,
     ui_tx: &CbSender<UiEvent>,
     task_rx: &mut UnboundedReceiver<MainTask>,
     op_tx: &CbSender<ReaperOp>,
     prompt: String,
 ) {
-    if !config::has_api_key() {
+    // Resolve the active (default) provider account for this prompt, so switching
+    // the default takes effect from the next message.
+    let Some(cfg) = registry::active() else {
         let _ = ui_tx.send(UiEvent::UserMessage(prompt));
         let _ = ui_tx.send(UiEvent::Error(
-            "No Anthropic API key set. Use Extensions -> REAPER AI Assistant -> \
-             Set Anthropic API key (or set the ANTHROPIC_API_KEY environment variable)."
-                .into(),
+            "No provider configured. Add one via Extensions -> REAPER AI Assistant.".into(),
         ));
-        let _ = ui_tx.send(UiEvent::Status("No API key.".into()));
+        let _ = ui_tx.send(UiEvent::Status("No provider.".into()));
+        let _ = ui_tx.send(UiEvent::Done);
+        return;
+    };
+    if !cfg.can_send() {
+        let _ = ui_tx.send(UiEvent::UserMessage(prompt));
+        let msg = match cfg.kind {
+            AdapterKind::Anthropic => format!(
+                "No API key for \"{}\". Set it via Extensions -> REAPER AI Assistant \
+                 (or the ANTHROPIC_API_KEY environment variable).",
+                cfg.label
+            ),
+            AdapterKind::OpenAiCompatible => format!(
+                "Provider \"{}\" needs an endpoint URL (and usually an API key).",
+                cfg.label
+            ),
+        };
+        let _ = ui_tx.send(UiEvent::Error(msg));
+        let _ = ui_tx.send(UiEvent::Status("Not configured.".into()));
         let _ = ui_tx.send(UiEvent::Done);
         return;
     }
+    let provider: Arc<dyn LlmProvider> = crate::providers::build_provider(&cfg).into();
+    let provider = &provider;
 
     let _ = ui_tx.send(UiEvent::UserMessage(prompt.clone()));
     let _ = ui_tx.send(UiEvent::Status("Thinking…".into()));
@@ -154,9 +164,9 @@ async fn handle_prompt(
 
     for turn in 0..MAX_TURNS {
         let req = ChatRequest {
-            model: config::default_model(),
+            model: cfg.model.clone(),
             system: Some(config::system_prompt()),
-            max_tokens: config::max_output_tokens(),
+            max_tokens: cfg.max_tokens,
             messages: history.clone(),
             tools: tools.clone(),
         };

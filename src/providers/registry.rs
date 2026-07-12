@@ -164,8 +164,7 @@ pub fn remove(id: &str) -> Result<(), String> {
 }
 
 /// The resolved key for an account id (credential store, with an env fallback
-/// for Anthropic). `None` if not set. (M4 dialog / M2 factory.)
-#[allow(dead_code)]
+/// for Anthropic). `None` if not set. Used by the adapter factory + M4 dialog.
 pub fn key_for(id: &str) -> Option<String> {
     get(id).and_then(|c| resolve_key(&c))
 }

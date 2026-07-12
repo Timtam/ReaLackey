@@ -27,18 +27,6 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
     registry::set_active_key(key)
 }
 
-/// The active provider's model id.
-pub fn default_model() -> String {
-    registry::active()
-        .map(|c| c.model)
-        .unwrap_or_else(|| "claude-opus-4-8".to_string())
-}
-
-/// The active provider's per-turn output-token limit.
-pub fn max_output_tokens() -> u32 {
-    registry::active().map(|c| c.max_tokens).unwrap_or(8192)
-}
-
 /// Whether mutating tools require user confirmation (design: configurable,
 /// default on). Set `RAAI_CONFIRM=off` (or 0/false/no) to disable.
 pub fn confirmation_required() -> bool {

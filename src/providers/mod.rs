@@ -3,6 +3,7 @@
 //! (design §kap-llm).
 
 pub mod anthropic;
+pub mod openai_compat;
 pub mod registry;
 
 use async_trait::async_trait;
@@ -160,10 +161,9 @@ pub enum ProviderError {
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    // `id`/`capabilities` are the extensibility surface used from Phase 5.
+    // `id` is the extensibility surface used from Phase 5.
     #[allow(dead_code)]
     fn id(&self) -> &'static str;
-    #[allow(dead_code)]
     fn capabilities(&self) -> Capabilities;
 
     /// Stream one model turn, emitting `ChatEvent`s on `tx` until done. Must
@@ -174,4 +174,19 @@ pub trait LlmProvider: Send + Sync {
         tx: Sender<ChatEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ProviderError>;
+}
+
+/// Build the adapter for a configured account. The worker calls this per prompt
+/// with the currently-default account, so switching the default takes effect
+/// from the next message (design §kap-providers).
+pub fn build_provider(cfg: &registry::ProviderConfig) -> Box<dyn LlmProvider> {
+    match cfg.kind {
+        registry::AdapterKind::Anthropic => Box::new(anthropic::AnthropicProvider::new()),
+        registry::AdapterKind::OpenAiCompatible => {
+            Box::new(openai_compat::OpenAiCompatProvider::new(
+                cfg.base_url.clone().unwrap_or_default(),
+                registry::key_for(&cfg.id),
+            ))
+        }
+    }
 }
