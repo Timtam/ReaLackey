@@ -985,23 +985,36 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
             description: "Take a screenshot so you can SEE visual-only UI that the REAPER API \
                           cannot express — custom-drawn plugin GUIs, meters, waveforms. The image \
                           is returned to you as a picture to reason about. Each capture needs \
-                          explicit user consent (the screenshot is sent to the cloud AI provider), \
+                          explicit user consent (the screenshot is sent to the AI provider), \
                           so only call this when seeing the screen genuinely helps. Seeing and \
                           acting are separate: to CHANGE anything, use the parameter tools (e.g. \
-                          set_fx_param), never this tool. target 'focused_plugin' captures the \
-                          window of the plugin the user currently has focused (it is opened as a \
+                          set_fx_param), never this tool. To open and capture a SPECIFIC track \
+                          plugin the user has NOT focused, pass track_index and fx_index (indices \
+                          from get_track_fx / get_focused_fx): its floating window is opened for \
+                          you and captured — no prior focus needed. This is the reliable way to \
+                          look at a plugin you just added. Otherwise use target: 'focused_plugin' \
+                          (default) captures the plugin the user currently has focused (opened as a \
                           floating window if needed); 'reaper_main' captures the REAPER main window; \
-                          'full_screen' captures the whole screen."
+                          'full_screen' captures the whole screen. track_index+fx_index take \
+                          precedence over target."
                 .into(),
             input_schema: obj(
                 json!({
                     "target": {
                         "type": "string",
                         "enum": ["focused_plugin", "reaper_main", "full_screen"],
-                        "description": "what to capture: the focused plugin window, the REAPER main window, or the full screen"
+                        "description": "what to capture when track_index/fx_index are not given (default 'focused_plugin')"
+                    },
+                    "track_index": {
+                        "type": "integer",
+                        "description": "0-based track index of a specific track FX to open + capture (use together with fx_index)"
+                    },
+                    "fx_index": {
+                        "type": "integer",
+                        "description": "0-based FX index within that track's chain to open + capture (use together with track_index)"
                     }
                 }),
-                json!(["target"]),
+                json!([]),
             ),
         },
         // --- Tier B: operate GUI-only plugin controls via synthesized input ---
@@ -1145,45 +1158,61 @@ pub fn execute(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> T
 /// Supports the REAPER main window and the focused plugin's window (full-screen
 /// lands with the robustness pass).
 fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome {
-    let target = input
-        .get("target")
-        .and_then(|v| v.as_str())
-        .unwrap_or("reaper_main");
-
     // Description-only targets (main window / full screen) can be huge, so cap
-    // their long edge to stay under the vision API's size limit. The focused
-    // plugin is left 1:1 so Tier-B click coordinates map exactly to the window.
+    // their long edge to stay under the vision API's size limit. Plugin windows
+    // are left 1:1 so Tier-B click coordinates map exactly to the window.
     const MAX_EDGE: u32 = 1280;
-    let shot = match target {
-        "focused_plugin" => {
-            let hwnd = match resolve_focused_fx_hwnd(reaper) {
-                Ok(h) => h,
-                Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
-            };
-            crate::ui::screenshot::capture_hwnd(hwnd, true, None)
-        }
-        "reaper_main" => {
-            let hwnd = reaper.get_main_hwnd().as_ptr() as isize;
-            crate::ui::screenshot::capture_hwnd(hwnd, false, Some(MAX_EDGE))
-        }
-        "full_screen" => crate::ui::screenshot::capture_screen(Some(MAX_EDGE)),
-        other => {
-            return ToolOutcome::error(
-                json!({
-                    "error": format!(
-                        "capture target '{other}' is not supported; use 'focused_plugin', 'reaper_main', or 'full_screen'"
-                    )
-                })
-                .to_string(),
-            );
-        }
-    };
+
+    // Explicit track FX (track_index + fx_index) opens + captures that specific
+    // plugin regardless of focus — the reliable path for weaker models and for a
+    // plugin the user hasn't focused. It takes precedence over `target`.
+    let (shot, target_label): (Result<_, _>, String) =
+        match (opt_u32(input, "track_index"), opt_u32(input, "fx_index")) {
+            (Some(ti), Some(fi)) => {
+                let hwnd = match open_track_fx_window(reaper, ti, fi) {
+                    Ok(h) => h,
+                    Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+                };
+                (crate::ui::screenshot::capture_hwnd(hwnd, true, None), "track_fx".to_string())
+            }
+            _ => {
+                let target = input
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("focused_plugin");
+                let shot = match target {
+                    "focused_plugin" => {
+                        let hwnd = match resolve_focused_fx_hwnd(reaper) {
+                            Ok(h) => h,
+                            Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+                        };
+                        crate::ui::screenshot::capture_hwnd(hwnd, true, None)
+                    }
+                    "reaper_main" => {
+                        let hwnd = reaper.get_main_hwnd().as_ptr() as isize;
+                        crate::ui::screenshot::capture_hwnd(hwnd, false, Some(MAX_EDGE))
+                    }
+                    "full_screen" => crate::ui::screenshot::capture_screen(Some(MAX_EDGE)),
+                    other => {
+                        return ToolOutcome::error(
+                            json!({
+                                "error": format!(
+                                    "capture target '{other}' is not supported; use 'focused_plugin', 'reaper_main', 'full_screen', or pass track_index+fx_index"
+                                )
+                            })
+                            .to_string(),
+                        );
+                    }
+                };
+                (shot, target.to_string())
+            }
+        };
 
     match shot {
         Ok(shot) => {
             let summary = json!({
                 "captured": true,
-                "target": target,
+                "target": target_label,
                 "width": shot.width,
                 "height": shot.height,
                 "note": "The screenshot is attached as an image for you to view.",
@@ -1203,6 +1232,38 @@ fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome 
     }
 }
 
+/// Open (float) a specific track FX's window and return its `HWND` as an `isize`,
+/// so a plugin the user hasn't focused can still be screenshotted / driven.
+fn open_track_fx_window(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+) -> Result<isize, String> {
+    let track = reaper
+        .get_track(ProjectContext::CurrentProject, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    float_track_fx(reaper, track, TrackFxLocation::NormalFxChain(fx_index))
+        .ok_or_else(|| format!("could not open the floating window for FX {fx_index} on track {track_index}"))
+}
+
+/// Return a track FX's floating-window `HWND` (as `isize`), forcing the window
+/// open if it isn't already. `None` only if the window can't be opened. Shared by
+/// the focused-FX path and the explicit track+fx path.
+fn float_track_fx(
+    reaper: &Reaper<MainThreadScope>,
+    track: MediaTrack,
+    fx_location: TrackFxLocation,
+) -> Option<isize> {
+    // SAFETY: track is a live pointer from the medium API; main thread.
+    if let Some(h) = unsafe { reaper.track_fx_get_floating_window(track, fx_location) } {
+        return Some(h.as_ptr() as isize);
+    }
+    unsafe {
+        reaper.track_fx_show(track, FxShowInstruction::ShowFloatingWindow(fx_location));
+    }
+    unsafe { reaper.track_fx_get_floating_window(track, fx_location) }.map(|h| h.as_ptr() as isize)
+}
+
 /// Resolve the currently/last focused FX to its floating-window `HWND` (as an
 /// `isize`), so it can be screenshotted. Embedded (in-chain) FX have no window
 /// of their own, so we force a floating window first. Covers track FX and take
@@ -1219,16 +1280,7 @@ fn resolve_focused_fx_hwnd(reaper: &Reaper<MainThreadScope>) -> Result<isize, St
         } => {
             let project = ProjectContext::CurrentProject;
             let track = track_from_location(reaper, project, track_location)?;
-            // SAFETY: track is a live pointer from the medium API; main thread.
-            // If it already has a floating window, use it; otherwise force one.
-            if let Some(h) = unsafe { reaper.track_fx_get_floating_window(track, fx_location) } {
-                return Ok(h.as_ptr() as isize);
-            }
-            unsafe {
-                reaper.track_fx_show(track, FxShowInstruction::ShowFloatingWindow(fx_location));
-            }
-            unsafe { reaper.track_fx_get_floating_window(track, fx_location) }
-                .map(|h| h.as_ptr() as isize)
+            float_track_fx(reaper, track, fx_location)
                 .ok_or_else(|| "could not open the plugin's floating window".to_string())
         }
         FxLocation::TakeFx {

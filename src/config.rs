@@ -87,7 +87,10 @@ pub fn system_prompt() -> String {
      per-track notes. \
      For plugin GUIs a screen reader cannot read (custom-drawn interfaces, meters, \
      waveforms), you can SEE them with capture_view (each capture asks the user for \
-     consent). Having seen a control, PREFER to act through the parameter API — \
+     consent). To look at a SPECIFIC plugin the user hasn't focused (e.g. one you \
+     just added), pass its track_index and fx_index to capture_view — it opens the \
+     plugin's window for you, so you don't need the user to bring it to the front. \
+     Having seen a control, PREFER to act through the parameter API — \
      set_fx_param or set_fx_param_by_steps (relative nudges like 'a bit more') — \
      because those are undoable. Only for GUI-only controls that have NO host \
      parameter (e.g. a Kontakt mode or patch switch) fall back to plugin_click / \
