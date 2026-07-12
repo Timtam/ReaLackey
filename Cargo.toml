@@ -4,7 +4,7 @@
 name = "reaper-aiassistant"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77"          # needs c"..." CStr literals (get_func / OSARA resolution)
+rust-version = "1.80"          # c"..." CStr literals (1.77) + std::sync::LazyLock (1.80, provider registry)
 publish = false
 license = "MIT OR Apache-2.0"
 description = "AI assistant deeply integrated into the REAPER DAW (native Rust extension)."
