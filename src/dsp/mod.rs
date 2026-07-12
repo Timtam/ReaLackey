@@ -52,7 +52,11 @@ pub struct AudioFeatures {
 /// Analyse `samples` (interleaved, `channels` per frame) at `sample_rate`.
 pub fn analyze(samples: &[f64], channels: usize, sample_rate: f64) -> AudioFeatures {
     let channels = channels.max(1);
-    let sample_rate = if sample_rate > 0.0 { sample_rate } else { 48_000.0 };
+    let sample_rate = if sample_rate > 0.0 {
+        sample_rate
+    } else {
+        48_000.0
+    };
     let frames = samples.len() / channels;
 
     // ---- time-domain: peak / RMS / DC / clipping ----------------------------
@@ -377,9 +381,7 @@ fn integrated_loudness(
     }
 
     // Absolute gate at -70 LUFS.
-    let abs_gated: Vec<usize> = (0..block_l.len())
-        .filter(|&i| block_l[i] > -70.0)
-        .collect();
+    let abs_gated: Vec<usize> = (0..block_l.len()).filter(|&i| block_l[i] > -70.0).collect();
     if abs_gated.is_empty() {
         return None;
     }
@@ -492,9 +494,10 @@ fn decode_pcm(d: &[u8], format: u16, bits: u16) -> Result<Vec<f64>, String> {
             d.chunks_exact(4)
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64),
         ),
-        (3, 64) => out.extend(d.chunks_exact(8).map(|c| {
-            f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
-        })),
+        (3, 64) => out.extend(
+            d.chunks_exact(8)
+                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])),
+        ),
         _ => return Err(format!("unsupported WAV format {format} / {bits}-bit")),
     }
     Ok(out)

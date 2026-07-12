@@ -10,8 +10,8 @@ use super::types::StreamEvent;
 
 #[derive(Default)]
 pub struct SseParser {
-    buf: Vec<u8>,   // raw bytes not yet split into complete lines
-    data: String,   // accumulated `data:` payload for the current event
+    buf: Vec<u8>, // raw bytes not yet split into complete lines
+    data: String, // accumulated `data:` payload for the current event
 }
 
 impl SseParser {

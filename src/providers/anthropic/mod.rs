@@ -43,7 +43,11 @@ impl Default for AnthropicProvider {
 /// Per-content-block state while streaming.
 enum Block {
     Text,
-    ToolUse { id: String, name: String, json: String },
+    ToolUse {
+        id: String,
+        name: String,
+        json: String,
+    },
     Ignore,
 }
 
@@ -180,9 +184,7 @@ impl LlmProvider for AnthropicProvider {
             }
         }
 
-        let _ = tx
-            .send(ChatEvent::Done { stop_reason, usage })
-            .await;
+        let _ = tx.send(ChatEvent::Done { stop_reason, usage }).await;
         Ok(())
     }
 }

@@ -83,8 +83,8 @@ mod imp {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
         KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-        MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_RETURN,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
+        MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_RETURN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetCursorPos, GetSystemMetrics, GetWindowRect, IsIconic, SetCursorPos,
@@ -164,10 +164,7 @@ mod imp {
             let (sx, sy) = clamp_to_window(hwnd, x, y)?;
             let (nx, ny) = normalize(sx, sy);
             let delta = clicks.saturating_mul(120); // WHEEL_DELTA per notch
-            send(&[
-                mouse(nx, ny, MOUSEEVENTF_MOVE),
-                wheel(nx, ny, delta),
-            ])?;
+            send(&[mouse(nx, ny, MOUSEEVENTF_MOVE), wheel(nx, ny, delta)])?;
             restore_cursor(restore);
         }
         Ok(())

@@ -92,7 +92,9 @@ mod tests {
         assert!(!s.contains('#'), "{s}");
         assert!(!s.contains('*'), "{s}");
         assert!(!s.contains('`'), "{s}");
-        assert!(s.contains("Title") && s.contains("bold") && s.contains("italic") && s.contains("code"));
+        assert!(
+            s.contains("Title") && s.contains("bold") && s.contains("italic") && s.contains("code")
+        );
     }
 
     #[test]

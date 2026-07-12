@@ -399,7 +399,8 @@ function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.te
     /// after/before the webview instead of letting WebView2 trap it inside.
     pub fn install_focus_out_handler() {
         use wry::WebViewExtWindows;
-        let controller = super::STATE.with(|c| c.borrow().webview.as_ref().map(|wv| wv.controller()));
+        let controller =
+            super::STATE.with(|c| c.borrow().webview.as_ref().map(|wv| wv.controller()));
         let Some(controller) = controller else {
             return;
         };

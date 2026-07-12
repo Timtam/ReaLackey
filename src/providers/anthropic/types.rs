@@ -264,7 +264,10 @@ mod tests {
         let v = content_to_json(&c);
         let blocks = v["content"].as_array().expect("content should be an array");
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0], json!({ "type": "text", "text": "screenshot attached" }));
+        assert_eq!(
+            blocks[0],
+            json!({ "type": "text", "text": "screenshot attached" })
+        );
         assert_eq!(
             blocks[1],
             json!({

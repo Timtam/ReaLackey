@@ -25,7 +25,11 @@ pub struct Shot {
 /// Capture the window `hwnd`. If `bring_to_front`, un-minimize/raise it first (so
 /// it isn't obscured). If `max_edge` is set, downscale so the long edge fits.
 #[cfg(windows)]
-pub fn capture_hwnd(hwnd: isize, bring_to_front: bool, max_edge: Option<u32>) -> Result<Shot, String> {
+pub fn capture_hwnd(
+    hwnd: isize,
+    bring_to_front: bool,
+    max_edge: Option<u32>,
+) -> Result<Shot, String> {
     imp::capture_hwnd(hwnd, bring_to_front, max_edge)
 }
 
