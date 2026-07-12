@@ -41,6 +41,24 @@ pub fn submit(text: String) {
     }
 }
 
+/// A message posted from the webview composer via `window.ipc.postMessage`.
+/// Runs on the main thread (wry dispatches the IPC handler there). Shape:
+/// `{"t":"submit","text":"…"}` or `{"t":"cancel"}`.
+pub fn on_webview_message(json: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return;
+    };
+    match v.get("t").and_then(|t| t.as_str()) {
+        Some("submit") => {
+            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                submit(text.to_string());
+            }
+        }
+        Some("cancel") => cancel(),
+        _ => {}
+    }
+}
+
 /// "Confirm" pressed (Phase 3 mutations). No-op in Phase 0.
 pub fn confirm(_confirm_id: i32) {}
 

@@ -18,6 +18,9 @@ use crate::ui;
 /// Poll the undo label every N ticks (~30 ticks/sec, so ~2x/second).
 const UNDO_POLL_TICKS: u32 = 15;
 
+/// How often to announce "still working" while the worker is generating.
+const WORKING_ANNOUNCE_SECS: u64 = 10;
+
 thread_local! {
     /// Set while `run()` is on the stack. A tool invoked from `run()` — the
     /// offline post-FX render, or a modal confirmation — pumps REAPER's message
@@ -40,6 +43,16 @@ pub struct PumpSurface {
     ui_rx: Receiver<UiEvent>,
     op_rx: Receiver<ReaperOp>,
     tick: u32,
+    /// When the current generation started (None when idle). Wall-clock, so the
+    /// "still working" cadence stays accurate even across a blocking tool.
+    work_start: Option<std::time::Instant>,
+    /// When we last announced "still working".
+    last_working_announce: Option<std::time::Instant>,
+    /// The worker generation id the timer is anchored to (distinguishes two
+    /// back-to-back prompts even if we never sample the idle gap between them).
+    work_gen: Option<u64>,
+    /// The generating state last pushed to the webview (gates its Esc = stop).
+    webview_generating: bool,
 }
 
 impl PumpSurface {
@@ -48,6 +61,49 @@ impl PumpSurface {
             ui_rx,
             op_rx,
             tick: 0,
+            work_start: None,
+            last_working_announce: None,
+            work_gen: None,
+            webview_generating: false,
+        }
+    }
+
+    /// While the worker is generating, announce "still working" every
+    /// `WORKING_ANNOUNCE_SECS` so the user (perhaps focused in REAPER) hears that
+    /// it's still going. Runs from the pump, so it never fires during a blocking
+    /// tool and never bursts afterwards. Also mirrors the generating state into
+    /// the webview so its composer knows whether Escape should stop the turn.
+    fn poll_working_announcement(&mut self) {
+        let generating = crate::ai::worker::is_generating();
+        if generating != self.webview_generating {
+            self.webview_generating = generating;
+            crate::ui::output::set_generating(generating);
+        }
+        if !generating {
+            self.work_start = None;
+            self.last_working_announce = None;
+            self.work_gen = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        // A new prompt (even one that started in the same frame the previous one
+        // ended) bumps the generation id — re-anchor the timer to it.
+        let gen = crate::ai::worker::generation();
+        if self.work_gen != Some(gen) {
+            self.work_gen = Some(gen);
+            self.work_start = Some(now);
+            self.last_working_announce = None;
+        }
+        let start = self.work_start.unwrap_or(now);
+        let elapsed = now.duration_since(start).as_secs();
+        let since_last = self
+            .last_working_announce
+            .map_or(elapsed, |t| now.duration_since(t).as_secs());
+        if elapsed >= WORKING_ANNOUNCE_SECS && since_last >= WORKING_ANNOUNCE_SECS {
+            let msg = format!("Still working… {elapsed} seconds");
+            osara::announce(&msg);
+            crate::ui::output::announce(&msg);
+            self.last_working_announce = Some(now);
         }
     }
 
@@ -62,7 +118,10 @@ impl PumpSurface {
                 output::tool_finished(is_error, &summary)
             }
             UiEvent::Notice(s) => output::notice(&s),
-            UiEvent::Status(s) => ui::ffi::set_status(&s),
+            UiEvent::Status(s) => {
+                ui::ffi::set_status(&s); // native fallback status field
+                output::status(&s); // webview status line (no-op if inactive)
+            }
             UiEvent::Announce(s) => {
                 // Two accessible channels: OSARA (speaks directly, focus-
                 // independent) and the webview's aria-live region (read by the
@@ -149,5 +208,6 @@ impl ControlSurface for PumpSurface {
         if self.tick % UNDO_POLL_TICKS == 0 {
             self.poll_undo_history();
         }
+        self.poll_working_announcement();
     }
 }

@@ -8,8 +8,9 @@ use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use reaper_medium::{
-    CommandId, Hmenu, HookCommand, HookCustomMenu, MenuHookFlag, OwnedGaccelRegister,
-    ReaperSession, ReaperStr,
+    AcceleratorPosition, CommandId, Hmenu, HookCommand, HookCustomMenu, MenuHookFlag,
+    OwnedGaccelRegister, ReaperSession, ReaperStr, TranslateAccel, TranslateAccelArgs,
+    TranslateAccelResult,
 };
 
 use crate::ai::protocol::UiEvent;
@@ -38,6 +39,28 @@ impl HookCommand for Commands {
             true
         } else {
             false
+        }
+    }
+}
+
+/// Keyboard router for our assistant window. Registered in REAPER's accelerator
+/// queue so that — now the window is unowned (not a child of REAPER's main
+/// window) — keystrokes aimed at it still reach it (Tab/Esc for the native
+/// fallback controls) and REAPER does NOT swallow them as global actions while
+/// the window is focused (critical for typing in the webview composer). All the
+/// window-specific logic lives in the shim (`ui_translate_accel`).
+struct AccelHook;
+
+impl TranslateAccel for AccelHook {
+    fn call(&mut self, args: TranslateAccelArgs) -> TranslateAccelResult {
+        // The shim needs a Win32/SWELL MSG pointer to call IsDialogMessage.
+        let mut msg = args.msg.raw();
+        match ui::ffi::translate_accel(&mut msg as *mut _ as *mut c_void) {
+            1 => TranslateAccelResult::Eat,
+            -1 => TranslateAccelResult::PassOnToWindow,
+            // Deliver Alt/WM_SYSKEY* to the window (plain pass-on drops them).
+            -20 => TranslateAccelResult::ForcePassOnToWindow,
+            _ => TranslateAccelResult::NotOurWindow,
         }
     }
 }
@@ -121,6 +144,10 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
 
     // One handler dispatches both command ids.
     session.plugin_register_add_hook_command::<Commands>()?;
+
+    // Keyboard router for the (unowned) assistant window: keeps Tab/Esc working
+    // and stops REAPER from eating keystrokes meant for the webview composer.
+    session.plugin_register_add_accelerator_register(Box::new(AccelHook), AcceleratorPosition::Front)?;
 
     // Mirror the actions into REAPER's Extensions menu.
     session.reaper().add_extensions_main_menu();

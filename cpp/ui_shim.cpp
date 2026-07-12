@@ -32,6 +32,8 @@ extern "C" int SWELL_dllMain(HINSTANCE, DWORD, LPVOID);
 
 static HINSTANCE     g_hinst = NULL;
 static HWND          g_dlg   = NULL;
+static HWND          g_webview_host = NULL;  // wry's host child (webview), if any
+static bool          g_webview_active = false; // true once the webview took over
 static on_submit_cb  g_on_submit  = NULL;
 static on_confirm_cb g_on_confirm = NULL;
 static on_cancel_cb  g_on_cancel  = NULL;
@@ -57,13 +59,20 @@ static void layout_controls(HWND hwnd) {
   RECT rc;
   GetClientRect(hwnd, &rc);
   const int cw = rc.right, ch = rc.bottom;
+  HWND out = GetDlgItem(hwnd, ID_OUTPUT_EDIT);
+  // When the webview is active it owns the whole window (it hosts its own input
+  // composer). The webview tracks the output-edit rect, so stretch that to fill
+  // the client area; the other native controls are hidden (see set_webview_active).
+  if (g_webview_active) {
+    if (out) MoveWindow(out, 0, 0, cw, ch, TRUE);
+    return;
+  }
   const int m = 6, bw = 60, bh = 22, ih = 22, sh = 16;
   int closeY = ch - m - bh;
   int inputY = closeY - m - ih;
   int statusY = inputY - m - sh;
   int outH = statusY - 2 * m;
   if (outH < 20) outH = 20;
-  HWND out = GetDlgItem(hwnd, ID_OUTPUT_EDIT);
   HWND st  = GetDlgItem(hwnd, ID_STATUS_TEXT);
   HWND in  = GetDlgItem(hwnd, ID_INPUT_EDIT);
   HWND sb  = GetDlgItem(hwnd, ID_SUBMIT_BTN);
@@ -177,6 +186,8 @@ static RAAI_DLGRET DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
       if (g_on_destroy) g_on_destroy();  // drop the webview while its parent lives
       if (g_on_cancel) g_on_cancel();
       g_dlg = NULL;
+      g_webview_host = NULL;
+      g_webview_active = false;
       return TRUE;
   }
   return FALSE;  // not handled: default processing
@@ -207,9 +218,21 @@ extern "C" void ui_show(void* parent_hwnd) {
     SetForegroundWindow(g_dlg);
     return;
   }
+  // NULL owner: an independent top-level window, NOT owned by REAPER's main
+  // window — so it can sit alongside REAPER (behind it, on another monitor,
+  // minimized independently) instead of always floating on top. REAPER still
+  // pumps our messages (same thread) and, with the accelerator hook registered
+  // (ui_translate_accel), routes keyboard to us. parent_hwnd is now unused.
+  (void)parent_hwnd;
   g_dlg = CreateDialogParam(g_hinst, MAKEINTRESOURCE(ID_ASSISTANT_DLG),
-                            (HWND)parent_hwnd, DialogProc, 0);
+                            NULL, DialogProc, 0);
   if (g_dlg) {
+#ifdef _WIN32
+    // Give the unowned window its own taskbar button so the user can Alt+Tab to
+    // it and find it in the taskbar while working in REAPER.
+    LONG_PTR ex = GetWindowLongPtr(g_dlg, GWL_EXSTYLE);
+    SetWindowLongPtr(g_dlg, GWL_EXSTYLE, ex | WS_EX_APPWINDOW);
+#endif
     ShowWindow(g_dlg, SW_SHOW);
     SetForegroundWindow(g_dlg);
   }
@@ -275,6 +298,7 @@ extern "C" void ui_enable_webview_tabstop(void) {
         id == ID_SUBMIT_BTN || id == IDCANCEL) {
       continue;
     }
+    g_webview_host = child;
     LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
     SetWindowLongPtr(child, GWL_STYLE, style | WS_TABSTOP);
 #ifdef _WIN32
@@ -285,6 +309,54 @@ extern "C" void ui_enable_webview_tabstop(void) {
 #endif
     break; // one host window is enough
   }
+}
+
+// Give the whole window to the webview: hide every native control (the webview
+// hosts its own conversation + input composer) and stretch the output rect the
+// webview tracks to fill the client. Called once after the webview is created.
+extern "C" void ui_set_webview_active(int active) {
+  if (!g_dlg) return;
+  g_webview_active = active ? true : false;
+  static const int ids[] = { ID_OUTPUT_EDIT, ID_STATUS_TEXT, ID_INPUT_EDIT,
+                             ID_SUBMIT_BTN, IDCANCEL };
+  for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) {
+    HWND c = GetDlgItem(g_dlg, ids[i]);
+    if (c) ShowWindow(c, g_webview_active ? SW_HIDE : SW_SHOW);
+  }
+  layout_controls(g_dlg);
+}
+
+// Keyboard router for REAPER's accelerator queue (registered via plugin_register
+// "accelerator"). Two jobs, both only for keystrokes aimed at OUR window:
+//   1. Stop REAPER from swallowing them as global shortcuts (so typing in the
+//      webview types, and doesn't e.g. start/stop playback). We return -1
+//      ("pass on to my window") for anything the webview/composer should get.
+//   2. Let the native dialog manager handle Tab/Esc/mnemonics for the NATIVE
+//      controls (the non-webview fallback), but NOT while the webview owns focus
+//      — WebView2 does its own Tab cycling and IsDialogMessage would yank focus
+//      out of the composer on the first Tab.
+// Returns: 0 = not our window (let REAPER process), 1 = eaten, -1 = pass on.
+extern "C" int ui_translate_accel(void* msgp) {
+#ifdef _WIN32
+  if (!g_dlg || !msgp) return 0;
+  MSG* msg = (MSG*)msgp;
+  if (msg->hwnd != g_dlg && !IsChild(g_dlg, msg->hwnd)) return 0; // not ours
+  // WM_SYSKEY*/VK_MENU (Alt) would be DROPPED by the plain "pass on" (-1);
+  // force-deliver them (-20) so Alt, Alt+mnemonics and Alt+F4 reach the window.
+  if (msg->message == WM_SYSKEYDOWN || msg->message == WM_SYSKEYUP) return -20;
+  // When the webview owns the whole window it handles ALL its own keys; the
+  // dialog manager has nothing to navigate, so never run IsDialogMessage — on a
+  // focus transient it could steal Tab or turn Esc into hide-window.
+  if (g_webview_active) return -1;
+  HWND focus = GetFocus();
+  bool in_webview = g_webview_host &&
+      (focus == g_webview_host || IsChild(g_webview_host, focus));
+  if (!in_webview && IsDialogMessage(g_dlg, msg)) return 1; // dialog handled it
+  return -1; // ours: deliver to the window, don't apply REAPER shortcuts
+#else
+  (void)msgp;
+  return 0;
+#endif
 }
 
 extern "C" void ui_set_webview_focus_cb(on_webview_focus_cb on_focus) {

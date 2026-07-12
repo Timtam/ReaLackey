@@ -3,6 +3,7 @@
 //! feed results back -> repeat) and forwards output to the main thread. Never
 //! touches the REAPER API or dialog directly.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crossbeam_channel::Sender as CbSender;
@@ -21,6 +22,33 @@ use crate::tools::{self, ReaperOp, ToolOutcome};
 
 /// Safety cap on tool-call iterations per user prompt.
 const MAX_TURNS: usize = 8;
+
+/// True while a prompt is being processed. The main-thread pump reads this to
+/// emit a periodic "still working" announcement (see `control_surface::run`).
+static GENERATING: AtomicBool = AtomicBool::new(false);
+
+/// Bumped once per prompt so the pump can tell two back-to-back generations
+/// apart (and reset its "still working" timer) even if it never samples the idle
+/// gap between them.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the worker is currently processing a prompt.
+pub fn is_generating() -> bool {
+    GENERATING.load(Ordering::Relaxed)
+}
+
+/// A monotonically increasing id for the current generation (see [`GENERATION`]).
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
+
+/// Clears [`GENERATING`] when a prompt finishes, on every exit path.
+struct GeneratingGuard;
+impl Drop for GeneratingGuard {
+    fn drop(&mut self) {
+        GENERATING.store(false, Ordering::Relaxed);
+    }
+}
 
 /// Spawn the worker on its own thread. Returns immediately.
 pub fn spawn(
@@ -104,6 +132,14 @@ async fn handle_prompt(
 
     let _ = ui_tx.send(UiEvent::UserMessage(prompt.clone()));
     let _ = ui_tx.send(UiEvent::Status("Thinking…".into()));
+
+    // Mark generation active (the pump announces "still working" every ~10s while
+    // this holds) and speak once, now, that work has started. The guard clears
+    // the flag on every exit path (success, error, cancel).
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    GENERATING.store(true, Ordering::Relaxed);
+    let _generating = GeneratingGuard;
+    let _ = ui_tx.send(UiEvent::Announce("Working on it…".into()));
 
     history.push(ChatMessage::user_text(prompt));
 

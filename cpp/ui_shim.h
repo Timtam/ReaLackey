@@ -43,6 +43,14 @@ void* ui_get_hwnd(void);
 int ui_output_bounds(int* x, int* y, int* w, int* h);
 // Show/hide the plain output edit (hidden when the webview takes over).
 void ui_set_output_edit_visible(int visible);
+// Hand the whole window to the webview: hide all native controls and stretch
+// the (webview-tracked) output rect to fill the client area.
+void ui_set_webview_active(int active);
+// REAPER accelerator hook (registered via plugin_register "accelerator"). Routes
+// keystrokes aimed at our window to it (so REAPER doesn't eat them as shortcuts)
+// and lets the dialog manager handle Tab/Esc for native controls. `msg` is a
+// pointer to a Win32/SWELL MSG. Returns 0 (not ours) / 1 (eaten) / -1 (pass on).
+int ui_translate_accel(void* msg);
 // Register a callback fired (main thread) whenever the dialog is resized.
 void ui_set_resize_cb(on_resize_cb on_resize);
 // Register a callback fired (main thread) when the dialog HWND is destroyed, so

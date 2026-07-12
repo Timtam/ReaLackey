@@ -145,6 +145,20 @@ impl Output {
             self.call_js("liveAnnounce", text);
         }
     }
+
+    /// Update the webview's status line (visual; spoken feedback is via announce).
+    fn status(&self, text: &str) {
+        if self.active() {
+            self.call_js("setStatus", text);
+        }
+    }
+
+    /// Tell the composer whether a turn is in flight (gates its Escape = stop).
+    fn set_generating(&self, on: bool) {
+        if self.active() {
+            self.eval(if on { "setGenerating(true);" } else { "setGenerating(false);" });
+        }
+    }
 }
 
 // ---- public API (all main-thread) -------------------------------------------
@@ -165,7 +179,11 @@ pub fn ensure_created() {
         match webview_impl::create() {
             Ok(webview) => {
                 STATE.with(|c| c.borrow_mut().webview = Some(webview));
-                ffi::set_output_edit_visible(false);
+                // Hand the whole window to the webview (it hosts the conversation
+                // AND the input composer now), hiding every native control, then
+                // re-bound the webview to the freed-up full-window output rect.
+                ffi::set_webview_active(true);
+                on_resize();
                 ffi::enable_webview_tabstop();
                 ffi::install_webview_focus_cb();
                 #[cfg(windows)]
@@ -239,6 +257,15 @@ pub fn error(text: &str) {
 pub fn announce(text: &str) {
     STATE.with(|c| c.borrow().announce(text));
 }
+/// Update the webview status line. No-op in the plain-text fallback (the native
+/// status field is driven separately via `ffi::set_status`).
+pub fn status(text: &str) {
+    STATE.with(|c| c.borrow().status(text));
+}
+/// Mirror the "generating" state into the webview composer (gates Esc = stop).
+pub fn set_generating(on: bool) {
+    STATE.with(|c| c.borrow().set_generating(on));
+}
 
 /// The webview host window just gained keyboard focus (the user Tabbed onto it).
 /// Push focus straight into the web content so the very first Tab lands there
@@ -254,6 +281,8 @@ pub fn on_webview_focus() {
         });
         if let Some(controller) = controller {
             webview_impl::move_focus_into_content(&controller);
+            // Land the caret in the composer so the user can just start typing.
+            STATE.with(|c| c.borrow().eval("focusInput();"));
         }
     }
 }
@@ -270,11 +299,11 @@ mod webview_impl {
     };
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2Controller, ICoreWebView2MoveFocusRequestedEventArgs,
-        COREWEBVIEW2_MOVE_FOCUS_REASON, COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT,
         COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
     };
     use webview2_com::MoveFocusRequestedEventHandler;
     use wry::dpi::{PhysicalPosition, PhysicalSize};
+    use wry::http::Request;
     use wry::{Rect, WebContext, WebView, WebViewBuilder};
 
     use crate::ui::ffi;
@@ -297,7 +326,8 @@ mod webview_impl {
 <style>
 :root{color-scheme:dark;}
 html,body{margin:0;padding:0;height:100%;font:13px/1.55 "Segoe UI",system-ui,sans-serif;background:#1e1e1e;color:#e6e6e6;}
-#log{padding:10px;}
+body{display:flex;flex-direction:column;height:100vh;}
+#log{flex:1 1 auto;overflow-y:auto;padding:10px;}
 .msg{margin:0 0 12px;word-wrap:break-word;overflow-wrap:anywhere;}
 /* Each turn starts with a heading so a screen reader can jump between them (h). */
 h2.turn{font-size:13px;font-weight:700;margin:16px 0 4px;line-height:1.4;}
@@ -318,15 +348,48 @@ details.tool[open]>summary::before{content:"\25be  ";}
 details.tool pre{margin:0;padding:8px;background:#151515;overflow:auto;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;}
 .tres.err{color:#f48771;}
 .sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;}
+#status{flex:0 0 auto;padding:2px 10px;color:#9a9a9a;font-size:12px;min-height:15px;}
+#composer{flex:0 0 auto;display:flex;gap:6px;padding:8px 10px 10px;border-top:1px solid #3a3a3a;background:#252526;}
+#msg{flex:1 1 auto;min-width:0;resize:none;overflow-y:auto;font:inherit;color:#e6e6e6;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:4px;padding:6px 8px;}
+#send{flex:0 0 auto;padding:6px 16px;cursor:pointer;color:#fff;background:#0e639c;border:1px solid #1177bb;border-radius:4px;font:inherit;}
+#send:hover{background:#1177bb;}
 </style></head><body>
 <div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
-<div id="log"></div><script>
-function sd(){window.scrollTo(0,document.body.scrollHeight);}
+<!-- NOT a live region: streaming re-renders it token-by-token; role="log"/
+     aria-live here makes a screen reader announce every token. The final answer
+     is spoken via #live + OSARA; turns are navigable by their h2 headings. -->
+<div id="log"></div>
+<div id="status">Ready.</div>
+<form id="composer">
+<textarea id="msg" rows="1" aria-label="Message the assistant" placeholder="Ask the assistant…  (Enter to send, Shift+Enter = new line)"></textarea>
+<button id="send" type="submit">Send</button>
+</form><script>
+function sd(){var l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight;}
 function addBlock(h){var l=document.getElementById('log');if(l){l.insertAdjacentHTML('beforeend',h);sd();}}
 function startAssistant(){var o=document.getElementById('cur');if(o)o.removeAttribute('id');addBlock('<h2 class="turn assistant">Assistant</h2><div class="body" id="cur"></div>');}
 function updateAssistant(h){var c=document.getElementById('cur');if(c){c.innerHTML=h;sd();}}
 function setToolResult(h){var l=document.querySelectorAll('#log details.tool');if(l.length){var t=l[l.length-1].querySelector('.tres');if(t){t.innerHTML=h;sd();}}}
 function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.textContent='';setTimeout(function(){l.textContent=t;setTimeout(function(){l.textContent='';},2500);},60);}
+function setStatus(t){var s=document.getElementById('status');if(s)s.textContent=t;}
+function focusInput(){var m=document.getElementById('msg');if(m)m.focus();}
+var generating=false;
+function setGenerating(b){generating=!!b;}
+function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height='auto';var max=Math.round(window.innerHeight*0.4);m.style.height=Math.min(m.scrollHeight,max)+'px';}
+(function(){
+  var f=document.getElementById('composer'),m=document.getElementById('msg');
+  function send(){var t=m.value;if(!t.trim())return;m.value='';grow();window.ipc.postMessage(JSON.stringify({t:'submit',text:t}));}
+  f.addEventListener('submit',function(e){e.preventDefault();send();});
+  m.addEventListener('keydown',function(e){
+    // Enter sends; Shift+Enter is a newline. Skip while an IME composition is
+    // in progress (isComposing) so committing the composition doesn't submit.
+    if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send();}
+    // Escape stops an in-flight turn — but only while generating, so a stray/
+    // reflexive Escape at rest does nothing.
+    else if(e.key==='Escape'&&generating){e.preventDefault();window.ipc.postMessage(JSON.stringify({t:'cancel'}));}
+  });
+  m.addEventListener('input',grow);
+  grow();focusInput();
+})();
 </script></body></html>"#;
 
     // WebView2 is COM and requires the calling (UI) thread to be in a
@@ -357,6 +420,16 @@ function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.te
             .with_bounds(bounds(x, y, w, h))
             .with_html(BASE_HTML)
             .with_transparent(false)
+            // The chat composer lives in the HTML now; its Send/Enter posts here.
+            // Panic-guarded: this fires from a WebView2/COM callback, and a panic
+            // must never unwind across that boundary (design N3). Take the body as
+            // an owned String first so the catch_unwind closure is UnwindSafe.
+            .with_ipc_handler(|req: Request<String>| {
+                let body = req.into_body();
+                let _ = std::panic::catch_unwind(move || {
+                    crate::ui::bridge::on_webview_message(&body);
+                });
+            })
             .build_as_child(&host)
             .map_err(|e| e.to_string())
     }
@@ -380,13 +453,9 @@ function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.te
     }
 
     /// Move keyboard focus from the (empty) host window into the web content.
-    /// Called when the host gains focus via Tab.
-    ///
-    /// We use PROGRAMMATIC, not NEXT: the pane is a read-only log with no
-    /// tab-stops, so NEXT would find nothing to land on and immediately fire
-    /// MoveFocusRequested, bouncing focus straight back out. PROGRAMMATIC gives
-    /// the document itself focus so the user can actually read/scroll it; a
-    /// subsequent Tab then exits cleanly via the MoveFocusRequested handler.
+    /// Called when the host gains focus (window activation / Tab onto the host).
+    /// PROGRAMMATIC hands the WebView2 focus without picking an element; the
+    /// caller then runs `focusInput()` to land the caret in the composer.
     pub fn move_focus_into_content(controller: &ICoreWebView2Controller) {
         // SAFETY: called on the main (UI) thread that owns the controller.
         unsafe {
@@ -394,9 +463,10 @@ function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.te
         }
     }
 
-    /// Register a MoveFocusRequested handler so that when Tab walks off the last
-    /// (or first) element of the web content, we hand focus to the native control
-    /// after/before the webview instead of letting WebView2 trap it inside.
+    /// Register a MoveFocusRequested handler so that when Tab would walk off the
+    /// end (or start) of the web content, focus wraps back to the composer inside
+    /// the webview instead of escaping to the (now hidden) native controls. The
+    /// whole window is the webview, so focus should never leave it.
     pub fn install_focus_out_handler() {
         use wry::WebViewExtWindows;
         let controller =
@@ -410,12 +480,9 @@ function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.te
                   args: Option<ICoreWebView2MoveFocusRequestedEventArgs>|
                   -> windows_core::Result<()> {
                 if let Some(args) = args {
+                    // Keep focus in the pane: send the caret back to the composer.
+                    super::STATE.with(|c| c.borrow().eval("focusInput();"));
                     // SAFETY: fires on the UI thread; `args` is a live COM pointer.
-                    let mut reason = COREWEBVIEW2_MOVE_FOCUS_REASON(0);
-                    unsafe { args.Reason(&mut reason)? };
-                    let forward = reason == COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT;
-                    ffi::focus_after_webview(forward);
-                    // We took focus over; stop WebView2 from cycling back inside.
                     unsafe { args.SetHandled(true)? };
                 }
                 Ok(())

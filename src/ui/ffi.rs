@@ -24,12 +24,12 @@ extern "C" {
     fn ui_attach_submenu(parent_hmenu: *mut c_void, submenu: *mut c_void, title: *const c_char);
     fn ui_get_hwnd() -> *mut c_void;
     fn ui_output_bounds(x: *mut c_int, y: *mut c_int, w: *mut c_int, h: *mut c_int) -> c_int;
-    fn ui_set_output_edit_visible(visible: c_int);
+    fn ui_set_webview_active(active: c_int);
+    fn ui_translate_accel(msg: *mut c_void) -> c_int;
     fn ui_set_resize_cb(on_resize: extern "C" fn());
     fn ui_set_destroy_cb(on_destroy: extern "C" fn());
     fn ui_enable_webview_tabstop();
     fn ui_set_webview_focus_cb(on_focus: extern "C" fn());
-    fn ui_focus_after_webview(forward: c_int);
 }
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
@@ -75,9 +75,15 @@ pub fn output_bounds() -> Option<(i32, i32, i32, i32)> {
     (ok != 0).then_some((x, y, w, h))
 }
 
-/// Show/hide the plain output edit (hidden once the webview takes over).
-pub fn set_output_edit_visible(visible: bool) {
-    unsafe { ui_set_output_edit_visible(visible as c_int) }
+/// Hand the whole window to the webview (hide all native controls, fill client).
+pub fn set_webview_active(active: bool) {
+    unsafe { ui_set_webview_active(active as c_int) }
+}
+
+/// Route a keystroke aimed at our window (via REAPER's accelerator queue).
+/// `msg` points to a Win32/SWELL `MSG`. Returns 0 (not ours) / 1 (eat) / -1 (pass on).
+pub fn translate_accel(msg: *mut c_void) -> i32 {
+    unsafe { ui_translate_accel(msg) }
 }
 
 /// Register the resize thunk so the webview re-bounds with the dialog.
@@ -98,11 +104,6 @@ pub fn enable_webview_tabstop() {
 /// Register the "webview host focused" thunk (forwards focus into the content).
 pub fn install_webview_focus_cb() {
     unsafe { ui_set_webview_focus_cb(on_webview_focus) }
-}
-
-/// Move focus to the native control after (forward) / before the webview.
-pub fn focus_after_webview(forward: bool) {
-    unsafe { ui_focus_after_webview(forward as c_int) }
 }
 
 extern "C" fn on_webview_focus() {
