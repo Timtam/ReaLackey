@@ -1191,6 +1191,174 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             json!(["target"]),
         ),
     });
+    // --- transport / timeline / global settings ---
+    defs.push(ToolDef {
+        name: "get_transport".into(),
+        description: "Read the transport + timeline state: play_state \
+                      ('stopped'|'playing'|'paused'|'recording'), play_position and edit_cursor \
+                      (seconds), playrate (1.0 = normal speed), tempo (BPM), repeat/loop on/off, \
+                      and the ruler time unit."
+            .into(),
+        input_schema: empty(),
+    });
+    defs.push(ToolDef {
+        name: "transport".into(),
+        description: "Control the transport. action: play, stop, pause, record, or toggle_play \
+                      (play/stop). Recording writes to record-armed tracks (arm via \
+                      set_track_property rec_arm); stop ends play or recording. Not undo-wrapped."
+            .into(),
+        input_schema: obj(
+            json!({ "action": { "type": "string", "enum": ["play", "stop", "pause", "record", "toggle_play"] } }),
+            json!(["action"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "set_edit_cursor".into(),
+        description: "Move the edit cursor to a position in seconds. seek_playback (default false) \
+                      also moves the play cursor during playback; move_view (default false) scrolls \
+                      the arrange view to show it."
+            .into(),
+        input_schema: obj(
+            json!({
+                "position": { "type": "number", "description": "seconds" },
+                "seek_playback": { "type": "boolean" },
+                "move_view": { "type": "boolean" }
+            }),
+            json!(["position"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "set_playrate".into(),
+        description: "Set the master playback speed (playrate). 1.0 = normal, 2.0 = double, 0.5 = \
+                      half; usable range ~0.25..4.0. Pitch is preserved unless REAPER's 'preserve \
+                      pitch when changing playrate' is off."
+            .into(),
+        input_schema: obj(json!({ "rate": { "type": "number" } }), json!(["rate"])),
+    });
+    defs.push(ToolDef {
+        name: "set_ruler_unit".into(),
+        description: "Set the timeline/ruler time unit. unit: minutes_seconds, measures_beats, \
+                      measures_beats_minutes, seconds, samples, or hmsf (hours:minutes:seconds:frames)."
+            .into(),
+        input_schema: obj(
+            json!({ "unit": { "type": "string", "enum": ["minutes_seconds", "measures_beats", "measures_beats_minutes", "seconds", "samples", "hmsf"] } }),
+            json!(["unit"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "get_global_toggles".into(),
+        description: "Read common project/global on-off states: metronome, repeat (loop), snap \
+                      (snapping), and ripple editing mode ('off'|'one_track'|'all_tracks')."
+            .into(),
+        input_schema: empty(),
+    });
+    defs.push(ToolDef {
+        name: "set_global_toggle".into(),
+        description: "Turn a global option on or off. name: metronome, repeat, or snap. on = the \
+                      desired state. (For ripple editing use set_ripple_mode.)"
+            .into(),
+        input_schema: obj(
+            json!({ "name": { "type": "string", "enum": ["metronome", "repeat", "snap"] }, "on": { "type": "boolean" } }),
+            json!(["name", "on"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "set_ripple_mode".into(),
+        description: "Set ripple-editing mode: off, one_track, or all_tracks.".into(),
+        input_schema: obj(
+            json!({ "mode": { "type": "string", "enum": ["off", "one_track", "all_tracks"] } }),
+            json!(["mode"]),
+        ),
+    });
+    // --- CRUD completeness ---
+    defs.push(ToolDef {
+        name: "remove_fx".into(),
+        description: "Remove an FX from a track's FX chain by index (get_track_fx for indices). \
+                      CHANGES the project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({ "track_index": { "type": "integer" }, "fx_index": { "type": "integer" } }),
+            json!(["track_index", "fx_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "remove_take_fx".into(),
+        description: "Remove an FX from a take's FX chain by index (defaults to the active take). \
+                      CHANGES the project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer" },
+                "fx_index": { "type": "integer" },
+                "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+            }),
+            json!(["item_index", "fx_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "create_empty_item".into(),
+        description: "Create an empty media item (no take) on a track at a position, with a length \
+                      in seconds. CHANGES the project (confirmed + undo-wrapped). For a MIDI item \
+                      use create_midi_item."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "position": { "type": "number", "description": "seconds" },
+                "length": { "type": "number", "description": "seconds" }
+            }),
+            json!(["track_index", "position", "length"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "update_marker".into(),
+        description: "Edit an existing marker by its index_number (from get_markers). Optionally set \
+                      position (seconds), name, and/or color (native colour|0x1000000; omit or 0 = \
+                      keep current). CHANGES the project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "index_number": { "type": "integer" },
+                "position": { "type": "number" },
+                "name": { "type": "string" },
+                "color": { "type": "integer" }
+            }),
+            json!(["index_number"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "update_region".into(),
+        description: "Edit an existing region by its index_number (from get_markers). Optionally set \
+                      start and/or end (seconds), name, and/or color. CHANGES the project \
+                      (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "index_number": { "type": "integer" },
+                "start": { "type": "number" },
+                "end": { "type": "number" },
+                "name": { "type": "string" },
+                "color": { "type": "integer" }
+            }),
+            json!(["index_number"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "delete_envelope_points".into(),
+        description: "Delete all envelope points in the time range [start, end] seconds on a track \
+                      envelope (index from get_track_envelopes). CHANGES the project (confirmed + \
+                      undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "envelope_index": { "type": "integer" },
+                "start": { "type": "number" },
+                "end": { "type": "number" }
+            }),
+            json!(["track_index", "envelope_index", "start", "end"]),
+        ),
+    });
     if !supports_images {
         defs.retain(|d| !is_vision_tool(&d.name));
     }
@@ -1222,6 +1390,58 @@ mod definition_tests {
             assert!(
                 defs.iter().any(|d| d.name == "measure_loudness"),
                 "measure_loudness must be advertised (supports_images={supports_images})"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_and_crud_tools_advertised() {
+        let defs = super::definitions(false, false);
+        for name in [
+            "transport",
+            "get_transport",
+            "set_edit_cursor",
+            "set_playrate",
+            "set_ruler_unit",
+            "get_global_toggles",
+            "set_global_toggle",
+            "set_ripple_mode",
+            "remove_fx",
+            "remove_take_fx",
+            "create_empty_item",
+            "update_marker",
+            "update_region",
+            "delete_envelope_points",
+        ] {
+            assert!(
+                defs.iter().any(|d| d.name == name),
+                "{name} must be advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn crud_mutations_are_confirmation_gated() {
+        // The content-changing new tools must require confirmation; the transport/
+        // control tools must NOT (they aren't content mutations).
+        use serde_json::json;
+        for name in [
+            "remove_fx",
+            "remove_take_fx",
+            "create_empty_item",
+            "update_marker",
+            "update_region",
+            "delete_envelope_points",
+        ] {
+            assert!(
+                super::preview(name, &json!({})).is_some(),
+                "{name} must be confirmation-gated"
+            );
+        }
+        for name in ["transport", "set_edit_cursor", "set_playrate", "set_global_toggle"] {
+            assert!(
+                super::preview(name, &json!({})).is_none(),
+                "{name} must not be confirmation-gated"
             );
         }
     }
@@ -1653,6 +1873,65 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_f64(input, "value")?,
             input.get("shape").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
         ),
+        "delete_envelope_points" => delete_envelope_points(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "envelope_index")?,
+            req_f64(input, "start")?,
+            req_f64(input, "end")?,
+        ),
+        // transport / timeline / global settings
+        "get_transport" => Ok(get_transport(reaper)),
+        "transport" => transport(reaper, req_str(input, "action")?),
+        "set_edit_cursor" => set_edit_cursor(
+            reaper,
+            req_f64(input, "position")?,
+            opt_bool(input, "seek_playback").unwrap_or(false),
+            opt_bool(input, "move_view").unwrap_or(false),
+        ),
+        "set_playrate" => set_playrate(reaper, req_f64(input, "rate")?),
+        "set_ruler_unit" => set_ruler_unit(reaper, req_str(input, "unit")?),
+        "get_global_toggles" => Ok(get_global_toggles(reaper)),
+        "set_global_toggle" => {
+            set_global_toggle(reaper, req_str(input, "name")?, req_bool(input, "on")?)
+        }
+        "set_ripple_mode" => set_ripple_mode(reaper, req_str(input, "mode")?),
+        // CRUD completeness
+        "remove_fx" => remove_fx(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+        ),
+        "remove_take_fx" => remove_take_fx(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "fx_index")?,
+            opt_u32(input, "take_index"),
+        ),
+        "create_empty_item" => create_empty_item(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_f64(input, "position")?,
+            req_f64(input, "length")?,
+        ),
+        "update_marker" => update_marker(
+            reaper,
+            req_i64(input, "index_number")? as c_int,
+            false,
+            input.get("position").and_then(|v| v.as_f64()),
+            None,
+            opt_str(input, "name"),
+            input.get("color").and_then(|v| v.as_i64()).map(|c| c as c_int),
+        ),
+        "update_region" => update_marker(
+            reaper,
+            req_i64(input, "index_number")? as c_int,
+            true,
+            input.get("start").and_then(|v| v.as_f64()),
+            input.get("end").and_then(|v| v.as_f64()),
+            opt_str(input, "name"),
+            input.get("color").and_then(|v| v.as_i64()).map(|c| c as c_int),
+        ),
         // notes & per-project memory
         "get_project_notes" => Ok(get_project_notes(reaper)),
         "set_project_notes" => Ok(set_project_notes(
@@ -2019,6 +2298,31 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("time"),
             show("value"),
         )),
+        "delete_envelope_points" => Some(format!(
+            "Delete automation points on track {} envelope {} from {} s to {} s",
+            show("track_index"),
+            show("envelope_index"),
+            show("start"),
+            show("end"),
+        )),
+        "remove_fx" => Some(format!(
+            "Remove FX {} from track {}",
+            show("fx_index"),
+            show("track_index"),
+        )),
+        "remove_take_fx" => Some(format!(
+            "Remove take FX {} from item {}",
+            show("fx_index"),
+            show("item_index"),
+        )),
+        "create_empty_item" => Some(format!(
+            "Create an empty item on track {} at {} s ({} s long)",
+            show("track_index"),
+            show("position"),
+            show("length"),
+        )),
+        "update_marker" => Some(format!("Edit marker number {}", show("index_number"))),
+        "update_region" => Some(format!("Edit region number {}", show("index_number"))),
         "add_marker" => Some(format!(
             "Add marker {} at {} s",
             input
@@ -3537,6 +3841,370 @@ fn delete_marker(
             if is_region { "region" } else { "marker" }
         ))
     }
+}
+
+// ---- transport / timeline / global settings --------------------------------
+
+/// Ruler time-unit names ↔ REAPER "View: Time unit for ruler: …" action ids.
+const RULER_UNITS: &[(&str, c_int)] = &[
+    ("minutes_seconds", 40365),
+    ("measures_beats_minutes", 40366),
+    ("measures_beats", 40367),
+    ("seconds", 40368),
+    ("samples", 40369),
+    ("hmsf", 40370),
+];
+
+fn current_ruler_unit(low: &reaper_low::Reaper) -> &'static str {
+    for (name, id) in RULER_UNITS {
+        if low.GetToggleCommandState(*id) == 1 {
+            return name;
+        }
+    }
+    "unknown"
+}
+
+fn get_transport(reaper: &Reaper<MainThreadScope>) -> Value {
+    let low = reaper.low();
+    let state = low.GetPlayState();
+    let play_state = if state & 4 != 0 {
+        "recording"
+    } else if state & 2 != 0 {
+        "paused"
+    } else if state & 1 != 0 {
+        "playing"
+    } else {
+        "stopped"
+    };
+    json!({
+        "play_state": play_state,
+        "play_position": low.GetPlayPosition(),
+        "edit_cursor": low.GetCursorPosition(),
+        "playrate": unsafe { low.Master_GetPlayRate(CUR_PROJ) },
+        "tempo": low.Master_GetTempo(),
+        "repeat": low.GetSetRepeat(-1) != 0,
+        "ruler_unit": current_ruler_unit(low),
+    })
+}
+
+fn transport(reaper: &Reaper<MainThreadScope>, action: &str) -> Result<Value, String> {
+    let cmd = match action {
+        "play" => 1007,
+        "stop" => 1016,
+        "pause" => 1008,
+        "record" => 1013,
+        "toggle_play" => 40073,
+        other => return Err(format!("unknown transport action '{other}'")),
+    };
+    reaper.low().Main_OnCommand(cmd, 0);
+    Ok(json!({ "action": action, "state": get_transport(reaper) }))
+}
+
+fn set_edit_cursor(
+    reaper: &Reaper<MainThreadScope>,
+    position: f64,
+    seek_playback: bool,
+    move_view: bool,
+) -> Result<Value, String> {
+    if !position.is_finite() {
+        return Err("position must be a finite number of seconds".to_string());
+    }
+    let low = reaper.low();
+    low.SetEditCurPos(position.max(0.0), move_view, seek_playback);
+    Ok(json!({ "edit_cursor": low.GetCursorPosition() }))
+}
+
+fn set_playrate(reaper: &Reaper<MainThreadScope>, rate: f64) -> Result<Value, String> {
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err("playrate must be a positive number".to_string());
+    }
+    let low = reaper.low();
+    low.CSurf_OnPlayRateChange(rate.clamp(0.01, 16.0));
+    Ok(json!({ "playrate": unsafe { low.Master_GetPlayRate(CUR_PROJ) } }))
+}
+
+fn set_ruler_unit(reaper: &Reaper<MainThreadScope>, unit: &str) -> Result<Value, String> {
+    let id = RULER_UNITS
+        .iter()
+        .find(|(n, _)| *n == unit)
+        .map(|(_, id)| *id)
+        .ok_or_else(|| format!("unknown ruler unit '{unit}'"))?;
+    reaper.low().Main_OnCommand(id, 0);
+    Ok(json!({ "ruler_unit": current_ruler_unit(reaper.low()) }))
+}
+
+fn get_global_toggles(reaper: &Reaper<MainThreadScope>) -> Value {
+    let low = reaper.low();
+    let ripple = if low.GetToggleCommandState(40311) == 1 {
+        "all_tracks"
+    } else if low.GetToggleCommandState(40310) == 1 {
+        "one_track"
+    } else {
+        "off"
+    };
+    json!({
+        "metronome": low.GetToggleCommandState(40364) == 1,
+        "repeat": low.GetSetRepeat(-1) != 0,
+        "snap": low.GetToggleCommandState(1157) == 1,
+        "ripple": ripple,
+    })
+}
+
+fn set_global_toggle(
+    reaper: &Reaper<MainThreadScope>,
+    name: &str,
+    on: bool,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    match name {
+        "metronome" => {
+            if (low.GetToggleCommandState(40364) == 1) != on {
+                low.Main_OnCommand(40364, 0);
+            }
+        }
+        "snap" => {
+            if (low.GetToggleCommandState(1157) == 1) != on {
+                low.Main_OnCommand(1157, 0);
+            }
+        }
+        "repeat" => {
+            low.GetSetRepeat(if on { 1 } else { 0 });
+        }
+        other => {
+            return Err(format!("unknown toggle '{other}' (use metronome, repeat, or snap)"))
+        }
+    }
+    Ok(get_global_toggles(reaper))
+}
+
+fn set_ripple_mode(reaper: &Reaper<MainThreadScope>, mode: &str) -> Result<Value, String> {
+    let id = match mode {
+        "off" => 40309,
+        "one_track" => 40310,
+        "all_tracks" => 40311,
+        other => return Err(format!("unknown ripple mode '{other}'")),
+    };
+    reaper.low().Main_OnCommand(id, 0);
+    Ok(get_global_toggles(reaper))
+}
+
+// ---- CRUD completeness ------------------------------------------------------
+
+fn remove_fx(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { reaper.low().TrackFX_Delete(track.as_ptr(), fx_index as c_int) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: remove FX {fx_index} from track {track_index}"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "removed": true, "track_index": track_index, "fx_index": fx_index }))
+    } else {
+        Err(format!("no FX at index {fx_index} on track {track_index}"))
+    }
+}
+
+fn remove_take_fx(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    fx_index: u32,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    let take = match take_index {
+        Some(ti) => unsafe { low.GetMediaItemTake(item.as_ptr(), ti as c_int) },
+        None => unsafe { low.GetActiveTake(item.as_ptr()) },
+    };
+    if take.is_null() {
+        return Err("no such take".to_string());
+    }
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.TakeFX_Delete(take, fx_index as c_int) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: remove take FX {fx_index} from item {item_index}"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "removed": true, "item_index": item_index, "fx_index": fx_index }))
+    } else {
+        Err(format!("no take FX at index {fx_index}"))
+    }
+}
+
+fn create_empty_item(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    position: f64,
+    length: f64,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    if !position.is_finite() || !length.is_finite() || length <= 0.0 {
+        return Err("position and length must be finite and length > 0".to_string());
+    }
+    let low = reaper.low();
+    reaper.undo_begin_block_2(project);
+    let item = unsafe { low.AddMediaItemToTrack(track.as_ptr()) };
+    if !item.is_null() {
+        unsafe {
+            low.SetMediaItemInfo_Value(item, c"D_POSITION".as_ptr(), position.max(0.0));
+            low.SetMediaItemInfo_Value(item, c"D_LENGTH".as_ptr(), length);
+            low.UpdateArrange();
+        }
+    }
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: create empty item on track {track_index}"),
+        UndoScope::All,
+    );
+    let item_index =
+        MediaItem::new(item).and_then(|it| media_item_index_map(reaper).get(&it).copied());
+    Ok(json!({
+        "created": !item.is_null(),
+        "track_index": track_index,
+        "item_index": item_index,
+        "position": position,
+        "length": length,
+    }))
+}
+
+/// Edit an existing marker (`is_region=false`) or region by its index_number:
+/// read the current values, apply the given overrides, write them back.
+#[allow(clippy::too_many_arguments)]
+fn update_marker(
+    reaper: &Reaper<MainThreadScope>,
+    index_number: c_int,
+    is_region: bool,
+    pos_or_start: Option<f64>,
+    end: Option<f64>,
+    name: Option<&str>,
+    color: Option<c_int>,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    // Find the marker/region's current values by enumeration.
+    let mut i: c_int = 0;
+    let mut found: Option<(f64, f64, String, c_int)> = None;
+    loop {
+        let mut is_rgn = false;
+        let mut pos = 0.0f64;
+        let mut rgn_end = 0.0f64;
+        let mut name_ptr: *const c_char = std::ptr::null();
+        let mut num: c_int = 0;
+        let mut col: c_int = 0;
+        let next = unsafe {
+            low.EnumProjectMarkers3(
+                CUR_PROJ, i, &mut is_rgn, &mut pos, &mut rgn_end, &mut name_ptr, &mut num, &mut col,
+            )
+        };
+        if next == 0 {
+            break;
+        }
+        if num == index_number && is_rgn == is_region {
+            found = Some((pos, rgn_end, unsafe { cstr_to_string(name_ptr) }, col));
+            break;
+        }
+        i += 1;
+        if i > 1_000_000 {
+            break;
+        }
+    }
+    let (cur_pos, cur_end, cur_name, cur_color) = found.ok_or_else(|| {
+        format!(
+            "no {} with index number {index_number}",
+            if is_region { "region" } else { "marker" }
+        )
+    })?;
+
+    let new_pos = pos_or_start.unwrap_or(cur_pos).max(0.0);
+    let new_end = if is_region {
+        end.unwrap_or(cur_end).max(0.0)
+    } else {
+        0.0
+    };
+    let new_name = name.map(|s| s.to_string()).unwrap_or(cur_name);
+    // color: omit or 0 = keep current.
+    let new_color = match color {
+        Some(c) if c != 0 => c,
+        _ => cur_color,
+    };
+    let name_c = CString::new(new_name).map_err(|_| "name contains a NUL byte".to_string())?;
+
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe {
+        low.SetProjectMarker3(
+            CUR_PROJ,
+            index_number,
+            is_region,
+            new_pos,
+            new_end,
+            name_c.as_ptr(),
+            new_color,
+        )
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!(
+            "AI: edit {} {index_number}",
+            if is_region { "region" } else { "marker" }
+        ),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({
+            "updated": true, "index_number": index_number, "is_region": is_region,
+            "position": new_pos, "end": if is_region { Some(new_end) } else { None }
+        }))
+    } else {
+        Err("failed to update the marker/region".to_string())
+    }
+}
+
+fn delete_envelope_points(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    envelope_index: u32,
+    start: f64,
+    end: f64,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    if !start.is_finite() || !end.is_finite() || end < start {
+        return Err("start/end must be finite with end >= start".to_string());
+    }
+    let low = reaper.low();
+    let env = unsafe { low.GetTrackEnvelope(track.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!("no envelope at index {envelope_index}"));
+    }
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.DeleteEnvelopePointRange(env, start, end) };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete envelope points on track {track_index} envelope {envelope_index}"),
+        UndoScope::All,
+    );
+    Ok(json!({
+        "deleted": ok, "track_index": track_index, "envelope_index": envelope_index,
+        "start": start, "end": end
+    }))
 }
 
 fn get_tempo_markers(reaper: &Reaper<MainThreadScope>) -> Value {

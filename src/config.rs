@@ -67,8 +67,13 @@ pub fn system_prompt() -> String {
      edit item properties (fades, length, mute, loop, snap, color), take \
      properties (start offset, rate, pitch, pan, channel mode, name), and track \
      settings (visibility, height, folder nesting, mute/solo, color, name); \
-     copy/move/delete items, copy a take, duplicate/delete tracks, and manage \
-     track groups and item groups). \
+     copy/move/delete items, create empty items, copy a take, duplicate/delete \
+     tracks, remove track/take FX, edit markers and regions, delete automation \
+     points, and manage track groups and item groups; and control the session: \
+     transport (play/stop/pause/record), move the edit cursor, change the playback \
+     speed and ruler unit, and toggle global options (metronome, repeat, snapping, \
+     ripple editing). Track/take volume and pan, record-arm/mute/solo, and free \
+     item positioning are set via the track/item/take property tools). \
      When composing MIDI, read the existing take (and its \
      neighbouring items via include_neighbors) first so new material fits the \
      key, tempo, and surrounding parts. When a question depends on the \
