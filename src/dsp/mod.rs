@@ -703,6 +703,42 @@ fn decode_pcm(d: &[u8], format: u16, bits: u16) -> Result<Vec<f64>, String> {
     Ok(out)
 }
 
+/// Encode interleaved f64 samples as a canonical 16-bit PCM WAV. Used to hand a
+/// portable audio clip to audio-capable models (they accept plain WAV, not the
+/// 32-bit-float WAV our render produces). Samples are clamped to [-1, 1].
+pub fn encode_pcm16_wav(samples: &[f64], channels: usize, sample_rate: f64) -> Vec<u8> {
+    let channels = channels.max(1) as u16;
+    let sr = if sample_rate > 0.0 {
+        sample_rate as u32
+    } else {
+        48_000
+    };
+    let bits: u16 = 16;
+    let block_align = channels * (bits / 8);
+    let byte_rate = sr * block_align as u32;
+    let data_len = (samples.len() * 2) as u32; // 2 bytes per sample
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sr.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for &s in samples {
+        let v = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
+        let i = (v * 32767.0).round() as i16;
+        out.extend_from_slice(&i.to_le_bytes());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +787,26 @@ mod tests {
         assert!(lra.abs() < 1.0, "lra {lra}");
         assert!(f.short_term_lufs_max.is_some());
         assert!(f.momentary_lufs_max.is_some());
+    }
+
+    #[test]
+    fn pcm16_wav_round_trips() {
+        // Encode a stereo tone to PCM16 WAV and decode it back; values survive
+        // within 16-bit quantisation.
+        let mut interleaved = Vec::new();
+        let l = sine(440.0, 0.5, 0.1, 48000.0);
+        for &s in &l {
+            interleaved.push(s);
+            interleaved.push(s * 0.5);
+        }
+        let wav = encode_pcm16_wav(&interleaved, 2, 48000.0);
+        let (back, ch, sr) = parse_wav(&wav).expect("decode");
+        assert_eq!(ch, 2);
+        assert_eq!(sr, 48000.0);
+        assert_eq!(back.len(), interleaved.len());
+        for (a, b) in interleaved.iter().zip(back.iter()) {
+            assert!((a - b).abs() < 1.0 / 32000.0, "{a} vs {b}");
+        }
     }
 
     #[test]

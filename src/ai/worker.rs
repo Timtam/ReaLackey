@@ -153,7 +153,8 @@ async fn handle_prompt(
 
     history.push(ChatMessage::user_text(prompt));
 
-    let tools = tools::definitions(provider.capabilities().supports_images);
+    let caps = provider.capabilities();
+    let tools = tools::definitions(caps.supports_images, caps.supports_audio);
     let cancel = CancellationToken::new();
     let mut final_answer = String::new();
     let mut truncated = false;
@@ -234,22 +235,32 @@ async fn handle_prompt(
                     content,
                     is_error,
                     image,
+                    audio,
                 } = outcome;
-                let result = match image {
+                let result = if image.is_none() && audio.is_none() {
                     // Common case: a text-only result (byte-identical wire form).
-                    None => Content::tool_result_text(id, content, is_error),
-                    // Vision: text + an image block the model can see.
-                    Some(img) => Content::ToolResult {
+                    Content::tool_result_text(id, content, is_error)
+                } else {
+                    // Media result: text + an image the model can see and/or an
+                    // audio clip it can hear.
+                    let mut blocks = vec![ResultBlock::Text(content)];
+                    if let Some(img) = image {
+                        blocks.push(ResultBlock::Image {
+                            media_type: img.media_type,
+                            data_base64: img.data_base64,
+                        });
+                    }
+                    if let Some(au) = audio {
+                        blocks.push(ResultBlock::Audio {
+                            format: au.format,
+                            data_base64: au.data_base64,
+                        });
+                    }
+                    Content::ToolResult {
                         tool_use_id: id,
-                        content: vec![
-                            ResultBlock::Text(content),
-                            ResultBlock::Image {
-                                media_type: img.media_type,
-                                data_base64: img.data_base64,
-                            },
-                        ],
+                        content: blocks,
                         is_error,
-                    },
+                    }
                 };
                 results.push(result);
             }
@@ -397,22 +408,22 @@ async fn run_tool(
         return exec_tool(op_tx, name.to_string(), input).await;
     }
 
-    // Screen capture sends pixels to the cloud, so it is ALWAYS consent-gated
+    // Sending a screenshot or an audio clip to the cloud is ALWAYS consent-gated
     // (data protection), independent of the mutation-confirm toggle, and asked
-    // before the tool runs. capture_view is not a mutation, so the preview path
-    // below never applies to it.
+    // before the tool runs. These are not mutations, so the preview path below
+    // never applies to them.
     if let Some(consent) = tools::consent_prompt(name, &input) {
         let _ = ui_tx.send(UiEvent::Notice(format!("{consent}?")));
         let _ = ui_tx.send(UiEvent::Announce(format!("{consent}. Allow?")));
         let approved = confirm(
             op_tx,
-            format!("{consent}?\n\nThe screenshot will be sent to the cloud AI provider."),
+            format!("{consent}?\n\nThis will be sent to the cloud AI provider."),
         )
         .await;
         if !approved {
-            let _ = ui_tx.send(UiEvent::Notice("Screenshot declined.".into()));
+            let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
             return ToolOutcome::ok(
-                json!({ "captured": false, "reason": "user declined the screenshot" }).to_string(),
+                json!({ "declined": true, "reason": "user declined" }).to_string(),
             );
         }
         return exec_tool(op_tx, name.to_string(), input).await;

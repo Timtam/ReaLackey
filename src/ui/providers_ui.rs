@@ -440,6 +440,10 @@ pub fn edit_dialog_ok() -> bool {
     let key = ui::ffi::pe_get_text(ui::ffi::PE_KEY).trim().to_string();
 
     let name = label.clone(); // for the announcement (cfg takes ownership of label)
+    // Audio input is niche and inferred from the model id (no separate control):
+    // OpenAI gpt-audio/*-audio-* and Gemini (all chat models) accept audio;
+    // Anthropic/Ollama/Groq/xAI do not.
+    let supports_audio = kind != AdapterKind::Anthropic && infer_audio(&model);
     let cfg = ProviderConfig {
         id,
         label,
@@ -448,6 +452,7 @@ pub fn edit_dialog_ok() -> bool {
         model,
         max_tokens,
         supports_images: vision,
+        supports_audio,
     };
 
     let result = if is_new {
@@ -526,6 +531,14 @@ fn infer_vision(model: &str) -> bool {
         "minicpm-v",
     ];
     HINTS.iter().any(|h| m.contains(h))
+}
+
+/// Guess whether a model accepts audio INPUT from its id — audio is rare, so a
+/// small heuristic beats a dedicated control: OpenAI's `*-audio-*`/`gpt-audio`
+/// and all Gemini chat models accept audio; everything else does not.
+fn infer_audio(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("audio") || m.contains("gemini")
 }
 
 /// A provider id derived from `base`, uniquified against the existing ids.

@@ -37,6 +37,12 @@ pub enum ResultBlock {
         media_type: String,
         data_base64: String,
     },
+    /// Audio an audio-capable model can hear, e.g. a rendered clip. `format` is
+    /// the bare container name (e.g. "wav") for the OpenAI `input_audio` part.
+    Audio {
+        format: String,
+        data_base64: String,
+    },
 }
 
 /// A single content block within a message (mirrors the Anthropic content model).
@@ -188,6 +194,7 @@ pub fn build_provider(cfg: &registry::ProviderConfig) -> Box<dyn LlmProvider> {
                 cfg.base_url.clone().unwrap_or_default(),
                 registry::key_for(&cfg.id),
                 cfg.supports_images,
+                cfg.supports_audio,
             ))
         }
     }

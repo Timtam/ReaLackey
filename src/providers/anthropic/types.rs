@@ -96,6 +96,12 @@ fn result_block_to_json(b: &ResultBlock) -> Value {
                 "data": data_base64,
             }
         }),
+        // The Anthropic Messages API has no audio input (Claude accounts report
+        // supports_audio=false, so listen_to_audio isn't offered); degrade to text
+        // defensively in case an audio block reaches here after a provider switch.
+        ResultBlock::Audio { .. } => {
+            json!({ "type": "text", "text": "[audio omitted: this model has no audio input]" })
+        }
     }
 }
 

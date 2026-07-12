@@ -35,10 +35,17 @@ pub struct OpenAiCompatProvider {
     api_key: Option<String>,
     /// Whether the configured model accepts image input (per-account, per-model).
     supports_images: bool,
+    /// Whether the configured model accepts audio input (per-account, per-model).
+    supports_audio: bool,
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>, supports_images: bool) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        supports_images: bool,
+        supports_audio: bool,
+    ) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let client = reqwest::Client::builder()
             .build()
@@ -48,6 +55,7 @@ impl OpenAiCompatProvider {
             base_url,
             api_key,
             supports_images,
+            supports_audio,
         }
     }
 
@@ -63,11 +71,11 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Vision is per-model: the account config decides (image tool results are
-        // bridged into a following user message — see build_messages).
+        // Vision/audio are per-model: the account config decides (image + audio
+        // tool results are bridged into a following user message — see build_messages).
         Capabilities {
             supports_images: self.supports_images,
-            supports_audio: false,
+            supports_audio: self.supports_audio,
         }
     }
 
@@ -77,7 +85,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tx: Sender<ChatEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ProviderError> {
-        let body = build_body(&req, self.supports_images);
+        let body = build_body(&req, self.supports_images, self.supports_audio);
 
         let mut builder = self
             .client
@@ -218,12 +226,12 @@ fn map_finish(reason: &str) -> StopReason {
 
 // ---- request building (neutral ChatRequest -> OpenAI body) -------------------
 
-fn build_body(req: &ChatRequest, vision: bool) -> Value {
+fn build_body(req: &ChatRequest, vision: bool, audio: bool) -> Value {
     let mut body = json!({
         "model": req.model,
         "max_tokens": req.max_tokens,
         "stream": true,
-        "messages": build_messages(req, vision),
+        "messages": build_messages(req, vision, audio),
     });
     if !req.tools.is_empty() {
         body["tools"] = json!(req
@@ -245,9 +253,10 @@ fn build_body(req: &ChatRequest, vision: bool) -> Value {
 /// Flatten our messages into OpenAI's role model. A single neutral message can
 /// expand to several: assistant tool calls become one assistant message with
 /// `tool_calls`; each tool result becomes its own `role:"tool"` message. Because
-/// tool messages are text-only, any image in a tool result is bridged (when
-/// `vision`) into a trailing `role:"user"` message with `image_url` parts.
-fn build_messages(req: &ChatRequest, vision: bool) -> Vec<Value> {
+/// tool messages are text-only, any image (when `vision`) or audio (when `audio`)
+/// in a tool result is bridged into a trailing `role:"user"` message with
+/// `image_url` / `input_audio` parts.
+fn build_messages(req: &ChatRequest, vision: bool, audio: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     if let Some(system) = &req.system {
         out.push(json!({ "role": "system", "content": system }));
@@ -256,11 +265,11 @@ fn build_messages(req: &ChatRequest, vision: bool) -> Vec<Value> {
         match m.role {
             Role::User => {
                 let mut text = String::new();
-                // Images pulled out of tool results, to append AFTER all the tool
-                // replies for this turn (OpenAI requires the tool messages to
+                // Image/audio pulled out of tool results, to append AFTER all the
+                // tool replies for this turn (OpenAI requires the tool messages to
                 // directly answer the assistant's tool_calls; a following user
-                // message carrying the pixels is then valid).
-                let mut image_parts: Vec<Value> = Vec::new();
+                // message carrying the media is then valid).
+                let mut media_parts: Vec<Value> = Vec::new();
                 for c in &m.content {
                     match c {
                         Content::Text(t) => {
@@ -279,22 +288,33 @@ fn build_messages(req: &ChatRequest, vision: bool) -> Vec<Value> {
                             out.push(json!({
                                 "role": "tool",
                                 "tool_call_id": tool_use_id,
-                                "content": result_blocks_to_text(content, vision),
+                                "content": result_blocks_to_text(content, vision, audio),
                             }));
-                            if vision {
-                                for b in content {
-                                    if let ResultBlock::Image {
+                            for b in content {
+                                match b {
+                                    ResultBlock::Image {
                                         media_type,
                                         data_base64,
-                                    } = b
-                                    {
-                                        image_parts.push(json!({
+                                    } if vision => {
+                                        media_parts.push(json!({
                                             "type": "image_url",
                                             "image_url": {
                                                 "url": format!("data:{media_type};base64,{data_base64}")
                                             }
                                         }));
                                     }
+                                    // Audio uses a bare base64 `data` + `format`,
+                                    // NOT a data: URI (unlike images).
+                                    ResultBlock::Audio {
+                                        format,
+                                        data_base64,
+                                    } if audio => {
+                                        media_parts.push(json!({
+                                            "type": "input_audio",
+                                            "input_audio": { "data": data_base64, "format": format }
+                                        }));
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -304,12 +324,12 @@ fn build_messages(req: &ChatRequest, vision: bool) -> Vec<Value> {
                 if !text.is_empty() {
                     out.push(json!({ "role": "user", "content": text }));
                 }
-                if !image_parts.is_empty() {
+                if !media_parts.is_empty() {
                     let mut parts = vec![json!({
                         "type": "text",
-                        "text": "Image(s) returned by the tool call(s) above:"
+                        "text": "Media returned by the tool call(s) above:"
                     })];
-                    parts.extend(image_parts);
+                    parts.extend(media_parts);
                     out.push(json!({ "role": "user", "content": parts }));
                 }
             }
@@ -350,9 +370,9 @@ fn build_messages(req: &ChatRequest, vision: bool) -> Vec<Value> {
 }
 
 /// OpenAI tool-result content is a plain string. Join text blocks; replace any
-/// image block with a textual note. When `vision` is on the image is delivered
-/// in a following user message (see build_messages); otherwise it's dropped.
-fn result_blocks_to_text(blocks: &[ResultBlock], vision: bool) -> String {
+/// image/audio block with a textual note. When the capability is on the media is
+/// delivered in a following user message (see build_messages); else it's dropped.
+fn result_blocks_to_text(blocks: &[ResultBlock], vision: bool, audio: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     for b in blocks {
         match b {
@@ -362,6 +382,13 @@ fn result_blocks_to_text(blocks: &[ResultBlock], vision: bool) -> String {
                     "[image provided in the following message]".into()
                 } else {
                     "[image omitted: this model has no vision]".into()
+                },
+            ),
+            ResultBlock::Audio { .. } => parts.push(
+                if audio {
+                    "[audio provided in the following message]".into()
+                } else {
+                    "[audio omitted: this model has no audio input]".into()
                 },
             ),
         }
@@ -489,7 +516,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             }],
         };
-        let body = build_body(&req, false);
+        let body = build_body(&req, false, false);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["role"], "user");
@@ -544,7 +571,7 @@ mod tests {
 
     #[test]
     fn image_tool_result_bridges_to_a_following_user_message() {
-        let body = build_body(&image_tool_req(), true);
+        let body = build_body(&image_tool_req(), true, false);
         let msgs = body["messages"].as_array().unwrap();
         // assistant tool call, then the (text-only) tool reply, then a user
         // message carrying the image as an image_url data-URI part.
@@ -563,12 +590,60 @@ mod tests {
 
     #[test]
     fn image_tool_result_dropped_when_vision_off() {
-        let body = build_body(&image_tool_req(), false);
+        let body = build_body(&image_tool_req(), false, false);
         let msgs = body["messages"].as_array().unwrap();
         // No trailing user image message; the tool reply notes the omission.
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[1]["role"], "tool");
         assert!(msgs[1]["content"].as_str().unwrap().contains("omitted"));
+    }
+
+    #[test]
+    fn audio_tool_result_bridges_to_input_audio_part() {
+        let req = ChatRequest {
+            model: "gpt-audio".into(),
+            system: None,
+            max_tokens: 100,
+            messages: vec![
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: "call_1".into(),
+                        name: "listen_to_audio".into(),
+                        input: json!({}),
+                    }],
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: vec![Content::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: vec![
+                            ResultBlock::Text("rendered 5 s".into()),
+                            ResultBlock::Audio {
+                                format: "wav".into(),
+                                data_base64: "QQQQ".into(),
+                            },
+                        ],
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![],
+        };
+        let body = build_body(&req, false, true);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[1]["role"], "tool");
+        assert!(msgs[1]["content"].is_string()); // tool content stays text
+        let parts = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(parts[1]["type"], "input_audio");
+        assert_eq!(parts[1]["input_audio"]["data"], "QQQQ");
+        assert_eq!(parts[1]["input_audio"]["format"], "wav");
+        assert_eq!(msgs.len(), 3);
+        // With audio off, the clip is dropped and the omission noted.
+        let off = build_body(&req, false, false);
+        let m = off["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 2);
+        assert!(m[1]["content"].as_str().unwrap().contains("omitted"));
     }
 
     #[test]

@@ -87,6 +87,10 @@ pub fn system_prompt() -> String {
      context, and use set_project_memory to record decisions, TODOs, and \
      progress as you work. You can also read/append the project's Notes and \
      per-track notes. \
+     If your model can HEAR audio, you can LISTEN to a short rendered clip of the \
+     processed master or a track (listen_to_audio) to judge tone, balance, noise \
+     and artifacts directly — use it only when hearing genuinely helps, and (like \
+     screenshots) each listen asks the user for consent. \
      For plugin GUIs a screen reader cannot read (custom-drawn interfaces, meters, \
      waveforms), you can SEE them with capture_view (each capture asks the user for \
      consent). To look at a SPECIFIC plugin the user hasn't focused (e.g. one you \

@@ -48,6 +48,13 @@ pub struct CapturedImage {
     pub data_base64: String,
 }
 
+/// An audio clip produced by a tool, returned to an audio-capable model so it can
+/// hear the actual sound. `format` is the bare container name (e.g. "wav").
+pub struct CapturedAudio {
+    pub format: String,
+    pub data_base64: String,
+}
+
 /// The result of running a tool.
 pub struct ToolOutcome {
     /// JSON (or plain text) summary fed back to the model as the tool result.
@@ -55,15 +62,18 @@ pub struct ToolOutcome {
     pub is_error: bool,
     /// An optional image attached to the tool result (vision tools only).
     pub image: Option<CapturedImage>,
+    /// An optional audio clip attached to the tool result (audio tools only).
+    pub audio: Option<CapturedAudio>,
 }
 
 impl ToolOutcome {
-    /// A text result (no image).
+    /// A text result (no media).
     pub fn text(content: impl Into<String>, is_error: bool) -> Self {
         Self {
             content: content.into(),
             is_error,
             image: None,
+            audio: None,
         }
     }
 
@@ -83,6 +93,17 @@ impl ToolOutcome {
             content: content.into(),
             is_error: false,
             image: Some(image),
+            audio: None,
+        }
+    }
+
+    /// A successful result carrying an audio clip for the model to hear.
+    pub fn with_audio(content: impl Into<String>, audio: CapturedAudio) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            image: None,
+            audio: Some(audio),
         }
     }
 }
@@ -93,9 +114,15 @@ fn is_vision_tool(name: &str) -> bool {
     name == "capture_view" || is_pixel_tool(name) || name == "disable_pixel_control"
 }
 
-/// Tool definitions advertised to the model. Vision/pixel tools are only
-/// included when the active model can actually see images.
-pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
+/// A tool that only makes sense when the model can hear audio. Withheld from
+/// models without audio input (`supports_audio == false`).
+fn is_audio_tool(name: &str) -> bool {
+    name == "listen_to_audio"
+}
+
+/// Tool definitions advertised to the model. Vision/pixel tools are only included
+/// when the model can see images; the audio tool only when it can hear.
+pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> {
     let obj = |props: Value, required: Value| json!({ "type": "object", "properties": props, "required": required });
     let empty = || json!({ "type": "object", "properties": {} });
     let mut defs = vec![
@@ -1121,6 +1148,28 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
         ),
     });
     defs.push(ToolDef {
+        name: "listen_to_audio".into(),
+        description: "LISTEN to the processed audio: briefly renders the master mix or a track's \
+                      post-FX output to a short clip and returns it as audio for you to HEAR, so you \
+                      can judge tone, balance, artifacts, noise, timing — things the numeric DSP \
+                      metrics don't convey. Only call this when actually hearing the sound helps; it \
+                      needs the user's consent (the clip is sent to the AI provider). target \
+                      'master' = full mix; 'track' (with track_index) = one track's processed \
+                      output. Optional start/length seconds (else the time selection, else the \
+                      start; capped at 20 s to keep the clip small). For numbers (loudness, peak, \
+                      spectrum) use analyze_processed_audio / measure_loudness instead."
+            .into(),
+        input_schema: obj(
+            json!({
+                "target": { "type": "string", "enum": ["master", "track"], "description": "'master' = full mix, 'track' = one track's processed output" },
+                "track_index": { "type": "integer", "description": "0-based track index (required when target is 'track')" },
+                "start": { "type": "number", "description": "start in seconds (default: time selection or 0)" },
+                "length": { "type": "number", "description": "seconds to render (default: content/selection, capped at 20 s)" }
+            }),
+            json!(["target"]),
+        ),
+    });
+    defs.push(ToolDef {
         name: "measure_loudness".into(),
         description: "Measure professional loudness of the PROCESSED output: briefly renders the mix \
                       offline through the FX chain, then measures it with BS.1770 DSP. Returns \
@@ -1145,6 +1194,9 @@ pub fn definitions(supports_images: bool) -> Vec<ToolDef> {
     if !supports_images {
         defs.retain(|d| !is_vision_tool(&d.name));
     }
+    if !supports_audio {
+        defs.retain(|d| !is_audio_tool(&d.name));
+    }
     defs
 }
 
@@ -1154,7 +1206,7 @@ mod definition_tests {
     fn processed_render_tool_advertised() {
         // Guards against a regression where the post-FX render tool is silently
         // dropped from the advertised set.
-        let defs = super::definitions(true);
+        let defs = super::definitions(true, false);
         assert!(
             defs.iter().any(|d| d.name == "analyze_processed_audio"),
             "analyze_processed_audio must be advertised"
@@ -1163,24 +1215,44 @@ mod definition_tests {
 
     #[test]
     fn loudness_probe_advertised_regardless_of_vision() {
-        // measure_loudness (the Phase-6a JSFX probe) is not a vision tool, so it
-        // must be offered whether or not the model supports images.
+        // measure_loudness is not a vision tool, so it must be offered whether or
+        // not the model supports images.
         for supports_images in [true, false] {
-            let defs = super::definitions(supports_images);
+            let defs = super::definitions(supports_images, false);
             assert!(
                 defs.iter().any(|d| d.name == "measure_loudness"),
                 "measure_loudness must be advertised (supports_images={supports_images})"
             );
         }
     }
+
+    #[test]
+    fn listen_tool_gated_on_audio() {
+        // listen_to_audio only appears when the model can hear.
+        assert!(
+            !super::definitions(true, false)
+                .iter()
+                .any(|d| d.name == "listen_to_audio"),
+            "listen_to_audio must be withheld without audio support"
+        );
+        assert!(
+            super::definitions(false, true)
+                .iter()
+                .any(|d| d.name == "listen_to_audio"),
+            "listen_to_audio must be advertised with audio support"
+        );
+    }
 }
 
 /// Execute a tool by name on the main thread. Never panics.
 pub fn execute(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> ToolOutcome {
-    // Vision tools return an image alongside their text, so they bypass the
+    // Vision/audio tools return media alongside their text, so they bypass the
     // plain `dispatch` (which only yields JSON) and build their own outcome.
     if name == "capture_view" {
         return capture_view(reaper, input);
+    }
+    if name == "listen_to_audio" {
+        return listen_to_audio(reaper, input);
     }
     match dispatch(reaper, name, input) {
         Ok(v) => ToolOutcome::ok(v.to_string()),
@@ -1842,6 +1914,15 @@ pub fn consent_prompt(name: &str, input: &Value) -> Option<String> {
             Some(format!(
                 "The assistant wants to take a screenshot of {what}"
             ))
+        }
+        // Rendering a clip and sending it to the cloud provider is the same class
+        // of data-protection concern as a screenshot — always consent-gated.
+        "listen_to_audio" => {
+            let what = match input.get("target").and_then(|v| v.as_str()) {
+                Some("track") => "a track's processed audio",
+                _ => "the processed master audio",
+            };
+            Some(format!("The assistant wants to render and listen to {what}"))
         }
         _ => None,
     }
@@ -4962,33 +5043,33 @@ fn analyze_processed_audio(
     ))
 }
 
-// ---- loudness of the processed output (offline render + BS.1770 DSP) --------
+// ---- processed master/track clip: offline render + decode (shared) ----------
 
-/// Measure professional loudness (integrated LUFS, LRA, true-peak, momentary /
-/// short-term maxima) of the PROCESSED output: briefly render the master mix or a
-/// track's processed output through its FX chain to a temp WAV, then measure the
-/// rendered audio with our own BS.1770 DSP. All render/selection changes and the
-/// temp file are reverted by a Drop guard on every path.
-fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
-    let target = req_str(input, "target")?;
-    let track_index = opt_u32(input, "track_index");
-    let (track, is_master) = match target {
-        "master" => (reaper.get_master_track(ProjectContext::CurrentProject), true),
-        "track" => {
-            let ti =
-                track_index.ok_or_else(|| "target 'track' requires track_index".to_string())?;
-            (track_at(reaper, ti)?, false)
-        }
-        other => {
-            return Err(format!("unknown target '{other}' (use 'master' or 'track')"));
-        }
-    };
+/// A decoded processed-output clip from an offline render.
+struct RenderedClip {
+    samples: Vec<f64>,
+    channels: usize,
+    sample_rate: f64,
+    rstart: f64,
+    rlen: f64,
+    truncated: bool,
+}
+
+/// Render the processed master mix (`select_track` = None) or a track's post-FX
+/// output (`Some(track)`) over a window to a temp WAV and decode it. Window:
+/// explicit range, else the time selection, else project content, capped at
+/// `cap_seconds`. All render/selection changes + the temp file are reverted by a
+/// Drop guard on every path. Shared by `measure_loudness` and `listen_to_audio`.
+fn render_master_or_track(
+    reaper: &Reaper<MainThreadScope>,
+    select_track: Option<MediaTrack>,
+    param_start: Option<f64>,
+    param_length: Option<f64>,
+    cap_seconds: f64,
+) -> Result<RenderedClip, String> {
+    let is_master = select_track.is_none();
     let low = reaper.low();
 
-    // Window: explicit range, else the time selection, else project content,
-    // capped at the analysis limit.
-    let param_start = input.get("start").and_then(|v| v.as_f64());
-    let param_length = input.get("length").and_then(|v| v.as_f64());
     let (mut sel_start, mut sel_end) = (0.0f64, 0.0f64);
     unsafe { low.GetSet_LoopTimeRange(false, false, &mut sel_start, &mut sel_end, false) };
     let has_selection = sel_end > sel_start;
@@ -5014,15 +5095,15 @@ fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<V
         }
     };
     let requested_len = param_length.unwrap_or(default_len);
-    let rlen = requested_len.clamp(0.0, MAX_ANALYZE_SECONDS);
+    let rlen = requested_len.clamp(0.0, cap_seconds);
     if !start.is_finite() || !rlen.is_finite() || rlen <= 0.0 {
-        return Err("invalid or empty measurement window".to_string());
+        return Err("invalid or empty render window".to_string());
     }
-    let truncated = requested_len.is_finite() && requested_len > MAX_ANALYZE_SECONDS;
+    let truncated = requested_len.is_finite() && requested_len > cap_seconds;
     let (rstart, rend) = (start, start + rlen);
 
     // Snapshot render state (+ track selection for a track target) BEFORE mutating.
-    let track_selection = (!is_master).then(|| {
+    let track_selection = select_track.map(|_| {
         let master = unsafe { low.GetMasterTrack(CUR_PROJ) };
         let master_selected = !master.is_null()
             && unsafe { low.GetMediaTrackInfo_Value(master, c"I_SELECTED".as_ptr()) } != 0.0;
@@ -5040,13 +5121,8 @@ fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<V
         path: None,
     };
 
-    // Configure + run the offline render of the processed output, then measure the
-    // rendered audio with our own BS.1770 DSP. (An earlier design inserted REAPER's
-    // loudness_meter JSFX and read its params, but an offline render does not update
-    // a live FX instance's sliders — it processes a discarded copy — so the meter
-    // read came back as silence. DSP on the rendered file is the reliable path.)
     let tmp_dir = std::env::temp_dir().to_string_lossy().to_string();
-    let base = format!("raai_loudness_probe_{}", std::process::id());
+    let base = format!("raai_clip_probe_{}", std::process::id());
     proj_info_str_set(low, c"RENDER_FORMAT", "ZXZhdyAAAQ==");
     proj_info_set(low, c"RENDER_SETTINGS", if is_master { 0.0 } else { 128.0 });
     proj_info_set(low, c"RENDER_BOUNDSFLAG", 0.0);
@@ -5060,8 +5136,8 @@ fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<V
     proj_info_set(low, c"RENDER_DITHER", 0.0);
     proj_info_str_set(low, c"RENDER_FILE", &tmp_dir);
     proj_info_str_set(low, c"RENDER_PATTERN", &base);
-    if !is_master {
-        unsafe { low.SetOnlyTrackSelected(track.as_ptr()) };
+    if let Some(t) = select_track {
+        unsafe { low.SetOnlyTrackSelected(t.as_ptr()) };
     }
     let path = proj_info_str_get(low, c"RENDER_TARGETS")
         .split(';')
@@ -5080,16 +5156,61 @@ fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<V
     // `?` here drops `guard`, which restores settings/selection and deletes the file.
     let bytes =
         std::fs::read(&path).map_err(|e| format!("could not read the rendered file: {e}"))?;
-    let (samples, channels, sr) = crate::dsp::parse_wav(&bytes)?;
-    let f = crate::dsp::analyze(&samples, channels, sr);
+    let (samples, channels, sample_rate) = crate::dsp::parse_wav(&bytes)?;
+    Ok(RenderedClip {
+        samples,
+        channels,
+        sample_rate,
+        rstart,
+        rlen,
+        truncated,
+    })
+    // Drop guard here: restore render settings/selection, delete temp file.
+}
+
+/// Resolve a master/track target to the render's `select_track` (None = master).
+fn master_or_track_select(
+    reaper: &Reaper<MainThreadScope>,
+    target: &str,
+    track_index: Option<u32>,
+) -> Result<Option<MediaTrack>, String> {
+    match target {
+        "master" => Ok(None),
+        "track" => {
+            let ti = track_index.ok_or_else(|| "target 'track' requires track_index".to_string())?;
+            Ok(Some(track_at(reaper, ti)?))
+        }
+        other => Err(format!("unknown target '{other}' (use 'master' or 'track')")),
+    }
+}
+
+// ---- loudness of the processed output (offline render + BS.1770 DSP) --------
+
+/// Measure professional loudness (integrated LUFS, LRA, true-peak, momentary /
+/// short-term maxima) of the PROCESSED output via an offline render + our BS.1770
+/// DSP. (An earlier design inserted REAPER's loudness_meter JSFX and read its
+/// params, but an offline render processes a discarded copy of the chain, so a
+/// live FX instance's sliders are never updated — the meter read back silence.)
+fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
+    let target = req_str(input, "target")?;
+    let track_index = opt_u32(input, "track_index");
+    let select = master_or_track_select(reaper, target, track_index)?;
+    let clip = render_master_or_track(
+        reaper,
+        select,
+        input.get("start").and_then(|v| v.as_f64()),
+        input.get("length").and_then(|v| v.as_f64()),
+        MAX_ANALYZE_SECONDS,
+    )?;
+    let f = crate::dsp::analyze(&clip.samples, clip.channels, clip.sample_rate);
 
     Ok(json!({
         "target": target,
         "track_index": track_index,
-        "chain": if is_master { "full mix including master FX" } else { "track FX + master FX" },
-        "measurement_start": rstart,
-        "measurement_length": rlen,
-        "truncated": truncated,
+        "chain": if select.is_none() { "full mix including master FX" } else { "track FX + master FX" },
+        "measurement_start": clip.rstart,
+        "measurement_length": clip.rlen,
+        "truncated": clip.truncated,
         "source": "offline render + BS.1770 DSP",
         "loudness": {
             "integrated_lufs": f.integrated_lufs,
@@ -5102,7 +5223,52 @@ fn measure_loudness(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<V
             "clipping": f.clipping,
         }
     }))
-    // Drop guard here: restore render settings/selection, delete temp file.
+}
+
+/// Render a short processed-audio clip and return it to an audio-capable model to
+/// HEAR (Phase 6, direct listening). Capped at 20 s; encoded as PCM16 WAV. Consent
+/// is enforced by the worker before this runs (the clip is uploaded to the cloud).
+fn listen_to_audio(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome {
+    use base64::Engine as _;
+    const LISTEN_MAX_SECONDS: f64 = 20.0;
+
+    let target = match req_str(input, "target") {
+        Ok(t) => t,
+        Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+    };
+    let track_index = opt_u32(input, "track_index");
+    let select = match master_or_track_select(reaper, target, track_index) {
+        Ok(s) => s,
+        Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+    };
+    let clip = match render_master_or_track(
+        reaper,
+        select,
+        input.get("start").and_then(|v| v.as_f64()),
+        input.get("length").and_then(|v| v.as_f64()),
+        LISTEN_MAX_SECONDS,
+    ) {
+        Ok(c) => c,
+        Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+    };
+
+    let wav = crate::dsp::encode_pcm16_wav(&clip.samples, clip.channels, clip.sample_rate);
+    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&wav);
+    let summary = json!({
+        "target": target,
+        "track_index": track_index,
+        "rendered_seconds": (clip.rlen * 100.0).round() / 100.0,
+        "truncated": clip.truncated,
+        "note": "A short audio clip is attached for you to listen to.",
+    })
+    .to_string();
+    ToolOutcome::with_audio(
+        summary,
+        CapturedAudio {
+            format: "wav".into(),
+            data_base64,
+        },
+    )
 }
 
 // ---- helpers ----------------------------------------------------------------

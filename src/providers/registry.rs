@@ -47,6 +47,11 @@ pub struct ProviderConfig {
     /// only consulted for OpenAI-compatible accounts (see `build_provider`).
     #[serde(default)]
     pub supports_images: bool,
+    /// Whether the chosen model accepts audio input ("listening"). Per-MODEL and
+    /// rare (OpenAI gpt-audio, Gemini, OpenRouter audio models); false for
+    /// Anthropic/Ollama/Groq/xAI. Gates the `listen_to_audio` tool.
+    #[serde(default)]
+    pub supports_audio: bool,
 }
 
 impl ProviderConfig {
@@ -276,6 +281,7 @@ fn load_or_seed() -> Store {
             model: default_anthropic_model(),
             max_tokens: 8192,
             supports_images: true,
+            supports_audio: false,
         }],
     };
     let _ = save(&store);
