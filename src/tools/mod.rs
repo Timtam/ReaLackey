@@ -1439,6 +1439,31 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             json!(["track_index", "envelope_index"]),
         ),
     });
+    defs.push(ToolDef {
+        name: "create_send_envelope".into(),
+        description: "Create the automation envelope for a track SEND or RECEIVE (send volume, pan, \
+                      or mute) so it can then be automated with the envelope point tools. \
+                      category: 'send' (default) reads (track_index, send_index) as a send on the \
+                      SOURCE track; 'receive' reads them as a receive on the DESTINATION track — \
+                      both address the same routing. kind: volume, pan, or mute. If the envelope \
+                      already exists it is returned unchanged. IMPORTANT: to add points afterwards, \
+                      use the RETURNED envelope_track_index + envelope_index with \
+                      insert_envelope_point / set_envelope_point — the envelope is owned by the \
+                      source track, which may differ from the index you passed. REAPER has no \
+                      dedicated API for this, so it is done by a validated edit of the destination \
+                      track's state chunk and FAILS SAFE (makes no change) if it cannot confirm the \
+                      envelope materialised. CHANGES the project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "track_index": { "type": "integer" },
+                "send_index": { "type": "integer" },
+                "kind": { "type": "string", "enum": ["volume", "pan", "mute"] },
+                "category": { "type": "string", "enum": ["send", "receive"] }
+            }),
+            json!(["track_index", "send_index", "kind"]),
+        ),
+    });
     if !supports_images {
         defs.retain(|d| !is_vision_tool(&d.name));
     }
@@ -1507,6 +1532,7 @@ mod definition_tests {
         for name in [
             "create_fx_envelope",
             "create_track_envelope",
+            "create_send_envelope",
             "set_envelope_point",
             "delete_envelope_point",
             "clear_envelope",
@@ -2011,6 +2037,13 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "track_index")?,
             req_u32(input, "envelope_index")?,
         ),
+        "create_send_envelope" => create_send_envelope(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "send_index")?,
+            req_str(input, "kind")?,
+            opt_str(input, "category").unwrap_or("send"),
+        ),
         // transport / timeline / global settings
         "get_transport" => Ok(get_transport(reaper)),
         "transport" => transport(reaper, req_str(input, "action")?),
@@ -2462,6 +2495,13 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         "clear_envelope" => Some(format!(
             "Clear all points from envelope {} on track {}",
             show("envelope_index"),
+            show("track_index"),
+        )),
+        "create_send_envelope" => Some(format!(
+            "Create the {} envelope for {} {} on track {}",
+            show("kind"),
+            opt_str(input, "category").unwrap_or("send"),
+            show("send_index"),
             show("track_index"),
         )),
         "remove_fx" => Some(format!(
@@ -4583,6 +4623,372 @@ fn clear_envelope(
         UndoScope::All,
     );
     Ok(json!({ "cleared": ok, "track_index": track_index, "envelope_index": envelope_index }))
+}
+
+/// Line indices of every top-level `AUXRECV` (a receive) in a single track's
+/// state chunk. "Top-level" = a direct child of the outer `<TRACK` block (nesting
+/// depth 1), so `AUXRECV`-like tokens buried inside FX/item sub-blocks can't match.
+/// A line whose trimmed form starts with `<` opens a nested block; one starting
+/// with `>` closes it.
+fn top_level_auxrecv_lines(lines: &[&str]) -> Vec<usize> {
+    let mut depth: i32 = 0;
+    let mut out = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        let t = raw.trim_start();
+        if t.starts_with('>') {
+            depth -= 1;
+        } else if t.starts_with('<') {
+            depth += 1;
+        } else if depth == 1 && t.split_whitespace().next() == Some("AUXRECV") {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Whether a send-envelope block with `block_tag` already exists in the sibling
+/// run that follows the `AUXRECV` line at `target` (its volume/pan/mute envelopes
+/// live as `<AUX*ENV>` blocks right after it). Stops at the next receive or at the
+/// first non-envelope sub-block (`<FXCHAIN`, `<ITEM`, …) that ends the routing header.
+fn send_env_present_after(lines: &[&str], target: usize, block_tag: &str) -> bool {
+    const AUX: [&str; 3] = ["<AUXVOLENV", "<AUXPANENV", "<AUXMUTEENV"];
+    let mut depth: i32 = 1; // we start just after the AUXRECV token, inside <TRACK
+    let mut i = target + 1;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        if t.starts_with('>') {
+            depth -= 1;
+            if depth < 1 {
+                break; // left the <TRACK block
+            }
+        } else if t.starts_with('<') {
+            if depth == 1 {
+                let tag = t.split_whitespace().next().unwrap_or("");
+                if tag == block_tag {
+                    return true;
+                }
+                if !AUX.contains(&tag) {
+                    break; // reached FXCHAIN/ITEM/etc — routing header is over
+                }
+            }
+            depth += 1;
+        } else if depth == 1 && t.split_whitespace().next() == Some("AUXRECV") {
+            break; // reached the next receive
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Create a send/receive automation envelope (send volume/pan/mute).
+///
+/// REAPER exposes no create API for these (unlike `GetFXEnvelope`), so the only
+/// mechanism is to splice an `<AUX*ENV>` block into the DESTINATION track's state
+/// chunk after the relevant `AUXRECV` line. Every reviewer-flagged risk is guarded:
+/// the target `AUXRECV` is found by depth-aware parsing confined to the routing
+/// header; the receive-count is cross-checked against the API; duplicates are
+/// prevented by scanning the chunk (not by the P_ENV read, which may be wrong);
+/// bracket balance is validated before applying; and success is gated on RE-READING
+/// the chunk to confirm REAPER kept the block — if the tag is wrong REAPER silently
+/// drops it, we detect the absence and report a hard error, leaving the track
+/// effectively unchanged. `P_ENV` is used only to resolve the live pointer for the
+/// returned index and is never load-bearing for correctness.
+fn create_send_envelope(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    send_index: u32,
+    kind: &str,
+    category: &str,
+) -> Result<Value, String> {
+    // (read parmname, chunk block tag, seeded inner lines). ARM 0 matches REAPER's
+    // own default so a fresh envelope isn't overwritten under write-automation. One
+    // neutral point (1/0/1 = unity gain / centre / audible) guarantees REAPER keeps
+    // and enumerates the envelope on round-trip.
+    let (read_parm, block_tag, inner): (&str, &str, &[&str]) = match kind {
+        "volume" => (
+            "P_ENV:<VOLENV",
+            "<AUXVOLENV",
+            &[
+                "ACT 1 -1",
+                "VIS 1 1 1",
+                "LANEHEIGHT 0 0",
+                "ARM 0",
+                "DEFSHAPE 0 -1 -1",
+                "VOLTYPE 1",
+                "PT 0 1 0",
+            ],
+        ),
+        "pan" => (
+            "P_ENV:<PANENV",
+            "<AUXPANENV",
+            &[
+                "ACT 1 -1",
+                "VIS 1 1 1",
+                "LANEHEIGHT 0 0",
+                "ARM 0",
+                "DEFSHAPE 0 -1 -1",
+                "PT 0 0 0",
+            ],
+        ),
+        "mute" => (
+            "P_ENV:<MUTEENV",
+            "<AUXMUTEENV",
+            &[
+                "ACT 1 -1",
+                "VIS 1 1 1",
+                "LANEHEIGHT 0 0",
+                "ARM 0",
+                "DEFSHAPE 1 -1 -1",
+                "PT 0 1 1",
+            ],
+        ),
+        other => {
+            return Err(format!(
+                "unknown envelope kind '{other}' (use volume, pan, or mute)"
+            ))
+        }
+    };
+
+    let project = ProjectContext::CurrentProject;
+    let low = reaper.low();
+    let idx_map = track_index_map(reaper);
+
+    // Normalise the request to (source track A, destination track B, receive index
+    // j on B). The chunk edit is always on B; the envelope ends up owned by A.
+    let (src, dest, recv_index) = match category {
+        "send" => {
+            let a = reaper
+                .get_track(project, track_index)
+                .ok_or_else(|| format!("no track at index {track_index}"))?;
+            let n = unsafe { reaper.get_track_num_sends(a, TrackSendCategory::Send) };
+            if send_index >= n {
+                return Err(format!(
+                    "track {track_index} has no send #{send_index} (it has {n})"
+                ));
+            }
+            let b = unsafe {
+                reaper.get_track_send_info_desttrack(a, TrackSendDirection::Send, send_index)
+            }
+            .map_err(|_| {
+                "this send has no destination track (hardware-output sends are not supported)"
+                    .to_string()
+            })?;
+            // Rank of this send among A's sends that target B; the k-th A->B send
+            // corresponds to the k-th A->B receive (REAPER keeps them in order).
+            let mut k = 0u32;
+            for i2 in 0..send_index {
+                if let Ok(d) =
+                    unsafe { reaper.get_track_send_info_desttrack(a, TrackSendDirection::Send, i2) }
+                {
+                    if d == b {
+                        k += 1;
+                    }
+                }
+            }
+            let rn = unsafe { reaper.get_track_num_sends(b, TrackSendCategory::Receive) };
+            let mut seen = 0u32;
+            let mut found = None;
+            for r in 0..rn {
+                if let Ok(s) =
+                    unsafe { reaper.get_track_send_info_desttrack(b, TrackSendDirection::Receive, r) }
+                {
+                    if s == a {
+                        if seen == k {
+                            found = Some(r);
+                            break;
+                        }
+                        seen += 1;
+                    }
+                }
+            }
+            let j = found.ok_or_else(|| {
+                "could not map this send to a receive on the destination track".to_string()
+            })?;
+            (a, b, j)
+        }
+        "receive" => {
+            let b = reaper
+                .get_track(project, track_index)
+                .ok_or_else(|| format!("no track at index {track_index}"))?;
+            let n = unsafe { reaper.get_track_num_sends(b, TrackSendCategory::Receive) };
+            if send_index >= n {
+                return Err(format!(
+                    "track {track_index} has no receive #{send_index} (it has {n})"
+                ));
+            }
+            let a = unsafe {
+                reaper.get_track_send_info_desttrack(b, TrackSendDirection::Receive, send_index)
+            }
+            .map_err(|_| "this receive has no source track".to_string())?;
+            (a, b, send_index)
+        }
+        other => {
+            return Err(format!("unknown category '{other}' (use send or receive)"));
+        }
+    };
+
+    let src_index = idx_map.get(&src).copied();
+    let dest_index = idx_map.get(&dest).copied();
+    let parm_c = CString::new(read_parm).map_err(|_| "bad envelope parm".to_string())?;
+
+    // Resolve the live envelope pointer (best-effort; may be null if the P_ENV read
+    // string doesn't resolve send envelopes on this build — not relied on for safety).
+    let resolve_env = || -> *mut reaper_low::raw::TrackEnvelope {
+        unsafe {
+            low.GetSetTrackSendInfo(
+                dest.as_ptr(),
+                -1,
+                recv_index as c_int,
+                parm_c.as_ptr(),
+                std::ptr::null_mut(),
+            ) as *mut reaper_low::raw::TrackEnvelope
+        }
+    };
+    // The envelope is enumerated on whichever endpoint owns it — discover it by
+    // pointer identity rather than assuming the source, so the returned index is
+    // always usable by the point tools.
+    let owner_of = |env: *mut reaper_low::raw::TrackEnvelope| -> (Option<u32>, Option<u32>) {
+        if let Some(ix) = envelope_index_of(low, src, env) {
+            return (src_index, Some(ix));
+        }
+        if let Some(ix) = envelope_index_of(low, dest, env) {
+            return (dest_index, Some(ix));
+        }
+        (None, None)
+    };
+
+    let chunk = read_chunk(|b, s| unsafe { low.GetTrackStateChunk(dest.as_ptr(), b, s, false) })
+        .ok_or_else(|| "could not read the destination track's state chunk".to_string())?;
+    let lines: Vec<&str> = chunk.lines().collect();
+
+    // Cross-check the parsed receive count against the API before trusting the
+    // positional match — a mismatch means our parse is off; abort rather than risk
+    // editing the wrong routing.
+    let recvs = top_level_auxrecv_lines(&lines);
+    let api_recvs = unsafe { reaper.get_track_num_sends(dest, TrackSendCategory::Receive) };
+    if recvs.len() as u32 != api_recvs {
+        return Err(format!(
+            "destination track chunk parse mismatch ({} AUXRECV lines vs {api_recvs} receives); \
+             aborting to avoid corruption",
+            recvs.len()
+        ));
+    }
+    let target = *recvs.get(recv_index as usize).ok_or_else(|| {
+        format!("could not locate receive #{recv_index} in the destination track chunk")
+    })?;
+
+    // Idempotency: chunk-scan (independent of the P_ENV read) prevents a duplicate
+    // block if the envelope already exists.
+    if send_env_present_after(&lines, target, block_tag) {
+        let env = resolve_env();
+        let (owner_ti, env_ix) = owner_of(env);
+        return Ok(json!({
+            "created": false,
+            "already_existed": true,
+            "kind": kind,
+            "category": category,
+            "source_track_index": src_index,
+            "dest_track_index": dest_index,
+            "receive_index": recv_index,
+            "envelope_track_index": owner_ti,
+            "envelope_index": env_ix,
+        }));
+    }
+
+    let indent: String = lines[target]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+
+    // Splice the envelope block in immediately after the AUXRECV line.
+    let mut new_lines: Vec<String> = Vec::with_capacity(lines.len() + inner.len() + 2);
+    for (i, raw) in lines.iter().enumerate() {
+        new_lines.push((*raw).to_string());
+        if i == target {
+            new_lines.push(format!("{indent}{block_tag}"));
+            for l in inner {
+                new_lines.push(format!("{indent}  {l}"));
+            }
+            new_lines.push(format!("{indent}>"));
+        }
+    }
+
+    // Validate bracket balance of the spliced chunk before applying it.
+    let mut depth: i32 = 0;
+    for raw in &new_lines {
+        let t = raw.trim_start();
+        if t.starts_with('>') {
+            depth -= 1;
+            if depth < 0 {
+                return Err("internal error: chunk became unbalanced; aborting".into());
+            }
+        } else if t.starts_with('<') {
+            depth += 1;
+        }
+    }
+    if depth != 0 {
+        return Err("internal error: chunk not balanced after edit; aborting".into());
+    }
+
+    let mut new_chunk = new_lines.join("\n");
+    if chunk.ends_with('\n') {
+        new_chunk.push('\n');
+    }
+    let chunk_c =
+        CString::new(new_chunk).map_err(|_| "the edited chunk contains a NUL byte".to_string())?;
+
+    reaper.undo_begin_block_2(project);
+    let applied = unsafe { low.SetTrackStateChunk(dest.as_ptr(), chunk_c.as_ptr(), false) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: create send {kind} envelope"),
+        UndoScope::All,
+    );
+    low.TrackList_AdjustWindows(false);
+    reaper.update_arrange();
+    if !applied {
+        return Err("REAPER rejected the modified track chunk; no change was made".into());
+    }
+
+    // Success gate: re-read and confirm REAPER kept the block. If the tag is wrong,
+    // REAPER drops the unknown block on parse (leaving the rest of the track intact)
+    // and this scan fails — we report an error rather than a false success.
+    let verify =
+        read_chunk(|b, s| unsafe { low.GetTrackStateChunk(dest.as_ptr(), b, s, false) })
+            .ok_or_else(|| "could not re-read the destination chunk to verify".to_string())?;
+    let vlines: Vec<&str> = verify.lines().collect();
+    let vrecvs = top_level_auxrecv_lines(&vlines);
+    let kept = vrecvs
+        .get(recv_index as usize)
+        .is_some_and(|&vt| send_env_present_after(&vlines, vt, block_tag));
+    if !kept {
+        return Err(format!(
+            "applied the chunk but REAPER did not keep the {block_tag} block — the send-envelope \
+             chunk tag is likely different on this REAPER build, so no envelope was created (the \
+             destination track is otherwise unchanged). Create one send envelope manually once so \
+             its exact chunk format can be confirmed."
+        ));
+    }
+
+    let env = resolve_env();
+    let (owner_ti, env_ix) = owner_of(env);
+    let mut out = json!({
+        "created": true,
+        "kind": kind,
+        "category": category,
+        "source_track_index": src_index,
+        "dest_track_index": dest_index,
+        "receive_index": recv_index,
+        "envelope_track_index": owner_ti,
+        "envelope_index": env_ix,
+    });
+    if env_ix.is_none() {
+        out["note"] = json!(
+            "Envelope created, but its live index could not be resolved automatically; call \
+             get_track_envelopes on the source track to find it, then use the point tools."
+        );
+    }
+    Ok(out)
 }
 
 fn get_tempo_markers(reaper: &Reaper<MainThreadScope>) -> Value {

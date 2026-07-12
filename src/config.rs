@@ -69,8 +69,10 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool) -> String {
      tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
      notes, delete MIDI notes, create a MIDI item, create tracks, \
      add/adjust/remove track sends, create automation envelopes (an FX parameter \
-     via create_fx_envelope, or a track volume/pan/mute envelope via \
-     create_track_envelope) and write/edit/delete their points (insert_envelope_point, \
+     via create_fx_envelope, a track volume/pan/mute envelope via \
+     create_track_envelope, or a SEND/RECEIVE volume/pan/mute envelope via \
+     create_send_envelope — then automate points using the envelope_track_index \
+     and envelope_index it returns) and write/edit/delete their points (insert_envelope_point, \
      set_envelope_point, delete_envelope_point/delete_envelope_points, clear_envelope) \
      — create the envelope first if it does not exist yet, then add points; \
      add/delete markers and regions, edit the tempo map and \
