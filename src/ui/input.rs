@@ -9,72 +9,39 @@
 //!
 //! On Windows we use `SendInput` at real (absolute, virtual-desktop-normalized)
 //! coordinates — the only thing custom-rendered GUIs (JUCE/Kontakt/OpenGL)
-//! reliably respond to; posted `WM_*` messages are silently ignored by them. The
-//! window is brought to the foreground (and un-minimized) FIRST so its rect is
-//! current when we measure it, and the real cursor is moved and restored. All
-//! calls run on the REAPER main thread.
+//! reliably respond to; posted `WM_*` messages are silently ignored by them. On
+//! macOS we post `CGEvent`s at absolute screen coordinates (the equivalent), with
+//! window geometry + raise via the SWELL C-shim. The window is brought to the
+//! foreground FIRST so its rect is current when we measure it. All calls run on
+//! the REAPER main thread.
 //!
-//! macOS (CGEvent) is a dedicated later pass; non-Windows returns an error.
+//! NOTE: the macOS backend is UNVALIDATED until a macOS CI build compiles it.
 
 /// Single left click at image-space `(x, y)` within window `hwnd`.
-#[cfg(windows)]
 pub fn click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
     imp::click(hwnd, x, y)
 }
 
 /// Double left click at image-space `(x, y)` (select a field, reset a knob…).
-#[cfg(windows)]
 pub fn double_click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
     imp::double_click(hwnd, x, y)
 }
 
 /// Left-button drag from `(x1, y1)` to `(x2, y2)` in image space (knob turns).
-#[cfg(windows)]
 pub fn drag(hwnd: isize, x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
     imp::drag(hwnd, x1, y1, x2, y2)
 }
 
 /// Type Unicode `text` into whatever control in `hwnd` has focus (e.g. a value
 /// field just clicked); if `submit`, press Enter afterward.
-#[cfg(windows)]
 pub fn type_text(hwnd: isize, text: &str, submit: bool) -> Result<(), String> {
     imp::type_text(hwnd, text, submit)
 }
 
 /// Mouse-wheel scroll by `clicks` notches (positive = up/away) at image-space
 /// `(x, y)` within `hwnd`.
-#[cfg(windows)]
 pub fn scroll(hwnd: isize, x: i32, y: i32, clicks: i32) -> Result<(), String> {
     imp::scroll(hwnd, x, y, clicks)
-}
-
-#[cfg(not(windows))]
-const UNSUPPORTED: &str =
-    "synthetic input is not implemented on this platform yet (macOS backend pending)";
-
-#[cfg(not(windows))]
-pub fn click(_hwnd: isize, _x: i32, _y: i32) -> Result<(), String> {
-    Err(UNSUPPORTED.into())
-}
-
-#[cfg(not(windows))]
-pub fn double_click(_hwnd: isize, _x: i32, _y: i32) -> Result<(), String> {
-    Err(UNSUPPORTED.into())
-}
-
-#[cfg(not(windows))]
-pub fn drag(_hwnd: isize, _x1: i32, _y1: i32, _x2: i32, _y2: i32) -> Result<(), String> {
-    Err(UNSUPPORTED.into())
-}
-
-#[cfg(not(windows))]
-pub fn type_text(_hwnd: isize, _text: &str, _submit: bool) -> Result<(), String> {
-    Err(UNSUPPORTED.into())
-}
-
-#[cfg(not(windows))]
-pub fn scroll(_hwnd: isize, _x: i32, _y: i32, _clicks: i32) -> Result<(), String> {
-    Err(UNSUPPORTED.into())
 }
 
 #[cfg(windows)]
@@ -348,5 +315,143 @@ mod imp {
                 inputs.len()
             ))
         }
+    }
+}
+
+// ---- macOS: synthetic input via CGEvent -------------------------------------
+// UNVALIDATED: compiled only on a macOS build. Window geometry + raise come from
+// the SWELL C-shim; events are posted at absolute screen coordinates.
+#[cfg(target_os = "macos")]
+mod imp {
+    use crate::ui::ffi;
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
+
+    const DRAG_STEPS: i32 = 24;
+    /// macOS virtual key code for Return.
+    const KEY_RETURN: u16 = 36;
+
+    fn source() -> Result<CGEventSource, String> {
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| "could not create a CGEventSource".to_string())
+    }
+
+    /// Raise the window, clamp image-space `(x, y)` to its rect, and return the
+    /// absolute screen point.
+    fn to_screen(hwnd: isize, x: i32, y: i32) -> Result<CGPoint, String> {
+        ffi::window_to_front(hwnd);
+        let (rx, ry, w, h) = ffi::window_rect(hwnd).ok_or("could not read the window rect")?;
+        if w <= 0 || h <= 0 {
+            return Err("target window has no area".into());
+        }
+        let cx = x.clamp(0, w - 1);
+        let cy = y.clamp(0, h - 1);
+        Ok(CGPoint::new((rx + cx) as f64, (ry + cy) as f64))
+    }
+
+    fn mouse(src: &CGEventSource, ty: CGEventType, p: CGPoint) -> Result<(), String> {
+        let ev = CGEvent::new_mouse_event(src.clone(), ty, p, CGMouseButton::Left)
+            .map_err(|_| "CGEvent (mouse) creation failed".to_string())?;
+        ev.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+
+    pub fn click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
+        if hwnd == 0 {
+            return Err("null window handle".into());
+        }
+        let src = source()?;
+        let p = to_screen(hwnd, x, y)?;
+        mouse(&src, CGEventType::MouseMoved, p)?;
+        mouse(&src, CGEventType::LeftMouseDown, p)?;
+        mouse(&src, CGEventType::LeftMouseUp, p)
+    }
+
+    pub fn double_click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
+        // A true double-click sets the click-count field; two quick clicks are a
+        // pragmatic stand-in until that is wired.
+        click(hwnd, x, y)?;
+        click(hwnd, x, y)
+    }
+
+    pub fn drag(hwnd: isize, x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
+        if hwnd == 0 {
+            return Err("null window handle".into());
+        }
+        let src = source()?;
+        let p1 = to_screen(hwnd, x1, y1)?;
+        mouse(&src, CGEventType::MouseMoved, p1)?;
+        mouse(&src, CGEventType::LeftMouseDown, p1)?;
+        for i in 1..=DRAG_STEPS {
+            let t = i as f64 / DRAG_STEPS as f64;
+            let ix = x1 + ((x2 - x1) as f64 * t).round() as i32;
+            let iy = y1 + ((y2 - y1) as f64 * t).round() as i32;
+            let p = to_screen(hwnd, ix, iy)?;
+            mouse(&src, CGEventType::LeftMouseDragged, p)?;
+        }
+        let p2 = to_screen(hwnd, x2, y2)?;
+        mouse(&src, CGEventType::LeftMouseUp, p2)
+    }
+
+    pub fn scroll(hwnd: isize, x: i32, y: i32, clicks: i32) -> Result<(), String> {
+        if hwnd == 0 {
+            return Err("null window handle".into());
+        }
+        let src = source()?;
+        let p = to_screen(hwnd, x, y)?;
+        mouse(&src, CGEventType::MouseMoved, p)?;
+        // Line-unit scroll; one wheel axis, `clicks` notches.
+        let ev = CGEvent::new_scroll_event(src, 0, 1, clicks, 0, 0)
+            .map_err(|_| "CGEvent (scroll) creation failed".to_string())?;
+        ev.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+
+    pub fn type_text(hwnd: isize, text: &str, submit: bool) -> Result<(), String> {
+        if hwnd == 0 {
+            return Err("null window handle".into());
+        }
+        ffi::window_to_front(hwnd);
+        let src = source()?;
+        // Layout-independent Unicode injection: a key event carrying the string.
+        let down = CGEvent::new_keyboard_event(src.clone(), 0, true)
+            .map_err(|_| "CGEvent (keyboard) creation failed".to_string())?;
+        down.set_string(text);
+        down.post(CGEventTapLocation::HID);
+        let up = CGEvent::new_keyboard_event(src.clone(), 0, false)
+            .map_err(|_| "CGEvent (keyboard) creation failed".to_string())?;
+        up.set_string(text);
+        up.post(CGEventTapLocation::HID);
+        if submit {
+            let rd = CGEvent::new_keyboard_event(src.clone(), KEY_RETURN, true)
+                .map_err(|_| "CGEvent (keyboard) creation failed".to_string())?;
+            rd.post(CGEventTapLocation::HID);
+            let ru = CGEvent::new_keyboard_event(src, KEY_RETURN, false)
+                .map_err(|_| "CGEvent (keyboard) creation failed".to_string())?;
+            ru.post(CGEventTapLocation::HID);
+        }
+        Ok(())
+    }
+}
+
+// ---- other platforms: not implemented ---------------------------------------
+#[cfg(all(not(windows), not(target_os = "macos")))]
+mod imp {
+    const UNSUPPORTED: &str = "synthetic input is not implemented on this platform";
+    pub fn click(_h: isize, _x: i32, _y: i32) -> Result<(), String> {
+        Err(UNSUPPORTED.into())
+    }
+    pub fn double_click(_h: isize, _x: i32, _y: i32) -> Result<(), String> {
+        Err(UNSUPPORTED.into())
+    }
+    pub fn drag(_h: isize, _x1: i32, _y1: i32, _x2: i32, _y2: i32) -> Result<(), String> {
+        Err(UNSUPPORTED.into())
+    }
+    pub fn type_text(_h: isize, _t: &str, _s: bool) -> Result<(), String> {
+        Err(UNSUPPORTED.into())
+    }
+    pub fn scroll(_h: isize, _x: i32, _y: i32, _c: i32) -> Result<(), String> {
+        Err(UNSUPPORTED.into())
     }
 }

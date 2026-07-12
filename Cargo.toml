@@ -36,15 +36,19 @@ async-trait  = "0.1"
 crossbeam-channel = "0.5"
 
 # --- Secure API-key storage (OS credential store) ---------------------------
-# windows-native = Windows Credential Manager. Add apple-native /
-# sync-secret-service when the mac/linux builds are turned on; without a backend
-# keyring degrades gracefully (in-memory + env var only).
-keyring = { version = "3", features = ["windows-native"] }
+# Backend feature is per-target (see below): windows-native / apple-native /
+# sync-secret-service. Without a backend keyring degrades gracefully
+# (in-memory + env var only).
+keyring = "3"
 
 # --- Misc --------------------------------------------------------------------
 thiserror = "2"
 # Markdown -> clean prose (OSARA announcements) and -> HTML (output pane).
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+# Cross-platform: PNG-encode captured frames + base64 image/audio for the model.
+# (Used by the vision capture backends AND the audio clip tool, so not Windows-only.)
+png = "0.17"
+base64 = "0.22"
 
 # Embedded WebView2 output pane (rendered markdown + collapsible tool cards).
 # Windows-only for now; the mac/linux build keeps the plain edit-control fallback.
@@ -56,16 +60,26 @@ raw-window-handle = "0.6"
 # types are identical (no cross-version type-identity mismatch).
 webview2-com = "0.38"
 windows-core = "0.61"
-# Phase 7 vision: GDI window capture (screenshot of plugin GUIs / main window),
-# PNG-encoded and base64'd for the Anthropic image content block.
+# Phase 7 vision: GDI window capture + SendInput synthetic input.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
-png = "0.17"
-base64 = "0.22"
+keyring = { version = "3", features = ["windows-native"] }
+
+# macOS: Core Graphics for window/screen capture (CGDisplay) + synthetic input
+# (CGEvent). Window geometry / raise go through the SWELL C-shim (cross-platform).
+# UNVALIDATED until a macOS CI build compiles this target.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
+keyring = { version = "3", features = ["apple-native"] }
+
+# Linux: Secret Service credential store (built later; input/capture still stubbed).
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
 
 [build-dependencies]
 cc             = "1"    # compiles the C++/SWELL shim

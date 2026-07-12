@@ -316,3 +316,33 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> String {
     }
     CStr::from_ptr(ptr).to_string_lossy().into_owned()
 }
+
+// ---- macOS-only window helpers (used by the capture/input backends) ----------
+// Cross-platform in the shim (Win32/SWELL), but only the macOS Rust backends need
+// them (Windows uses the `windows` crate directly), so they're gated to avoid
+// dead-code warnings on Windows.
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn ui_window_rect(
+        hwnd: *mut c_void,
+        x: *mut c_int,
+        y: *mut c_int,
+        w: *mut c_int,
+        h: *mut c_int,
+    ) -> c_int;
+    fn ui_window_to_front(hwnd: *mut c_void);
+}
+
+/// Window rect (screen-space x, y, w, h) via the host toolkit. macOS only.
+#[cfg(target_os = "macos")]
+pub fn window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    let (mut x, mut y, mut w, mut h) = (0, 0, 0, 0);
+    let ok = unsafe { ui_window_rect(hwnd as *mut c_void, &mut x, &mut y, &mut w, &mut h) };
+    (ok != 0).then_some((x, y, w, h))
+}
+
+/// Un-minimize + raise a window. macOS only.
+#[cfg(target_os = "macos")]
+pub fn window_to_front(hwnd: isize) {
+    unsafe { ui_window_to_front(hwnd as *mut c_void) }
+}

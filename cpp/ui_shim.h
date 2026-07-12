@@ -66,6 +66,13 @@ void ui_set_webview_focus_cb(on_webview_focus_cb on_focus);
 // (forward=0) the webview — used when the user Tabs out of the web content.
 void ui_focus_after_webview(int forward);
 
+// Window geometry + raise via the host toolkit (Win32 on Windows, SWELL on
+// macOS/Linux) — cross-platform helpers the macOS capture/input backends use to
+// stay off platform-specific Rust APIs. `ui_window_rect` fills screen-space
+// x/y/w/h and returns 1 on success. Main thread only.
+int ui_window_rect(void* hwnd, int* x, int* y, int* w, int* h);
+void ui_window_to_front(void* hwnd);
+
 // Append a menu item wired to a REAPER command id. Used to add an entry to
 // REAPER's Extensions menu from a hookcustommenu callback (main thread only).
 void ui_add_menu_item(void* hmenu, const char* label, int command_id);

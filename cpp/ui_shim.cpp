@@ -482,6 +482,26 @@ extern "C" void ui_focus_after_webview(int forward) {
   }
 }
 
+extern "C" int ui_window_rect(void* hwnd, int* x, int* y, int* w, int* h) {
+  if (!hwnd || !x || !y || !w || !h) return 0;
+  RECT r;
+  if (!GetWindowRect((HWND)hwnd, &r)) return 0;
+  *x = r.left;
+  *y = r.top;
+  *w = r.right - r.left;
+  *h = r.bottom - r.top;
+  return 1;
+}
+
+extern "C" void ui_window_to_front(void* hwnd) {
+  if (!hwnd) return;
+  HWND h = (HWND)hwnd;
+#ifdef _WIN32
+  if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+#endif
+  SetForegroundWindow(h);
+}
+
 extern "C" void ui_add_menu_item(void* hmenu, const char* label, int command_id) {
   if (!hmenu || !label) return;
   HMENU m = (HMENU)hmenu;

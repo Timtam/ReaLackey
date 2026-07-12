@@ -1,0 +1,56 @@
+name: CI
+
+# Starter CI. The macOS job exists specifically to COMPILE-CHECK the macOS
+# capture/input backends (they cannot be built on the Windows dev machine).
+# Expect to tune the macOS toolchain steps on the first real run.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows — build, test, clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --all-targets
+      - name: Test
+        run: cargo test
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+  macos:
+    name: macOS — build (validates the mac backends)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # swell_resgen.php generates the native dialog/menu tables from the .rc.
+      - name: Install PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+      # SWELL headers + the resource generator live in WDL.
+      - name: Fetch WDL (SWELL)
+        run: git clone --depth 1 https://github.com/justinfrankel/WDL.git vendor/WDL
+      - name: Build
+        env:
+          # reaper-rs uses bindgen (needs libclang); Xcode's Command Line Tools ship it.
+          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
+        run: cargo build
+      # Tests are host-independent (DSP, parsing, adapters); run them here too.
+      - name: Test
+        env:
+          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
+        run: cargo test

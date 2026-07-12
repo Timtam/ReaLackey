@@ -1,18 +1,21 @@
 //! Window / screen capture for the Phase 7 vision tools.
 //!
-//! Captures pixels via GDI `BitBlt` from the screen DC (which renders
-//! GPU-accelerated Direct2D/OpenGL/DXGI plugin GUIs correctly, unlike
-//! `PrintWindow`, which draws them black), converts BGRA→RGBA, optionally
-//! downscales, PNG-encodes, and base64s the result for the Anthropic image
-//! content block. Windows-only; other platforms return an error so callers
-//! degrade gracefully.
+//! Windows: GDI `BitBlt` from the screen DC (which renders GPU-accelerated
+//! Direct2D/OpenGL/DXGI plugin GUIs correctly, unlike `PrintWindow`, which draws
+//! them black). macOS: Core Graphics captures the screen region at the window's
+//! rect (window raised first) — the same "grab the on-screen pixels" strategy,
+//! so it handles GPU GUIs too. Both convert to RGBA, optionally downscale,
+//! PNG-encode and base64. Other platforms return an error so callers degrade.
 //!
 //! Downscaling is applied only to the description-only targets (the REAPER main
 //! window and the full screen), which can exceed the vision API's size limit.
-//! The focused-plugin capture is left 1:1 so Tier-B pixel coordinates map
-//! exactly to the window. All calls run on the REAPER main thread.
+//! The focused-plugin capture is left 1:1 so Tier-B pixel coordinates map to the
+//! window. All calls run on the REAPER main thread.
 //!
-//! macOS (Core Graphics / ScreenCaptureKit) is a dedicated later pass.
+//! NOTE: the macOS backend is UNVALIDATED until a macOS CI build compiles it (we
+//! develop on Windows). Known follow-up: HiDPI/Retina — a points→pixels scale
+//! factor between the captured image and the window rect affects Tier-B input
+//! coordinate mapping.
 
 /// A captured image, ready for an Anthropic image block.
 pub struct Shot {
@@ -24,7 +27,6 @@ pub struct Shot {
 
 /// Capture the window `hwnd`. If `bring_to_front`, un-minimize/raise it first (so
 /// it isn't obscured). If `max_edge` is set, downscale so the long edge fits.
-#[cfg(windows)]
 pub fn capture_hwnd(
     hwnd: isize,
     bring_to_front: bool,
@@ -33,26 +35,94 @@ pub fn capture_hwnd(
     imp::capture_hwnd(hwnd, bring_to_front, max_edge)
 }
 
-/// Capture the whole virtual desktop (all monitors), optionally downscaled.
-#[cfg(windows)]
+/// Capture the whole desktop (all monitors), optionally downscaled.
 pub fn capture_screen(max_edge: Option<u32>) -> Result<Shot, String> {
     imp::capture_screen(max_edge)
 }
 
-#[cfg(not(windows))]
-pub fn capture_hwnd(_hwnd: isize, _front: bool, _max_edge: Option<u32>) -> Result<Shot, String> {
-    Err("screen capture is not implemented on this platform yet (macOS backend pending)".into())
+// ---- shared post-processing (RGBA -> optional downscale -> PNG -> base64) ----
+
+/// Take a top-down RGBA buffer, optionally downscale so the long edge fits
+/// `max_edge`, then PNG-encode and base64. Shared by every platform backend.
+#[cfg(any(windows, target_os = "macos"))]
+fn finish_rgba(rgba: Vec<u8>, w: u32, h: u32, max_edge: Option<u32>) -> Result<Shot, String> {
+    use base64::Engine;
+    let (out_buf, out_w, out_h) = match max_edge {
+        Some(m) if w.max(h) > m && m > 0 => downscale(&rgba, w, h, m),
+        _ => (rgba, w, h),
+    };
+    let png = encode_png(out_w, out_h, &out_buf)?;
+    let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    Ok(Shot {
+        png_base64,
+        width: out_w,
+        height: out_h,
+    })
 }
 
-#[cfg(not(windows))]
-pub fn capture_screen(_max_edge: Option<u32>) -> Result<Shot, String> {
-    Err("screen capture is not implemented on this platform yet (macOS backend pending)".into())
+/// Integer box-average downscale so the long edge is <= `max_edge`.
+#[cfg(any(windows, target_os = "macos"))]
+fn downscale(rgba: &[u8], w: u32, h: u32, max_edge: u32) -> (Vec<u8>, u32, u32) {
+    let factor = w.max(h).div_ceil(max_edge).max(1);
+    if factor <= 1 {
+        return (rgba.to_vec(), w, h);
+    }
+    let tw = (w / factor).max(1);
+    let th = (h / factor).max(1);
+    let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
+    for ty in 0..th {
+        for tx in 0..tw {
+            let (mut r, mut g, mut b, mut a, mut count) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for dy in 0..factor {
+                let sy = ty * factor + dy;
+                if sy >= h {
+                    break;
+                }
+                for dx in 0..factor {
+                    let sx = tx * factor + dx;
+                    if sx >= w {
+                        break;
+                    }
+                    let i = ((sy * w + sx) * 4) as usize;
+                    r += rgba[i] as u32;
+                    g += rgba[i + 1] as u32;
+                    b += rgba[i + 2] as u32;
+                    a += rgba[i + 3] as u32;
+                    count += 1;
+                }
+            }
+            let count = count.max(1);
+            let o = ((ty * tw + tx) * 4) as usize;
+            out[o] = (r / count) as u8;
+            out[o + 1] = (g / count) as u8;
+            out[o + 2] = (b / count) as u8;
+            out[o + 3] = (a / count) as u8;
+        }
+    }
+    (out, tw, th)
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("PNG header: {e}"))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| format!("PNG data: {e}"))?;
+    }
+    Ok(out)
+}
+
+// ---- Windows: GDI BitBlt from the screen DC ---------------------------------
 #[cfg(windows)]
 mod imp {
     use super::Shot;
-    use base64::Engine;
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
@@ -65,7 +135,6 @@ mod imp {
         SW_RESTORE,
     };
 
-    // GDI's BI_RGB (uncompressed), as the plain u32 biCompression wants.
     const BI_RGB_U32: u32 = 0;
     const MAX_BYTES: usize = 512 * 1024 * 1024;
 
@@ -111,8 +180,6 @@ mod imp {
                 let _ = SetForegroundWindow(hwnd);
                 let _ = BringWindowToTop(hwnd);
             }
-            // Force a synchronous repaint (a just-floated window may not have
-            // painted yet). No-op for already-painted windows.
             let _ = UpdateWindow(hwnd);
 
             let mut rect = RECT::default();
@@ -127,8 +194,6 @@ mod imp {
     }
 
     pub fn capture_screen(max_edge: Option<u32>) -> Result<Shot, String> {
-        // SAFETY: GetSystemMetrics has no preconditions; capture_rect is safe to
-        // call on the main thread.
         unsafe {
             let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
             let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -141,8 +206,8 @@ mod imp {
         }
     }
 
-    /// BitBlt a screen rectangle into an RGBA buffer, optionally downscale it,
-    /// then PNG-encode and base64. `(x, y)` are screen (virtual-desktop) coords.
+    /// BitBlt a screen rectangle into a top-down RGBA buffer, then hand off to the
+    /// shared post-processing. `(x, y)` are screen (virtual-desktop) coords.
     unsafe fn capture_rect(
         x: i32,
         y: i32,
@@ -168,8 +233,6 @@ mod imp {
         }
         let _bmp = Obj(HGDIOBJ(bitmap.0));
 
-        // Select, blit, restore — GetDIBits needs the bitmap NOT selected. Validate
-        // the select so a failure can't leave the bitmap selected.
         let old = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
         if old.0.is_null() {
             return Err("SelectObject (select bitmap) failed".into());
@@ -209,83 +272,102 @@ mod imp {
             return Err("GetDIBits returned no scanlines".into());
         }
 
-        // BGRA → RGBA, force opaque alpha (window alpha is unreliable).
+        // BGRA -> RGBA, force opaque alpha (window alpha is unreliable).
         for px in buf.chunks_exact_mut(4) {
             px.swap(0, 2);
             px[3] = 255;
         }
+        super::finish_rgba(buf, w as u32, h as u32, max_edge)
+    }
+}
 
-        let (out_buf, out_w, out_h) = match max_edge {
-            Some(m) if (w as u32).max(h as u32) > m && m > 0 => {
-                downscale(&buf, w as u32, h as u32, m)
-            }
-            _ => (buf, w as u32, h as u32),
-        };
+// ---- macOS: Core Graphics capture of the on-screen window rect --------------
+// UNVALIDATED: compiled only on a macOS build. Uses the SWELL C-shim for window
+// geometry + raise (cross-platform), and Core Graphics for the actual capture.
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::Shot;
+    use crate::ui::ffi;
+    use core_graphics::display::CGDisplay;
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    use core_graphics::window::{kCGNullWindowID, kCGWindowListOptionOnScreenOnly};
 
-        let png = encode_png(out_w, out_h, &out_buf)?;
-        let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png);
-        Ok(Shot {
-            png_base64,
-            width: out_w,
-            height: out_h,
-        })
+    pub fn capture_hwnd(
+        hwnd: isize,
+        bring_to_front: bool,
+        max_edge: Option<u32>,
+    ) -> Result<Shot, String> {
+        if hwnd == 0 {
+            return Err("null window handle".into());
+        }
+        if bring_to_front {
+            ffi::window_to_front(hwnd);
+        }
+        let (x, y, w, h) = ffi::window_rect(hwnd).ok_or("could not read the window rect")?;
+        if w <= 0 || h <= 0 {
+            return Err(format!("window has non-positive size ({w}x{h})"));
+        }
+        let rect = CGRect::new(
+            &CGPoint::new(x as f64, y as f64),
+            &CGSize::new(w as f64, h as f64),
+        );
+        let image = CGDisplay::screenshot(
+            rect,
+            kCGWindowListOptionOnScreenOnly,
+            kCGNullWindowID,
+            core_graphics::window::kCGWindowImageDefault,
+        )
+        .ok_or("CGDisplay screenshot returned no image")?;
+        cgimage_to_shot(&image, max_edge)
     }
 
-    /// Integer box-average downscale so the long edge is <= `max_edge`. Used only
-    /// for description-only captures (main window / full screen).
-    fn downscale(rgba: &[u8], w: u32, h: u32, max_edge: u32) -> (Vec<u8>, u32, u32) {
-        let factor = w.max(h).div_ceil(max_edge).max(1);
-        if factor <= 1 {
-            return (rgba.to_vec(), w, h);
-        }
-        let tw = (w / factor).max(1);
-        let th = (h / factor).max(1);
-        let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
-        for ty in 0..th {
-            for tx in 0..tw {
-                let (mut r, mut g, mut b, mut a, mut count) = (0u32, 0u32, 0u32, 0u32, 0u32);
-                for dy in 0..factor {
-                    let sy = ty * factor + dy;
-                    if sy >= h {
-                        break;
-                    }
-                    for dx in 0..factor {
-                        let sx = tx * factor + dx;
-                        if sx >= w {
-                            break;
-                        }
-                        let i = ((sy * w + sx) * 4) as usize;
-                        r += rgba[i] as u32;
-                        g += rgba[i + 1] as u32;
-                        b += rgba[i + 2] as u32;
-                        a += rgba[i + 3] as u32;
-                        count += 1;
-                    }
-                }
-                let count = count.max(1);
-                let o = ((ty * tw + tx) * 4) as usize;
-                out[o] = (r / count) as u8;
-                out[o + 1] = (g / count) as u8;
-                out[o + 2] = (b / count) as u8;
-                out[o + 3] = (a / count) as u8;
-            }
-        }
-        (out, tw, th)
+    pub fn capture_screen(max_edge: Option<u32>) -> Result<Shot, String> {
+        let image = CGDisplay::main()
+            .image()
+            .ok_or("CGDisplay image returned nothing")?;
+        cgimage_to_shot(&image, max_edge)
     }
 
-    fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut out, width, height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder
-                .write_header()
-                .map_err(|e| format!("PNG header: {e}"))?;
-            writer
-                .write_image_data(rgba)
-                .map_err(|e| format!("PNG data: {e}"))?;
+    /// Convert a CGImage (32-bit, little-endian BGRA-in-memory) to a tight RGBA
+    /// buffer (dropping any per-row padding), then hand to shared post-processing.
+    fn cgimage_to_shot(
+        image: &core_graphics::image::CGImage,
+        max_edge: Option<u32>,
+    ) -> Result<Shot, String> {
+        let w = image.width();
+        let h = image.height();
+        let bytes_per_row = image.bytes_per_row();
+        let data = image.data();
+        let src = data.bytes();
+        if w == 0 || h == 0 || bytes_per_row < w * 4 {
+            return Err(format!("unexpected CGImage geometry ({w}x{h}, stride {bytes_per_row})"));
         }
-        Ok(out)
+        let mut rgba = vec![0u8; w * h * 4];
+        for row in 0..h {
+            let s = row * bytes_per_row;
+            let d = row * w * 4;
+            for col in 0..w {
+                let sp = s + col * 4;
+                let dp = d + col * 4;
+                // memory order is BGRA -> RGBA; force opaque alpha.
+                rgba[dp] = src[sp + 2];
+                rgba[dp + 1] = src[sp + 1];
+                rgba[dp + 2] = src[sp];
+                rgba[dp + 3] = 255;
+            }
+        }
+        super::finish_rgba(rgba, w as u32, h as u32, max_edge)
+    }
+}
+
+// ---- other platforms: not implemented ---------------------------------------
+#[cfg(all(not(windows), not(target_os = "macos")))]
+mod imp {
+    use super::Shot;
+    pub fn capture_hwnd(_h: isize, _f: bool, _m: Option<u32>) -> Result<Shot, String> {
+        Err("screen capture is not implemented on this platform".into())
+    }
+    pub fn capture_screen(_m: Option<u32>) -> Result<Shot, String> {
+        Err("screen capture is not implemented on this platform".into())
     }
 }
