@@ -190,9 +190,12 @@ pub fn ensure_created() {
                 ffi::install_webview_focus_cb();
                 #[cfg(windows)]
                 webview_impl::install_focus_out_handler();
-                console("ReaLackey: HTML output pane active.\n");
+                // No console message on success — ShowConsoleMsg pops the console
+                // window open, which is unwanted on a normal launch.
             }
             Err(e) => {
+                // Only on an actual failure (rare): surface WHY the pane fell back
+                // to plain text. This is the one case worth popping the console.
                 console(&format!(
                     "ReaLackey: HTML pane unavailable, using plain text output. \
                      Reason: {e}\n"
@@ -200,13 +203,12 @@ pub fn ensure_created() {
             }
         }
     }
-    #[cfg(not(windows))]
-    {
-        console("ReaLackey: plain text output (webview only on Windows).\n");
-    }
 }
 
-/// Print a line to REAPER's console (main-thread REAPER handle).
+/// Print a line to REAPER's console (main-thread REAPER handle). Used ONLY for
+/// the webview-failure diagnostic (Windows) — routine status goes via OSARA / the
+/// pane, so a normal launch never opens the console.
+#[cfg(windows)]
 fn console(msg: &str) {
     let _ = crate::reaper::api::with(|r| r.show_console_msg(msg));
 }

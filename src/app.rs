@@ -75,11 +75,9 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // "Open Assistant" action.
     action::register(&mut session)?;
 
-    // Readiness feedback.
-    session
-        .reaper()
-        .show_console_msg("ReaLackey loaded.\n");
-    // Lazy: a no-op if OSARA hasn't loaded yet (it usually loads after us).
+    // Readiness feedback — announced via OSARA only. We deliberately do NOT write
+    // to the REAPER console: ShowConsoleMsg pops the console window open, which is
+    // unwanted noise on every launch. (Lazy: a no-op if OSARA loads after us.)
     osara::announce("ReaLackey loaded.");
 
     // Leak the app state so the session (and all registrations) live at a stable
