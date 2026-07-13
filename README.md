@@ -63,6 +63,12 @@ options (model, max tokens, tool-step limit, vision). Vision and audio tools are
 offered only when the selected model actually supports them. Running a local
 model (Ollama/LM Studio) means **no rate limits and no cost**.
 
+A provider can hold **several API keys** in priority order (add/reorder them in
+its settings). The top key is used until it hits a quota or auth error, then
+ReaLackey **automatically fails over** to the next — announced in the chat — so a
+conversation keeps going when one key runs out (handy for e.g. multiple Gemini
+free-tier keys).
+
 ## Accessibility
 
 ReaLackey is designed to be driven entirely by keyboard and screen reader:

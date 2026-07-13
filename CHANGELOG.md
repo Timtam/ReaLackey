@@ -10,6 +10,15 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+### Added
+
+- Multiple API keys per provider, with automatic failover. A provider can hold an
+  ordered list of keys (add / delete / move up / move down in the settings dialog);
+  the top key is used and, on a quota or auth error, the assistant switches to the
+  next key — announced in the chat pane and via the screen reader — until it finds
+  one that works or all are exhausted. Useful when you have several keys for the
+  same provider (e.g. Gemini's free tier).
+
 ## [0.1.0] - 2026-07-13
 
 ### Added
