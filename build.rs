@@ -21,6 +21,14 @@ use std::path::Path;
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
+    // `webview` cfg: the wry-backed HTML conversation pane is available where wry
+    // has a working backend we host as a child of the dialog — Windows (WebView2)
+    // and macOS (WKWebView). Elsewhere the plain edit-control fallback is used.
+    println!("cargo::rustc-check-cfg=cfg(webview)");
+    if target_os == "windows" || target_os == "macos" {
+        println!("cargo::rustc-cfg=webview");
+    }
+
     // WDL checkout (only needed on non-Windows for swell.h + the modstub).
     let wdl = "vendor/WDL/WDL";
 

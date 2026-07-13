@@ -20,7 +20,7 @@ thread_local! {
 }
 
 struct Output {
-    #[cfg(windows)]
+    #[cfg(webview)]
     webview: Option<wry::WebView>,
     /// Accumulated Markdown of the assistant message currently streaming.
     assistant_md: String,
@@ -29,29 +29,29 @@ struct Output {
 impl Output {
     fn new() -> Self {
         Self {
-            #[cfg(windows)]
+            #[cfg(webview)]
             webview: None,
             assistant_md: String::new(),
         }
     }
 
     fn active(&self) -> bool {
-        #[cfg(windows)]
+        #[cfg(webview)]
         {
             self.webview.is_some()
         }
-        #[cfg(not(windows))]
+        #[cfg(not(webview))]
         {
             false
         }
     }
 
     fn eval(&self, js: &str) {
-        #[cfg(windows)]
+        #[cfg(webview)]
         if let Some(wv) = &self.webview {
             let _ = wv.evaluate_script(js);
         }
-        #[cfg(not(windows))]
+        #[cfg(not(webview))]
         {
             let _ = js;
         }
@@ -174,7 +174,7 @@ pub fn ensure_created() {
     if already {
         return;
     }
-    #[cfg(windows)]
+    #[cfg(webview)]
     {
         // Build the webview WITHOUT holding the STATE borrow: creating the child
         // window can synchronously fire WM_SIZE -> on_resize(), which borrows STATE.
@@ -186,19 +186,25 @@ pub fn ensure_created() {
                 // re-bound the webview to the freed-up full-window output rect.
                 ffi::set_webview_active(true);
                 on_resize();
-                ffi::enable_webview_tabstop();
-                ffi::install_webview_focus_cb();
+                // Tab-focus forwarding into the web content is WebView2-specific;
+                // on macOS WKWebView handles its own focus/keyboard.
                 #[cfg(windows)]
-                webview_impl::install_focus_out_handler();
+                {
+                    ffi::enable_webview_tabstop();
+                    ffi::install_webview_focus_cb();
+                    webview_impl::install_focus_out_handler();
+                }
                 // No console message on success — ShowConsoleMsg pops the console
                 // window open, which is unwanted on a normal launch.
             }
-            Err(e) => {
-                // Only on an actual failure (rare): surface WHY the pane fell back
-                // to plain text. This is the one case worth popping the console.
+            Err(_e) => {
+                // On an actual failure the webview stays None, so the plain
+                // edit-control fallback takes over automatically. On Windows,
+                // surface WHY in the console (the one case worth popping it).
+                #[cfg(windows)]
                 console(&format!(
                     "ReaLackey: HTML pane unavailable, using plain text output. \
-                     Reason: {e}\n"
+                     Reason: {_e}\n"
                 ));
             }
         }
@@ -216,7 +222,7 @@ fn console(msg: &str) {
 /// Drop the webview when its parent dialog is destroyed, so it never lingers
 /// with a dangling parent (and `ensure_created` will rebuild on re-open).
 pub fn on_destroy() {
-    #[cfg(windows)]
+    #[cfg(webview)]
     {
         // Take the webview out (releasing the borrow) before dropping it. Dropping
         // it closes the WebView2 controller, which must happen while the module is
@@ -228,7 +234,7 @@ pub fn on_destroy() {
 
 /// Re-bound the webview to the output area after a dialog resize.
 pub fn on_resize() {
-    #[cfg(windows)]
+    #[cfg(webview)]
     STATE.with(|c| {
         let out = c.borrow();
         if let Some(wv) = &out.webview {
@@ -293,20 +299,23 @@ pub fn on_webview_focus() {
     }
 }
 
-// ---- Windows: the wry hosting ----------------------------------------------
+// ---- wry hosting (Windows: WebView2, macOS: WKWebView) ----------------------
 
-#[cfg(windows)]
+#[cfg(webview)]
 mod webview_impl {
-    use std::num::NonZeroIsize;
     use std::path::PathBuf;
 
-    use raw_window_handle::{
-        HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
-    };
+    use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
+    #[cfg(target_os = "macos")]
+    use raw_window_handle::AppKitWindowHandle;
+    #[cfg(windows)]
+    use raw_window_handle::Win32WindowHandle;
+    #[cfg(windows)]
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2Controller, ICoreWebView2MoveFocusRequestedEventArgs,
         COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
     };
+    #[cfg(windows)]
     use webview2_com::MoveFocusRequestedEventHandler;
     use wry::dpi::{PhysicalPosition, PhysicalSize};
     use wry::http::Request;
@@ -314,16 +323,30 @@ mod webview_impl {
 
     use crate::ui::ffi;
 
-    /// Borrow-only wrapper so wry can host a webview in the dialog's HWND.
-    struct Host(NonZeroIsize);
+    /// Borrow-only wrapper so wry can host the webview as a child of the dialog.
+    /// The value is the dialog's native handle: a Win32 `HWND` on Windows, and on
+    /// macOS the SWELL `HWND`, which *is* an `NSView` (SWELL_hwndChild : NSView).
+    struct Host(isize);
 
     impl HasWindowHandle for Host {
         fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-            let mut handle = Win32WindowHandle::new(self.0);
-            handle.hinstance = None;
-            // SAFETY: the dialog owns the HWND and outlives the webview, which is
-            // created, used, and dropped on this (main) thread while it exists.
-            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+            // SAFETY (both arms): the dialog owns the native window/view and
+            // outlives the webview, which is created, used, and dropped on this
+            // (main) thread while it exists.
+            #[cfg(windows)]
+            {
+                let hwnd = std::num::NonZeroIsize::new(self.0).ok_or(HandleError::Unavailable)?;
+                let mut handle = Win32WindowHandle::new(hwnd);
+                handle.hinstance = None;
+                Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let ns_view = std::ptr::NonNull::new(self.0 as *mut std::ffi::c_void)
+                    .ok_or(HandleError::Unavailable)?;
+                let handle = AppKitWindowHandle::new(ns_view);
+                Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::AppKit(handle)) })
+            }
         }
     }
 
@@ -432,25 +455,38 @@ document.addEventListener('click',function(e){
     // single-threaded apartment. wry does not initialize COM when hosting in a
     // foreign HWND, so do it ourselves; harmless if the thread is already STA
     // (returns S_FALSE) and we deliberately never CoUninitialize.
+    #[cfg(windows)]
     #[link(name = "ole32")]
     extern "system" {
         fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
     }
+    #[cfg(windows)]
     const COINIT_APARTMENTTHREADED: u32 = 0x2;
 
     pub fn create() -> Result<WebView, String> {
         let hwnd = ffi::get_hwnd() as isize;
-        let host = Host(NonZeroIsize::new(hwnd).ok_or("dialog window handle is null")?);
+        if hwnd == 0 {
+            return Err("dialog window handle is null".into());
+        }
+        let host = Host(hwnd);
         let (x, y, w, h) = ffi::output_bounds().ok_or("output area bounds unavailable")?;
-        unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
+        #[cfg(windows)]
+        unsafe {
+            CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED)
+        };
 
         // WebView2's default user-data folder sits next to the host exe
-        // (reaper.exe, in read-only Program Files) -> E_ACCESSDENIED. Point it at
-        // a writable per-user folder instead. `web_context` only needs to live
-        // until build_as_child returns.
-        let data_dir = user_data_dir()?;
-        let _ = std::fs::create_dir_all(&data_dir);
-        let mut web_context = WebContext::new(Some(data_dir));
+        // (reaper.exe, in read-only Program Files) -> E_ACCESSDENIED, so point it
+        // at a writable per-user folder. WKWebView uses its default data store.
+        #[cfg(windows)]
+        let data_dir: Option<PathBuf> = {
+            let dir = user_data_dir()?;
+            let _ = std::fs::create_dir_all(&dir);
+            Some(dir)
+        };
+        #[cfg(not(windows))]
+        let data_dir: Option<PathBuf> = None;
+        let mut web_context = WebContext::new(data_dir);
 
         WebViewBuilder::new_with_web_context(&mut web_context)
             .with_bounds(bounds(x, y, w, h))
@@ -483,6 +519,7 @@ document.addEventListener('click',function(e){
             .map_err(|e| e.to_string())
     }
 
+    #[cfg(windows)]
     fn user_data_dir() -> Result<PathBuf, String> {
         let base = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
@@ -505,6 +542,7 @@ document.addEventListener('click',function(e){
     /// Called when the host gains focus (window activation / Tab onto the host).
     /// PROGRAMMATIC hands the WebView2 focus without picking an element; the
     /// caller then runs `focusInput()` to land the caret in the composer.
+    #[cfg(windows)]
     pub fn move_focus_into_content(controller: &ICoreWebView2Controller) {
         // SAFETY: called on the main (UI) thread that owns the controller.
         unsafe {
@@ -516,6 +554,7 @@ document.addEventListener('click',function(e){
     /// end (or start) of the web content, focus wraps back to the composer inside
     /// the webview instead of escaping to the (now hidden) native controls. The
     /// whole window is the webview, so focus should never leave it.
+    #[cfg(windows)]
     pub fn install_focus_out_handler() {
         use wry::WebViewExtWindows;
         let controller =

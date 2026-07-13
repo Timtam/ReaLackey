@@ -51,10 +51,15 @@ png = "0.17"
 base64 = "0.22"
 
 # Embedded WebView2 output pane (rendered markdown + collapsible tool cards).
-# Windows-only for now; the mac/linux build keeps the plain edit-control fallback.
-[target.'cfg(windows)'.dependencies]
+# The wry-backed HTML conversation pane: WebView2 on Windows, WKWebView on macOS,
+# hosted as a child of the dialog window. Linux keeps the plain edit-control
+# fallback for now. (Gated in code by the `webview` cfg from build.rs.)
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 wry = "0.55"
 raw-window-handle = "0.6"
+
+# Windows-only.
+[target.'cfg(windows)'.dependencies]
 # Seamless Tab focus into/out of the embedded WebView2 (MoveFocus +
 # MoveFocusRequested). Same versions wry 0.55 resolves, so the ICoreWebView2*
 # types are identical (no cross-version type-identity mismatch).
