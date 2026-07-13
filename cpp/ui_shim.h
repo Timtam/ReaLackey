@@ -89,7 +89,7 @@ typedef void (*prov_list_cb)(char* buf, int buf_sz);
 // Rust performs an action on the selected row: action 0=add, 1=edit, 2=delete,
 // 3=set-default; `index` is the selected row (or -1 if none). Returns 1 if the
 // list changed (the dialog then repopulates the listbox), 0 otherwise. Rust may
-// open nested modal dialogs (ui_popup_menu, GetUserInputs) inside this call.
+// open nested modal dialogs (e.g. ui_popup_menu) inside this call.
 typedef int (*prov_action_cb)(int action, int index);
 void ui_set_provider_cbs(prov_list_cb on_list, prov_action_cb on_action);
 // Show the modal provider-management dialog. Main thread only.
