@@ -1092,21 +1092,15 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         // --- vision (Phase 7) ---
         ToolDef {
             name: "capture_view".into(),
-            description: "Take a screenshot so you can SEE visual-only UI that the REAPER API \
-                          cannot express — custom-drawn plugin GUIs, meters, waveforms. The image \
-                          is returned to you as a picture to reason about. Each capture needs \
-                          explicit user consent (the screenshot is sent to the AI provider), \
-                          so only call this when seeing the screen genuinely helps. Seeing and \
-                          acting are separate: to CHANGE anything, use the parameter tools (e.g. \
-                          set_fx_param), never this tool. To open and capture a SPECIFIC track \
-                          plugin the user has NOT focused, pass track_index and fx_index (indices \
-                          from get_track_fx / get_focused_fx): its floating window is opened for \
-                          you and captured — no prior focus needed. This is the reliable way to \
-                          look at a plugin you just added. Otherwise use target: 'focused_plugin' \
-                          (default) captures the plugin the user currently has focused (opened as a \
-                          floating window if needed); 'reaper_main' captures the REAPER main window; \
-                          'full_screen' captures the whole screen. track_index+fx_index take \
-                          precedence over target."
+            description: "Screenshot visual-only UI the REAPER API can't express (custom plugin \
+                          GUIs, meters, waveforms), returned as an image to reason about. Needs \
+                          user consent each time (sent to the AI provider); call only when seeing \
+                          genuinely helps. Seeing is not acting — to CHANGE anything use the \
+                          parameter tools (set_fx_param), not this. Pass track_index + fx_index \
+                          (from get_track_fx) to open and capture a SPECIFIC unfocused track FX \
+                          (the reliable way to view a plugin you just added); these take precedence \
+                          over target. Otherwise target: 'focused_plugin' (default), 'reaper_main', \
+                          or 'full_screen'."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1130,17 +1124,14 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         // --- Tier B: operate GUI-only plugin controls via synthesized input ---
         ToolDef {
             name: "plugin_click".into(),
-            description: "Click a control in the FOCUSED plugin's GUI by synthesizing a real mouse \
-                          click. This is for GUI-only controls that have NO host parameter (e.g. a \
-                          Kontakt mode/patch toggle) — for normal knobs/sliders prefer \
-                          set_fx_param / set_fx_param_by_steps, which are undoable. x and y are \
-                          PIXELS in the most recent capture_view image of that plugin (top-left is \
-                          0,0); they are clamped to the window. Just CALL this tool when you need \
-                          it — the first pixel action automatically asks the user once to allow \
-                          pixel control for the session; never tell the user to enable or 'turn on' \
-                          pixel control themselves (there is no such setting to find). IMPORTANT: \
-                          GUI clicks CANNOT be undone by REAPER — after clicking, call capture_view \
-                          to verify the result."
+            description: "Click a GUI-only control (no host parameter, e.g. a Kontakt mode/patch \
+                          toggle) in the FOCUSED plugin by synthesizing a real mouse click; for \
+                          normal knobs/sliders prefer set_fx_param(_by_steps), which are undoable. \
+                          x,y are PIXELS in the latest capture_view image (top-left 0,0), clamped \
+                          to the window. Just CALL it — the first pixel action asks the user once \
+                          to allow pixel control; never tell the user to enable it themselves \
+                          (no such setting exists). NOT undoable by REAPER — call capture_view after \
+                          to verify."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1533,18 +1524,14 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     });
     defs.push(ToolDef {
         name: "create_send_envelope".into(),
-        description: "Create the automation envelope for a track SEND or RECEIVE (send volume, pan, \
-                      or mute) so it can then be automated with the envelope point tools. \
-                      category: 'send' (default) reads (track_index, send_index) as a send on the \
-                      SOURCE track; 'receive' reads them as a receive on the DESTINATION track — \
-                      both address the same routing. kind: volume, pan, or mute. If the envelope \
-                      already exists it is returned unchanged. IMPORTANT: to add points afterwards, \
-                      use the RETURNED envelope_track_index + envelope_index with \
-                      insert_envelope_point / set_envelope_point — the envelope is owned by the \
-                      source track, which may differ from the index you passed. REAPER has no \
-                      dedicated API for this, so it is done by a validated edit of the destination \
-                      track's state chunk and FAILS SAFE (makes no change) if it cannot confirm the \
-                      envelope materialised. CHANGES the project (confirmed + undo-wrapped)."
+        description: "Create a send/receive automation envelope (volume, pan, or mute) so it can \
+                      be automated with the point tools. category: 'send' (default) reads \
+                      (track_index, send_index) as a send on the source track; 'receive' as a \
+                      receive on the destination — same routing either way. Returned unchanged if \
+                      it already exists. IMPORTANT: to add points afterwards use the RETURNED \
+                      envelope_track_index + envelope_index (the envelope is owned by the source \
+                      track, which may differ from the index you passed). Fails safe (no change) if \
+                      it can't confirm creation. CHANGES the project (confirmed + undo-wrapped)."
             .into(),
         input_schema: obj(
             json!({
