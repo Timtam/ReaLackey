@@ -1,4 +1,4 @@
-# REAPER AI Assistant
+# ReaLackey
 
 A single-process native **REAPER extension** (Rust) that integrates large
 language models into the DAW workflow: it knows the project state, answers
@@ -146,7 +146,7 @@ Requirements (Windows, the primary target so far):
   `PATH`.
 
 ```sh
-cargo build            # -> target/debug/reaper_aiassistant.dll
+cargo build            # -> target/debug/reaper_realackey.dll
 cargo test             # runs the SSE parser unit tests
 cargo build --release  # optimized (LTO)
 ```
@@ -162,21 +162,21 @@ The SWELL path is stubbed in `build.rs`. It additionally needs a WDL checkout at
 
 ## Install & run
 
-1. Copy `reaper_aiassistant.dll` into REAPER's `UserPlugins` directory.
+1. Copy `reaper_realackey.dll` into REAPER's `UserPlugins` directory.
    (The file name **must** start with `reaper_` or REAPER won't load it.)
-2. Start REAPER → the console prints "REAPER AI Assistant loaded." on load.
-3. Set your Anthropic API key: **Extensions → REAPER AI Assistant → Set
+2. Start REAPER → the console prints "ReaLackey loaded." on load.
+3. Set your Anthropic API key: **Extensions → ReaLackey → Set
    Anthropic API key** (also in the Actions list). It's stored in the OS
    credential store (Windows Credential Manager) and persists across restarts.
    Alternatively, set the `ANTHROPIC_API_KEY` environment variable. Optional:
    `RAAI_MODEL` (default `claude-opus-4-8`).
-4. **Extensions → REAPER AI Assistant → Open window** (or the action) opens the
+4. **Extensions → ReaLackey → Open window** (or the action) opens the
    dialog. Type a message, press **Send**; the reply streams into the log.
 
 ## Verified here vs. pending validation
 
 **Verified in this environment:** clean `cargo build`/`clippy`, the crate links
-to `reaper_aiassistant.dll`, the dialog resource is embedded, and the SSE parser
+to `reaper_realackey.dll`, the dialog resource is embedded, and the SSE parser
 passes unit tests (including byte-split streams and unknown events).
 
 **Needs a real REAPER host + screen reader (open items from the design):**

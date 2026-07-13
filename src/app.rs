@@ -75,9 +75,9 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // Readiness feedback.
     session
         .reaper()
-        .show_console_msg("REAPER AI Assistant loaded.\n");
+        .show_console_msg("ReaLackey loaded.\n");
     // Lazy: a no-op if OSARA hasn't loaded yet (it usually loads after us).
-    osara::announce("REAPER AI Assistant loaded.");
+    osara::announce("ReaLackey loaded.");
 
     // Leak the app state so the session (and all registrations) live at a stable
     // address for the process lifetime, then publish the main-thread REAPER

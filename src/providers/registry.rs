@@ -11,7 +11,9 @@ use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-/// Credential-store service name (shared with the legacy single-key setup).
+/// Credential-store service name. DELIBERATELY unchanged across the ReaLackey
+/// rename: it is the key under which every stored API key lives, so renaming it
+/// would orphan the user's saved keys. It is an internal identifier, never shown.
 const KEYRING_SERVICE: &str = "reaper-ai-assistant";
 /// Legacy account name for the single Anthropic key (pre-multi-provider). The
 /// seeded `anthropic` account reuses it so existing keys keep working.
@@ -252,12 +254,31 @@ fn keyring_get(account: &str) -> Option<String> {
 
 // ---- persistence ------------------------------------------------------------
 
-fn config_dir() -> Option<PathBuf> {
+fn config_base() -> Option<PathBuf> {
     #[cfg(windows)]
-    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    }
     #[cfg(not(windows))]
-    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"));
-    base.map(|b| b.join("REAPER-AI-Assistant"))
+    {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))
+    }
+}
+
+fn config_dir() -> Option<PathBuf> {
+    config_base().map(|b| b.join("ReaLackey"))
+}
+
+/// One-time move of the pre-rename config folder (`REAPER-AI-Assistant` ->
+/// `ReaLackey`) so a renamed build keeps the user's saved providers. The keyring
+/// service name is deliberately unchanged, so stored API keys are unaffected.
+fn migrate_config_dir() {
+    if let (Some(base), Some(new)) = (config_base(), config_dir()) {
+        let old = base.join("REAPER-AI-Assistant");
+        if old.is_dir() && !new.exists() {
+            let _ = std::fs::rename(&old, &new);
+        }
+    }
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -265,6 +286,7 @@ fn config_path() -> Option<PathBuf> {
 }
 
 fn load_or_seed() -> Store {
+    migrate_config_dir(); // rename the pre-ReaLackey config folder if present
     if let Some(path) = config_path() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(mut store) = serde_json::from_str::<Store>(&text) {

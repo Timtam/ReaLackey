@@ -155,7 +155,7 @@ impl PumpSurface {
                     matches!(
                         reaper.show_message_box(
                             message.as_str(),
-                            "REAPER AI Assistant",
+                            "ReaLackey",
                             MessageBoxType::YesNo,
                         ),
                         MessageBoxResult::Yes

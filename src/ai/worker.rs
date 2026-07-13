@@ -111,7 +111,7 @@ async fn handle_prompt(
     let Some(cfg) = registry::active() else {
         let _ = ui_tx.send(UiEvent::UserMessage(prompt));
         let _ = ui_tx.send(UiEvent::Error(
-            "No provider configured. Add one via Extensions -> REAPER AI Assistant.".into(),
+            "No provider configured. Add one via Extensions -> ReaLackey.".into(),
         ));
         let _ = ui_tx.send(UiEvent::Status("No provider.".into()));
         let _ = ui_tx.send(UiEvent::Done);
@@ -121,7 +121,7 @@ async fn handle_prompt(
         let _ = ui_tx.send(UiEvent::UserMessage(prompt));
         let msg = match cfg.kind {
             AdapterKind::Anthropic => format!(
-                "No API key for \"{}\". Set it via Extensions -> REAPER AI Assistant \
+                "No API key for \"{}\". Set it via Extensions -> ReaLackey \
                  (or the ANTHROPIC_API_KEY environment variable).",
                 cfg.label
             ),

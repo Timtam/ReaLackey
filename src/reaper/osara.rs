@@ -2,7 +2,7 @@
 //!
 //! OSARA registers `osara_outputMessage(const char*)` via the REAPER plugin
 //! API; we resolve it with REAPER's `GetFunc`. Crucially, resolution is **lazy**:
-//! REAPER loads extensions alphabetically, so `reaper_aiassistant` can load
+//! REAPER loads extensions alphabetically, so `reaper_realackey` can load
 //! before OSARA, at which point `GetFunc("osara_outputMessage")` is still null.
 //! We resolve on demand (through the main-thread plug-in context) and cache the
 //! function once OSARA appears. A persistently null result means OSARA isn't

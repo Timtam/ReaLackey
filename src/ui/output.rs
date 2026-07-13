@@ -190,11 +190,11 @@ pub fn ensure_created() {
                 ffi::install_webview_focus_cb();
                 #[cfg(windows)]
                 webview_impl::install_focus_out_handler();
-                console("REAPER AI Assistant: HTML output pane active.\n");
+                console("ReaLackey: HTML output pane active.\n");
             }
             Err(e) => {
                 console(&format!(
-                    "REAPER AI Assistant: HTML pane unavailable, using plain text output. \
+                    "ReaLackey: HTML pane unavailable, using plain text output. \
                      Reason: {e}\n"
                 ));
             }
@@ -202,7 +202,7 @@ pub fn ensure_created() {
     }
     #[cfg(not(windows))]
     {
-        console("REAPER AI Assistant: plain text output (webview only on Windows).\n");
+        console("ReaLackey: plain text output (webview only on Windows).\n");
     }
 }
 
@@ -485,7 +485,7 @@ document.addEventListener('click',function(e){
         let base = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .ok_or("LOCALAPPDATA is not set")?;
-        Ok(base.join("REAPER-AI-Assistant").join("WebView2"))
+        Ok(base.join("ReaLackey").join("WebView2"))
     }
 
     pub fn set_bounds(webview: &WebView, x: i32, y: i32, w: i32, h: i32) {

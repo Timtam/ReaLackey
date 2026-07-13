@@ -1,4 +1,4 @@
-// Build script for the REAPER AI Assistant.
+// Build script for the ReaLackey.
 //
 // Responsibilities:
 //   1. Compile the thin C++ UI shim (cpp/ui_shim.cpp) via the `cc` crate and

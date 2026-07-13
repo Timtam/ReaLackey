@@ -2069,37 +2069,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
-name = "reaper-aiassistant"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "cc",
- "core-foundation 0.10.1",
- "core-graphics",
- "crossbeam-channel",
- "embed-resource",
- "futures-util",
- "keyring",
- "png",
- "pulldown-cmark",
- "raw-window-handle",
- "reaper-low",
- "reaper-macros",
- "reaper-medium",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "webview2-com",
- "windows",
- "windows-core",
- "wry",
-]
-
-[[package]]
 name = "reaper-common-types"
 version = "0.1.0"
 source = "git+https://github.com/helgoboss/reaper-rs.git?rev=955d6a2e8ab3e6ea1251357ee14210cd88d4c2ae#955d6a2e8ab3e6ea1251357ee14210cd88d4c2ae"
@@ -2150,6 +2119,37 @@ dependencies = [
  "tracing",
  "vst",
  "winapi",
+]
+
+[[package]]
+name = "reaper-realackey"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "cc",
+ "core-foundation 0.10.1",
+ "core-graphics",
+ "crossbeam-channel",
+ "embed-resource",
+ "futures-util",
+ "keyring",
+ "png",
+ "pulldown-cmark",
+ "raw-window-handle",
+ "reaper-low",
+ "reaper-macros",
+ "reaper-medium",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "webview2-com",
+ "windows",
+ "windows-core",
+ "wry",
 ]
 
 [[package]]

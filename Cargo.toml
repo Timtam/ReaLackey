@@ -1,7 +1,7 @@
-# REAPER AI Assistant — working title (project name still open, see design doc).
-# Single-process native REAPER extension (cdylib).  Phase 0 skeleton.
+# ReaLackey — an AI assistant deeply integrated into the REAPER DAW.
+# Single-process native REAPER extension (cdylib).
 [package]
-name = "reaper-aiassistant"
+name = "reaper-realackey"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"          # c"..." CStr literals (1.77) + std::sync::LazyLock (1.80, provider registry)
@@ -11,7 +11,7 @@ description = "AI assistant deeply integrated into the REAPER DAW (native Rust e
 
 [lib]
 # The output file name MUST start with `reaper_` or REAPER refuses to load it.
-name = "reaper_aiassistant"    # -> reaper_aiassistant.dll / .dylib / .so
+name = "reaper_realackey"    # -> reaper_realackey.dll / .dylib / .so
 crate-type = ["cdylib"]
 
 [dependencies]

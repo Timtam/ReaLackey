@@ -1,4 +1,4 @@
-//! REAPER AI Assistant — a single-process native REAPER extension that
+//! ReaLackey — a single-process native REAPER extension that
 //! integrates large language models into the DAW workflow.
 //!
 //! Architecture (all in one address space):
@@ -86,6 +86,6 @@ unsafe extern "C" fn ReaperPluginEntry(
 fn plugin_main(context: PluginContext) -> Result<(), Box<dyn Error>> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || app::init(context))) {
         Ok(res) => res,
-        Err(_) => Err("Panic while loading the REAPER AI Assistant".into()),
+        Err(_) => Err("Panic while loading the ReaLackey".into()),
     }
 }

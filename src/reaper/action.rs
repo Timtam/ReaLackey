@@ -76,7 +76,7 @@ fn prompt_and_store_key() {
     } else {
         "Anthropic API key:"
     };
-    let Some(input) = prompt::get_user_input("REAPER AI Assistant", caption) else {
+    let Some(input) = prompt::get_user_input("ReaLackey", caption) else {
         return; // cancelled or API unavailable
     };
     let input = input.trim();
@@ -100,7 +100,7 @@ fn prompt_and_store_key() {
     }
 }
 
-/// Adds a "REAPER AI Assistant" submenu (holding all our entries) to REAPER's
+/// Adds a "ReaLackey" submenu (holding all our entries) to REAPER's
 /// Extensions menu, wired to the same command ids as the actions.
 struct ExtMenu;
 
@@ -124,7 +124,7 @@ impl HookCustomMenu for ExtMenu {
         if let Some(id) = CMD_SETKEY.get().copied() {
             ui::ffi::add_menu_item(submenu, "Set Anthropic API key", id as i32);
         }
-        ui::ffi::attach_submenu(parent, submenu, "REAPER AI Assistant");
+        ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
     }
 }
 
@@ -138,7 +138,7 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     let _ = CMD_OPEN.set(cmd_open.get());
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
         cmd_open,
-        "REAPER AI Assistant: Open window",
+        "ReaLackey: Open window",
     ))?;
 
     // Action: set the Anthropic API key.
@@ -146,7 +146,7 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     let _ = CMD_SETKEY.set(cmd_key.get());
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
         cmd_key,
-        "REAPER AI Assistant: Set Anthropic API key",
+        "ReaLackey: Set Anthropic API key",
     ))?;
 
     // Action: manage providers (add / edit / delete / set-default).
@@ -154,7 +154,7 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     let _ = CMD_PROVIDERS.set(cmd_providers.get());
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
         cmd_providers,
-        "REAPER AI Assistant: Providers",
+        "ReaLackey: Providers",
     ))?;
 
     // One handler dispatches both command ids.
