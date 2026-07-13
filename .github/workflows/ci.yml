@@ -1,10 +1,8 @@
 name: CI
 
-# Windows is the gate (the project is Windows-first). The macOS job exists to
-# COMPILE-CHECK the macOS backends, but the C++ SWELL port (the UI shim) is still
-# a work in progress (see the "macOS backend" task), so it is marked
-# `continue-on-error` — it runs and reports, but does NOT fail the overall build.
-# Flip that off once the mac build is green.
+# Windows is the primary target; the macOS job compile-checks the SWELL/mac
+# backends. The mac build now compiles + links, so it is a hard gate again
+# (runtime behaviour on macOS is still unvalidated — no mac tester yet).
 
 on:
   push:
@@ -34,8 +32,6 @@ jobs:
   macos:
     name: macOS — build (validates the mac backends)
     runs-on: macos-latest
-    # WIP: the SWELL C++ port isn't done yet, so don't let it fail the build.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
