@@ -47,7 +47,12 @@ pub fn confirmation_required() -> bool {
 /// capability — mirroring the tool-list gating in [`crate::tools::definitions`].
 /// Otherwise a text-only model reads that it can hear/see, offers the tool to
 /// the user, and then discovers the tool was never in its toolset.
-pub fn system_prompt(supports_images: bool, supports_audio: bool) -> String {
+///
+/// When `screen_reader` is set (OSARA detected — see [`crate::reaper::osara`]),
+/// a paragraph tells the model the user is blind, so it stops giving visual
+/// directions ("look for the cog icon") and instead sees GUIs itself / prefers
+/// keyboard- and action-based paths.
+pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader: bool) -> String {
     let mut prompt = String::from(
     "You are an AI assistant embedded in the REAPER digital audio workstation. \
      You can inspect the project through read tools (project summary — including \
@@ -138,6 +143,28 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool) -> String {
         );
     }
 
+    // Screen-reader user (OSARA detected): stop the model from giving sighted
+    // directions and steer it toward accessible paths.
+    if screen_reader {
+        prompt.push_str(
+    "The user is BLIND and operates REAPER with a screen reader (NVDA + OSARA). \
+     Never give visual directions: do not tell them to 'look at' or 'see' anything, \
+     or to find something by its icon, colour, or on-screen position (e.g. 'the cog \
+     icon in the top-right'). Prefer keyboard-driven paths — REAPER actions (name the \
+     action), OSARA commands, and the parameter API — over mouse or visual navigation, \
+     and refer to controls by their name or label. Report results in words (values, \
+     states, names), not visual layout. ",
+        );
+        if supports_images {
+            prompt.push_str(
+    "When a value or control lives on a plugin or custom GUI the screen reader cannot \
+     read, do NOT ask the user to find it — YOU are their eyes: use capture_view to see \
+     it yourself and read the relevant values back, then act through the parameter API \
+     (preferred) or, only for a control with no host parameter, plugin_click/plugin_drag. ",
+            );
+        }
+    }
+
     prompt.push_str("Answer concisely.");
     prompt
 }
@@ -151,30 +178,54 @@ mod tests {
     // text-only account, the user accepts, and the tool isn't there.
     #[test]
     fn prompt_hides_audio_without_support() {
-        let p = system_prompt(true, false);
+        let p = system_prompt(true, false, false);
         assert!(!p.contains("listen_to_audio"), "must not mention audio tool");
         assert!(!p.contains("LISTEN"), "must not offer listening");
     }
 
     #[test]
     fn prompt_hides_vision_without_support() {
-        let p = system_prompt(false, true);
+        let p = system_prompt(false, true, false);
         assert!(!p.contains("capture_view"), "must not mention vision tool");
         assert!(!p.contains("plugin_click"), "must not mention pixel control");
     }
 
     #[test]
     fn prompt_shows_capabilities_when_supported() {
-        let p = system_prompt(true, true);
+        let p = system_prompt(true, true, false);
         assert!(p.contains("listen_to_audio"), "audio-capable: offer it");
         assert!(p.contains("capture_view"), "vision-capable: offer it");
     }
 
     #[test]
     fn prompt_text_only_offers_neither() {
-        let p = system_prompt(false, false);
+        let p = system_prompt(false, false, false);
         assert!(!p.contains("listen_to_audio"));
         assert!(!p.contains("capture_view"));
         assert!(p.ends_with("Answer concisely."));
+    }
+
+    // Screen-reader (OSARA) framing is opt-in and must not leak to sighted users.
+    #[test]
+    fn prompt_omits_screen_reader_framing_by_default() {
+        let p = system_prompt(true, true, false);
+        assert!(!p.contains("BLIND"), "no blind-user framing when OSARA absent");
+    }
+
+    #[test]
+    fn prompt_adds_screen_reader_framing_when_flagged() {
+        let p = system_prompt(true, true, true);
+        assert!(p.contains("BLIND"), "must state the user is blind");
+        assert!(p.contains("cog icon"), "must forbid visual directions");
+        // Vision-capable: tell it to be the user's eyes with capture_view.
+        assert!(p.contains("YOU are their eyes"));
+    }
+
+    #[test]
+    fn prompt_screen_reader_without_vision_omits_capture_view() {
+        // No vision: keep the blind-user framing but don't offer capture_view.
+        let p = system_prompt(false, false, true);
+        assert!(p.contains("BLIND"));
+        assert!(!p.contains("capture_view"), "no vision tool without images");
     }
 }

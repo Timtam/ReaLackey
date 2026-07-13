@@ -207,6 +207,9 @@ impl ControlSurface for PumpSurface {
         self.tick = self.tick.wrapping_add(1);
         if self.tick % UNDO_POLL_TICKS == 0 {
             self.poll_undo_history();
+            // Detect OSARA (it may load after us) so the worker can tailor the
+            // system prompt for a screen-reader user. No-op once found.
+            osara::refresh_running();
         }
         self.poll_working_announcement();
     }

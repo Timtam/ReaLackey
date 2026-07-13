@@ -169,6 +169,7 @@ async fn handle_prompt(
             system: Some(config::system_prompt(
                 caps.supports_images,
                 caps.supports_audio,
+                crate::reaper::osara::is_running(),
             )),
             max_tokens: cfg.max_tokens,
             messages: history.clone(),

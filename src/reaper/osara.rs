@@ -9,12 +9,18 @@
 //! installed — announcements become no-ops and the output pane is the fallback.
 
 use std::ffi::{c_void, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// `void osara_outputMessage(const char* message)`.
 type OsaraOutputMessage = unsafe extern "C" fn(*const std::ffi::c_char);
 
 static OSARA_FN: OnceLock<OsaraOutputMessage> = OnceLock::new();
+/// Set once OSARA is detected. Readable from ANY thread (unlike `resolve`, which
+/// needs the main-thread plug-in context) so the worker can tailor the system
+/// prompt for a screen-reader user. OSARA never unloads mid-session, so once
+/// true it stays true.
+static OSARA_RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn resolve() -> Option<OsaraOutputMessage> {
     if let Some(f) = OSARA_FN.get() {
@@ -35,7 +41,25 @@ fn resolve() -> Option<OsaraOutputMessage> {
     let f: OsaraOutputMessage =
         unsafe { std::mem::transmute::<*mut c_void, OsaraOutputMessage>(ptr) };
     let _ = OSARA_FN.set(f);
+    OSARA_RUNNING.store(true, Ordering::Relaxed);
     Some(f)
+}
+
+/// Whether OSARA has been detected this session — i.e. the user is a screen-reader
+/// user. Safe to call from any thread. Populated on the main thread by
+/// [`refresh_running`] (and by any [`announce`]).
+pub fn is_running() -> bool {
+    OSARA_RUNNING.load(Ordering::Relaxed)
+}
+
+/// Main-thread probe for OSARA; caches the result. Cheap and a no-op once found.
+/// Called from the control-surface `run` loop so detection survives REAPER
+/// loading OSARA after us (see the lazy-resolution note above).
+pub fn refresh_running() {
+    if OSARA_RUNNING.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = resolve();
 }
 
 /// Speak a message (main thread only). No-op if OSARA is absent.
