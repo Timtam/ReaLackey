@@ -27,6 +27,20 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
     registry::set_active_key(key)
 }
 
+/// Maximum agentic tool-call turns per user message — bounded so a tool loop
+/// can't run away. Default 25: operating an inaccessible plugin GUI is an
+/// iterative capture→click→capture-to-verify loop that needs many steps, so the
+/// old cap of 8 was hit mid-task. Override with `RAAI_MAX_TURNS` (clamped 1..=200).
+pub fn max_turns() -> usize {
+    parse_max_turns(std::env::var("RAAI_MAX_TURNS").ok().as_deref())
+}
+
+fn parse_max_turns(v: Option<&str>) -> usize {
+    v.and_then(|s| s.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(1, 200))
+        .unwrap_or(25)
+}
+
 /// Whether mutating tools require user confirmation (design: configurable,
 /// default on). Set `RAAI_CONFIRM=off` (or 0/false/no) to disable.
 pub fn confirmation_required() -> bool {
@@ -179,7 +193,16 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
 
 #[cfg(test)]
 mod tests {
-    use super::system_prompt;
+    use super::{parse_max_turns, system_prompt};
+
+    #[test]
+    fn max_turns_parses_and_clamps() {
+        assert_eq!(parse_max_turns(None), 25, "unset -> default");
+        assert_eq!(parse_max_turns(Some("garbage")), 25, "unparseable -> default");
+        assert_eq!(parse_max_turns(Some(" 40 ")), 40, "trimmed + parsed");
+        assert_eq!(parse_max_turns(Some("0")), 1, "clamped up to 1");
+        assert_eq!(parse_max_turns(Some("100000")), 200, "clamped down to 200");
+    }
 
     // The system prompt must never advertise a capability whose tool is gated
     // out of the toolset — otherwise the model offers e.g. listen_to_audio to a

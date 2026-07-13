@@ -20,8 +20,6 @@ use crate::providers::{
 };
 use crate::tools::{self, ReaperOp, ToolOutcome};
 
-/// Safety cap on tool-call iterations per user prompt.
-const MAX_TURNS: usize = 8;
 
 /// True while a prompt is being processed. The main-thread pump reads this to
 /// emit a periodic "still working" announcement (see `control_surface::run`).
@@ -163,7 +161,8 @@ async fn handle_prompt(
     // times. None = not yet asked; Some(v) = the user's decision for this request.
     let mut changes_decision: Option<bool> = None;
 
-    for turn in 0..MAX_TURNS {
+    let max_turns = config::max_turns();
+    for turn in 0..max_turns {
         let req = ChatRequest {
             model: cfg.model.clone(),
             system: Some(config::system_prompt(
@@ -274,8 +273,16 @@ async fn handle_prompt(
                 content: results,
             });
 
-            if turn + 1 == MAX_TURNS {
-                let _ = ui_tx.send(UiEvent::Error("Reached the tool-call limit.".into()));
+            if turn + 1 == max_turns {
+                // Not an error — the task just ran long (e.g. an iterative
+                // capture→click→verify GUI session). History is preserved, so a
+                // follow-up "continue" resumes exactly where this left off.
+                let msg = format!(
+                    "Paused after {max_turns} tool steps for this message. Say \"continue\" and \
+                     I'll pick up where I left off (or raise RAAI_MAX_TURNS)."
+                );
+                let _ = ui_tx.send(UiEvent::Notice(msg.clone()));
+                let _ = ui_tx.send(UiEvent::Announce(msg));
             }
             continue;
         }
