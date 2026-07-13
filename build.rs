@@ -28,7 +28,12 @@ fn main() {
     let mut shim = cc::Build::new();
     shim.cpp(true).file("cpp/ui_shim.cpp").include("cpp");
     if target_os != "windows" {
-        shim.include(format!("{wdl}/swell"));
+        // SWELL_PROVIDED_BY_APP makes swell.h declare the SWELL API as `extern "C"`
+        // function pointers (resolved at load from the host). The shim MUST use the
+        // same define as the modstub, or its calls get C++-mangled names that don't
+        // match the modstub's C symbols → link errors.
+        shim.include(format!("{wdl}/swell"))
+            .define("SWELL_PROVIDED_BY_APP", None);
     }
     if target_os == "macos" {
         shim.cpp_set_stdlib("c++");
