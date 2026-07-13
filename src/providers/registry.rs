@@ -11,10 +11,11 @@ use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-/// Credential-store service name. DELIBERATELY unchanged across the ReaLackey
-/// rename: it is the key under which every stored API key lives, so renaming it
-/// would orphan the user's saved keys. It is an internal identifier, never shown.
-const KEYRING_SERVICE: &str = "reaper-ai-assistant";
+/// Credential-store service name (the "section" every API key lives under).
+const KEYRING_SERVICE: &str = "realackey";
+/// The pre-rename service name. `migrate_keyring` copies keys from here into the
+/// current service on startup (then removes the old copy) so keys are coherent.
+const PRIOR_KEYRING_SERVICE: &str = "reaper-ai-assistant";
 /// Legacy account name for the single Anthropic key (pre-multi-provider). The
 /// seeded `anthropic` account reuses it so existing keys keep working.
 const LEGACY_KEY_ACCOUNT: &str = "anthropic-api-key";
@@ -240,16 +241,51 @@ fn delete_key(id: &str) {
     }
 }
 
-fn keyring_entry(account: &str) -> keyring::Result<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, account)
+fn keyring_entry_in(service: &str, account: &str) -> keyring::Result<keyring::Entry> {
+    keyring::Entry::new(service, account)
 }
 
-fn keyring_get(account: &str) -> Option<String> {
-    keyring_entry(account)
+fn keyring_entry(account: &str) -> keyring::Result<keyring::Entry> {
+    keyring_entry_in(KEYRING_SERVICE, account)
+}
+
+fn keyring_get_in(service: &str, account: &str) -> Option<String> {
+    keyring_entry_in(service, account)
         .ok()?
         .get_password()
         .ok()
         .filter(|s| !s.trim().is_empty())
+}
+
+fn keyring_get(account: &str) -> Option<String> {
+    keyring_get_in(KEYRING_SERVICE, account)
+}
+
+/// Copy each provider's key from the pre-rename credential service into the
+/// current one ("realackey"), then remove the old copy — so keys live coherently
+/// under one section. Idempotent: an already-present new entry short-circuits.
+/// The keyring has no enumerate, so only ids present in the store are migrated
+/// (any key for a since-deleted provider stays under the old service, unused).
+fn migrate_keyring(providers: &[ProviderConfig]) {
+    for p in providers {
+        let account = account_for(&p.id);
+        if keyring_get_in(KEYRING_SERVICE, &account).is_some() {
+            continue; // already under the new service
+        }
+        let Some(key) = keyring_get_in(PRIOR_KEYRING_SERVICE, &account) else {
+            continue; // nothing to migrate for this id
+        };
+        // Write under the new service and verify before dropping the old copy.
+        let moved = keyring_entry_in(KEYRING_SERVICE, &account)
+            .and_then(|e| e.set_password(&key))
+            .is_ok()
+            && keyring_get_in(KEYRING_SERVICE, &account).as_deref() == Some(key.as_str());
+        if moved {
+            if let Ok(e) = keyring_entry_in(PRIOR_KEYRING_SERVICE, &account) {
+                let _ = e.delete_credential();
+            }
+        }
+    }
 }
 
 // ---- persistence ------------------------------------------------------------
@@ -266,18 +302,43 @@ fn config_base() -> Option<PathBuf> {
 }
 
 fn config_dir() -> Option<PathBuf> {
+    // Portable: live under REAPER's resource path (like OSARA), so a portable
+    // REAPER install carries ReaLackey's config with it. Needs the REAPER API,
+    // which is available by the time the store loads (init runs after api::set).
+    if let Some(p) = crate::reaper::api::with(|r| {
+        r.get_resource_path(|rp| rp.join("ReaLackey").into_std_path_buf())
+    }) {
+        return Some(p);
+    }
+    // Fallback if the API isn't ready: the per-user app dir.
     config_base().map(|b| b.join("ReaLackey"))
 }
 
-/// One-time move of the pre-rename config folder (`REAPER-AI-Assistant` ->
-/// `ReaLackey`) so a renamed build keeps the user's saved providers. The keyring
-/// service name is deliberately unchanged, so stored API keys are unaffected.
-fn migrate_config_dir() {
-    if let (Some(base), Some(new)) = (config_base(), config_dir()) {
-        let old = base.join("REAPER-AI-Assistant");
-        if old.is_dir() && !new.exists() {
-            let _ = std::fs::rename(&old, &new);
+/// One-time copy of the pre-portable config (which lived in the per-user app
+/// dir, under the current name or the original "REAPER-AI-Assistant") into the
+/// resource-path location, so the move keeps the user's saved providers. Copy,
+/// not rename, to survive a cross-volume portable install; the stale old file is
+/// harmless and can be removed by hand.
+fn migrate_config() {
+    let (Some(new_path), Some(base)) = (config_path(), config_base()) else {
+        return;
+    };
+    if new_path.exists() {
+        return;
+    }
+    let old = ["ReaLackey", "REAPER-AI-Assistant"]
+        .into_iter()
+        .map(|n| base.join(n).join("providers.json"))
+        .find(|p| p.exists());
+    if let Some(old_path) = old {
+        // Don't migrate onto itself (e.g. resource path == app dir on some setups).
+        if old_path == new_path {
+            return;
         }
+        if let Some(parent) = new_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(&old_path, &new_path);
     }
 }
 
@@ -286,12 +347,13 @@ fn config_path() -> Option<PathBuf> {
 }
 
 fn load_or_seed() -> Store {
-    migrate_config_dir(); // rename the pre-ReaLackey config folder if present
+    migrate_config(); // bring a pre-portable config into the resource path
     if let Some(path) = config_path() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(mut store) = serde_json::from_str::<Store>(&text) {
                 if !store.providers.is_empty() {
                     migrate(&mut store);
+                    migrate_keyring(&store.providers);
                     return store;
                 }
             }
@@ -313,6 +375,7 @@ fn load_or_seed() -> Store {
         }],
     };
     let _ = save(&store);
+    migrate_keyring(&store.providers);
     store
 }
 

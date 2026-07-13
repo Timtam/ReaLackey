@@ -40,10 +40,11 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
         .map(|f| f as *mut c_void)
         .unwrap_or(std::ptr::null_mut());
 
-    // Resolve REAPER's native input box (for the "set API key" action) and load
-    // any persisted/env API key into the cache — both before `context` moves.
+    // Resolve REAPER's native input box (for the "set API key" action) before
+    // `context` moves. The provider store/keys load LATER (after `api::set`),
+    // because the config now lives under REAPER's resource path, which needs the
+    // main-thread REAPER handle.
     crate::reaper::prompt::init(&context);
-    crate::config::init_key_cache();
 
     // Load the medium-level session (consumes the context).
     let mut session = ReaperSession::load(context);
@@ -87,5 +88,10 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
         _task_tx: task_tx,
     }));
     api::set(app.session.reaper());
+
+    // Now that the REAPER handle is published, load the provider store + keys
+    // (resource-path config dir + one-time config/keyring migrations). Runs here
+    // on the main thread, before any prompt can touch the registry.
+    crate::config::init_key_cache();
     Ok(())
 }
