@@ -6,28 +6,14 @@
 
 use std::sync::OnceLock;
 
-use crossbeam_channel::Sender;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::ai::protocol::{MainTask, UiEvent};
+use crate::ai::protocol::MainTask;
 
 static TASK_TX: OnceLock<UnboundedSender<MainTask>> = OnceLock::new();
-static UI_TX: OnceLock<Sender<UiEvent>> = OnceLock::new();
 
 pub fn set_task_sender(tx: UnboundedSender<MainTask>) {
     let _ = TASK_TX.set(tx);
-}
-
-pub fn set_ui_sender(tx: Sender<UiEvent>) {
-    let _ = UI_TX.set(tx);
-}
-
-/// Emit a `UiEvent` to the main-thread pump (for feedback from main-thread code
-/// such as the "set API key" action).
-pub fn emit(ev: UiEvent) {
-    if let Some(tx) = UI_TX.get() {
-        let _ = tx.send(ev);
-    }
 }
 
 /// "Send" pressed.

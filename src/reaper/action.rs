@@ -1,7 +1,7 @@
-//! Registers the extension's actions ("Open window" and "Set Anthropic API
-//! key") and mirrors them into REAPER's Extensions menu. Both actions share one
-//! `HookCommand` that dispatches on the command id. The callbacks are static, so
-//! the command ids and the REAPER main window handle live in process globals.
+//! Registers the extension's actions ("Open window" and "Providers") and mirrors
+//! them into REAPER's Extensions menu. Both actions share one `HookCommand` that
+//! dispatches on the command id. The callbacks are static, so the command ids and
+//! the REAPER main window handle live in process globals.
 
 use std::error::Error;
 use std::ffi::c_void;
@@ -13,12 +13,9 @@ use reaper_medium::{
     TranslateAccelResult,
 };
 
-use crate::ai::protocol::UiEvent;
-use crate::reaper::prompt;
-use crate::{config, ui};
+use crate::ui;
 
 static CMD_OPEN: OnceLock<u32> = OnceLock::new();
-static CMD_SETKEY: OnceLock<u32> = OnceLock::new();
 static CMD_PROVIDERS: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<usize> = OnceLock::new();
 
@@ -34,9 +31,6 @@ impl HookCommand for Commands {
                 // (idempotent; no-op if already created or unavailable).
                 ui::output::ensure_created();
             }
-            true
-        } else if Some(id) == CMD_SETKEY.get().copied() {
-            prompt_and_store_key();
             true
         } else if Some(id) == CMD_PROVIDERS.get().copied() {
             ui::ffi::show_providers();
@@ -69,37 +63,6 @@ impl TranslateAccel for AccelHook {
     }
 }
 
-/// Prompt for the Anthropic API key (native input box) and store it.
-fn prompt_and_store_key() {
-    let caption = if config::has_api_key() {
-        "Anthropic API key (a key is already set):"
-    } else {
-        "Anthropic API key:"
-    };
-    let Some(input) = prompt::get_user_input("ReaLackey", caption) else {
-        return; // cancelled or API unavailable
-    };
-    let input = input.trim();
-    if input.is_empty() {
-        return;
-    }
-    match config::set_api_key(input) {
-        Ok(()) => {
-            ui::bridge::emit(UiEvent::Status("Anthropic API key saved.".into()));
-            ui::bridge::emit(UiEvent::Announce("Anthropic API key saved.".into()));
-        }
-        Err(e) => {
-            // The key works for this session; only persistence failed.
-            ui::bridge::emit(UiEvent::Status(
-                "API key set for this session (not persisted).".into(),
-            ));
-            ui::bridge::emit(UiEvent::Announce(format!(
-                "API key set for this session. Could not persist it: {e}"
-            )));
-        }
-    }
-}
-
 /// Adds a "ReaLackey" submenu (holding all our entries) to REAPER's
 /// Extensions menu, wired to the same command ids as the actions.
 struct ExtMenu;
@@ -121,9 +84,6 @@ impl HookCustomMenu for ExtMenu {
         if let Some(id) = CMD_PROVIDERS.get().copied() {
             ui::ffi::add_menu_item(submenu, "Providers\u{2026}", id as i32);
         }
-        if let Some(id) = CMD_SETKEY.get().copied() {
-            ui::ffi::add_menu_item(submenu, "Set Anthropic API key", id as i32);
-        }
         ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
     }
 }
@@ -141,15 +101,8 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
         "ReaLackey: Open window",
     ))?;
 
-    // Action: set the Anthropic API key.
-    let cmd_key = session.plugin_register_add_command_id("RAAI_SetApiKey")?;
-    let _ = CMD_SETKEY.set(cmd_key.get());
-    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
-        cmd_key,
-        "ReaLackey: Set Anthropic API key",
-    ))?;
-
-    // Action: manage providers (add / edit / delete / set-default).
+    // Action: manage providers (add / edit / delete / set-default), including
+    // per-provider API keys (this superseded the standalone "Set API key" action).
     let cmd_providers = session.plugin_register_add_command_id("RAAI_Providers")?;
     let _ = CMD_PROVIDERS.set(cmd_providers.get());
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(

@@ -41,12 +41,6 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
         .map(|f| f as *mut c_void)
         .unwrap_or(std::ptr::null_mut());
 
-    // Resolve REAPER's native input box (for the "set API key" action) before
-    // `context` moves. The provider store/keys load LATER (after `api::set`),
-    // because the config now lives under REAPER's resource path, which needs the
-    // main-thread REAPER handle.
-    crate::reaper::prompt::init(&context);
-
     // Load the medium-level session (consumes the context).
     let mut session = ReaperSession::load(context);
 
@@ -62,7 +56,6 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     let (op_tx, op_rx) = crossbeam_channel::unbounded::<ReaperOp>();
     let (task_tx, task_rx) = tokio::sync::mpsc::unbounded_channel::<MainTask>();
     ui::bridge::set_task_sender(task_tx.clone());
-    ui::bridge::set_ui_sender(ui_tx.clone());
 
     // Worker thread: agent loop + HTTP/SSE + tool orchestration.
     worker::spawn(task_rx, ui_tx, op_tx);

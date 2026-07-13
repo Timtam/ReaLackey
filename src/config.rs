@@ -16,17 +16,6 @@ pub fn api_key() -> Option<String> {
     registry::active_key()
 }
 
-/// Whether the active provider can send (key/endpoint present).
-pub fn has_api_key() -> bool {
-    registry::active_can_send()
-}
-
-/// Set (or, with an empty string, clear) the active provider's key. Used by the
-/// legacy "Set API key" action until the provider dialog (M4) supersedes it.
-pub fn set_api_key(key: &str) -> Result<(), String> {
-    registry::set_active_key(key)
-}
-
 /// Maximum agentic tool-call turns per user message — bounded so a tool loop
 /// can't run away. The value is per-provider (set in the provider settings
 /// dialog); operating an inaccessible plugin GUI is an iterative

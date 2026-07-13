@@ -187,18 +187,6 @@ pub fn active_key() -> Option<String> {
     active().and_then(|c| resolve_key(&c))
 }
 
-/// Set (or, with an empty string, clear) the default account's key. Used by the
-/// legacy "Set API key" action until the provider dialog (M4) replaces it.
-pub fn set_active_key(key: &str) -> Result<(), String> {
-    let id = default_id().ok_or("no active provider configured")?;
-    set_key(&id, key)
-}
-
-/// Whether the default account can currently send (key/endpoint present).
-pub fn active_can_send() -> bool {
-    active().map(|c| c.can_send()).unwrap_or(false)
-}
-
 // ---- key resolution (credential store) --------------------------------------
 
 /// Credential-store account name for a provider id. The seeded `anthropic`
