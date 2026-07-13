@@ -371,7 +371,7 @@ details.toolgroup[open]>summary.tgsum::before{content:"\25be  ";}
      aria-live here makes a screen reader announce every token. The final answer
      is spoken via #live + OSARA; turns are navigable by their h2 headings. -->
 <div id="log"></div>
-<div id="status">Ready.</div>
+<div id="status" role="status" aria-atomic="true" aria-label="Assistant status">Ready.</div>
 <form id="composer">
 <textarea id="msg" rows="1" aria-label="Message the assistant" placeholder="Ask the assistant…  (Enter to send, Shift+Enter = new line)"></textarea>
 <button id="send" type="submit">Send</button>
