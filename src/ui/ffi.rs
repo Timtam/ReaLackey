@@ -59,6 +59,7 @@ pub const PE_MAXTOK: c_int = 1026;
 pub const PE_VISION: c_int = 1027;
 pub const PE_KEY: c_int = 1028;
 pub const PE_KEYHINT: c_int = 1029;
+pub const PE_MAXTURNS: c_int = 1030;
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
 /// non-Windows; ignored on Windows).

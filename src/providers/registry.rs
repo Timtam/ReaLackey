@@ -41,6 +41,11 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     pub model: String,
     pub max_tokens: u32,
+    /// Max agentic tool-call turns per user message (bounded loop). Per-provider
+    /// so a cheap/local account can iterate more than a metered one. Defaulted for
+    /// configs saved before this field existed.
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
     /// Whether the chosen model accepts image input (vision). Per-MODEL, not
     /// per-provider (gpt-4o yes, plain Llama no), so it lives here rather than as
     /// an adapter constant. Anthropic accounts are always vision-capable; this is
@@ -280,6 +285,7 @@ fn load_or_seed() -> Store {
             base_url: None,
             model: default_anthropic_model(),
             max_tokens: 8192,
+            max_turns: default_max_turns(),
             supports_images: true,
             supports_audio: false,
         }],
@@ -311,4 +317,9 @@ fn save(store: &Store) -> Result<(), String> {
 /// Default Claude model id (env override kept for parity with the old config).
 fn default_anthropic_model() -> String {
     std::env::var("RAAI_MODEL").unwrap_or_else(|_| "claude-opus-4-8".to_string())
+}
+
+/// Default max agentic turns for a new/legacy account (see `config::max_turns`).
+fn default_max_turns() -> u32 {
+    25
 }

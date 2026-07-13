@@ -194,6 +194,7 @@ struct ProvSession {
     base_url: String,
     model: String,
     max_tokens: u32,
+    max_turns: u32,
     vision: bool,
     /// Set true once the account was successfully saved (so the list repopulates).
     changed: bool,
@@ -220,6 +221,7 @@ fn add_provider() -> bool {
         base_url: preset.base_url.to_string(),
         model: preset.model.to_string(),
         max_tokens: preset.max_tokens,
+        max_turns: 25,
         vision: preset.vision,
         changed: false,
     })
@@ -237,6 +239,7 @@ fn edit_provider(index: i32) -> bool {
         base_url: cfg.base_url.clone().unwrap_or_default(),
         model: cfg.model.clone(),
         max_tokens: cfg.max_tokens,
+        max_turns: cfg.max_turns,
         vision: cfg.supports_images,
         changed: false,
     })
@@ -317,6 +320,7 @@ pub fn edit_dialog_init() {
         ui::ffi::pe_set_text(ui::ffi::PE_LABEL, &sess.label);
         ui::ffi::pe_set_text(ui::ffi::PE_MODEL, &sess.model);
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTOK, &sess.max_tokens.to_string());
+        ui::ffi::pe_set_text(ui::ffi::PE_MAXTURNS, &sess.max_turns.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_KEY, "");
         ui::ffi::pe_set_text(
             ui::ffi::PE_KEYHINT,
@@ -426,10 +430,18 @@ pub fn edit_dialog_fetch() {
 /// dialog should close (true = close; false = keep open so the user can fix an
 /// error).
 pub fn edit_dialog_ok() -> bool {
-    let Some((is_new, id, kind, def_label, def_model, def_max)) = SESSION.with(|s| {
-        s.borrow()
-            .as_ref()
-            .map(|x| (x.is_new, x.id.clone(), x.kind, x.label.clone(), x.model.clone(), x.max_tokens))
+    let Some((is_new, id, kind, def_label, def_model, def_max, def_turns)) = SESSION.with(|s| {
+        s.borrow().as_ref().map(|x| {
+            (
+                x.is_new,
+                x.id.clone(),
+                x.kind,
+                x.label.clone(),
+                x.model.clone(),
+                x.max_tokens,
+                x.max_turns,
+            )
+        })
     }) else {
         return true;
     };
@@ -452,6 +464,25 @@ pub fn edit_dialog_ok() -> bool {
                     false,
                 );
                 return false; // keep the dialog open so the user can fix it
+            }
+        }
+    };
+    // Tool steps (max agentic turns): same empty=keep / invalid=reject rule.
+    // Clamped to 1..=200 by config::max_turns at use; reject 0/garbage here.
+    let turns_raw = ui::ffi::pe_get_text(ui::ffi::PE_MAXTURNS);
+    let turns_trimmed = turns_raw.trim();
+    let max_turns = if turns_trimmed.is_empty() {
+        def_turns
+    } else {
+        match turns_trimmed.parse::<u32>() {
+            Ok(n) if (1..=200).contains(&n) => n,
+            _ => {
+                ui::ffi::message_box(
+                    "Provider settings",
+                    "Tool steps must be a whole number between 1 and 200.",
+                    false,
+                );
+                return false;
             }
         }
     };
@@ -478,6 +509,7 @@ pub fn edit_dialog_ok() -> bool {
         base_url,
         model,
         max_tokens,
+        max_turns,
         supports_images: vision,
         supports_audio,
     };

@@ -31,5 +31,6 @@
 #define ID_PE_VISION         1027   // "Supports images" checkbox
 #define ID_PE_KEY            1028
 #define ID_PE_KEYHINT        1029   // caption under the key field
+#define ID_PE_MAXTURNS       1030   // "Tool steps:" (max agentic turns) field
 
 #endif // RAAI_RESOURCE_H

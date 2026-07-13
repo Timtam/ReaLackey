@@ -28,17 +28,27 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
 }
 
 /// Maximum agentic tool-call turns per user message — bounded so a tool loop
-/// can't run away. Default 25: operating an inaccessible plugin GUI is an
-/// iterative capture→click→capture-to-verify loop that needs many steps, so the
-/// old cap of 8 was hit mid-task. Override with `RAAI_MAX_TURNS` (clamped 1..=200).
-pub fn max_turns() -> usize {
-    parse_max_turns(std::env::var("RAAI_MAX_TURNS").ok().as_deref())
+/// can't run away. The value is per-provider (set in the provider settings
+/// dialog); operating an inaccessible plugin GUI is an iterative
+/// capture→click→verify loop that needs many steps. `RAAI_MAX_TURNS` remains a
+/// global override for power users. Result clamped to 1..=200; 0/invalid → 25.
+pub fn max_turns(provider_value: u32) -> usize {
+    resolve_max_turns(
+        std::env::var("RAAI_MAX_TURNS").ok().as_deref(),
+        provider_value,
+    )
 }
 
-fn parse_max_turns(v: Option<&str>) -> usize {
-    v.and_then(|s| s.trim().parse::<usize>().ok())
-        .map(|n| n.clamp(1, 200))
-        .unwrap_or(25)
+fn resolve_max_turns(env: Option<&str>, provider_value: u32) -> usize {
+    if let Some(v) = env.and_then(|s| s.trim().parse::<usize>().ok()) {
+        return v.clamp(1, 200); // global override wins
+    }
+    let pv = if provider_value == 0 {
+        25
+    } else {
+        provider_value as usize
+    };
+    pv.clamp(1, 200)
 }
 
 /// Whether mutating tools require user confirmation (design: configurable,
@@ -193,15 +203,18 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_max_turns, system_prompt};
+    use super::{resolve_max_turns, system_prompt};
 
     #[test]
-    fn max_turns_parses_and_clamps() {
-        assert_eq!(parse_max_turns(None), 25, "unset -> default");
-        assert_eq!(parse_max_turns(Some("garbage")), 25, "unparseable -> default");
-        assert_eq!(parse_max_turns(Some(" 40 ")), 40, "trimmed + parsed");
-        assert_eq!(parse_max_turns(Some("0")), 1, "clamped up to 1");
-        assert_eq!(parse_max_turns(Some("100000")), 200, "clamped down to 200");
+    fn max_turns_resolves_env_over_provider_and_clamps() {
+        // No env override: the per-provider value is used (0 -> default 25).
+        assert_eq!(resolve_max_turns(None, 0), 25, "0/unset provider -> default");
+        assert_eq!(resolve_max_turns(None, 40), 40, "provider value used");
+        assert_eq!(resolve_max_turns(None, 9999), 200, "provider clamped down");
+        // Env override wins over the provider value, and is itself clamped.
+        assert_eq!(resolve_max_turns(Some("12"), 40), 12, "env overrides provider");
+        assert_eq!(resolve_max_turns(Some("junk"), 40), 40, "bad env -> provider");
+        assert_eq!(resolve_max_turns(Some("0"), 40), 1, "env clamped up to 1");
     }
 
     // The system prompt must never advertise a capability whose tool is gated

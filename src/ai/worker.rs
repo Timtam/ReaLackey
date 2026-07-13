@@ -161,7 +161,7 @@ async fn handle_prompt(
     // times. None = not yet asked; Some(v) = the user's decision for this request.
     let mut changes_decision: Option<bool> = None;
 
-    let max_turns = config::max_turns();
+    let max_turns = config::max_turns(cfg.max_turns);
     for turn in 0..max_turns {
         let req = ChatRequest {
             model: cfg.model.clone(),
