@@ -357,6 +357,7 @@ pub fn edit_dialog_fetch() {
     } else {
         Some(key_field.trim().to_string())
     };
+    let key_missing = key.as_deref().map(str::trim).unwrap_or("").is_empty();
 
     if kind == AdapterKind::OpenAiCompatible && base.trim().is_empty() {
         ui::ffi::message_box(
@@ -367,11 +368,37 @@ pub fn edit_dialog_fetch() {
         return;
     }
 
+    // Anthropic always needs a key — hitting the API without one just returns an
+    // opaque HTTP error, so guide the user instead. (OpenAI-compatible endpoints
+    // may be keyless local servers like Ollama/LM Studio, so those are allowed to
+    // proceed and only get the hint if the request actually fails.)
+    if kind == AdapterKind::Anthropic && key_missing {
+        ui::ffi::message_box(
+            "Fetch models",
+            "Enter your API key first, then fetch the model list.",
+            false,
+        );
+        return;
+    }
+
     osara::announce("Fetching models\u{2026}");
     let models = match models_api::fetch_models(kind, base.trim(), key.as_deref()) {
         Ok(m) => m,
         Err(e) => {
-            ui::ffi::message_box("Fetch models", &format!("Could not fetch models: {e}"), false);
+            // A missing key is the most common cause of an auth/404 failure; call it
+            // out explicitly since the raw provider error rarely makes it obvious.
+            let hint = if key_missing {
+                "\n\nNo API key was entered. Most cloud providers require one: type your key in \
+                 the \u{201c}API key\u{201d} field, then try Fetch models again. (Local providers \
+                 such as Ollama or LM Studio don\u{2019}t need a key.)"
+            } else {
+                ""
+            };
+            ui::ffi::message_box(
+                "Fetch models",
+                &format!("Could not fetch models: {e}{hint}"),
+                false,
+            );
             return;
         }
     };
