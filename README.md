@@ -146,6 +146,15 @@ synthetic input have Windows (GDI / SendInput) and macOS (Core Graphics /
 CGEvent) backends. The macOS backends and webview compile and link in CI but
 have not yet been exercised in a live REAPER host.
 
+## Development
+
+ReaLackey is developed with [Claude Code](https://claude.com/claude-code),
+Anthropic's agentic coding tool, so a large share of the code is written by Claude.
+That does **not** mean it ships unchecked: the developer driving Claude Code is a
+working software engineer who reads, tests, and vets every change before it is
+committed — nothing lands unreviewed. The AI is a fast collaborator here, not an
+unsupervised author.
+
 ## Contributing
 
 Issues and PRs welcome. The codebase is English-only. Changelog entries go under
