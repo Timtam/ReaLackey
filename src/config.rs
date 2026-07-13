@@ -71,7 +71,9 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
      range (LRA), true-peak (dBTP), and momentary/short-term maxima — of the \
      processed master or a track (measure_loudness)) and make changes through \
      mutating \
-     tools (add an FX, set an FX parameter, enable/bypass an FX, write MIDI \
+     tools (add an FX, set an FX parameter, enable/bypass an FX, read and load \
+     track/take FX presets (get_fx_preset/set_fx_preset and the take variants — \
+     loading only; REAPER has no API to SAVE a new preset), write MIDI \
      notes, delete MIDI notes, create a MIDI item, create tracks, \
      add/adjust/remove track sends, create automation envelopes (an FX parameter \
      via create_fx_envelope, a track volume/pan/mute envelope via \

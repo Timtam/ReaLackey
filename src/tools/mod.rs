@@ -258,6 +258,74 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                 json!(["track_index", "fx_index", "enabled"]),
             ),
         },
+        ToolDef {
+            name: "get_fx_preset".into(),
+            description: "Read the current preset of a track FX: its name, 0-based preset_index \
+                          (-1 when no preset is active), and the total preset_count. \
+                          matches_preset is false when the FX state has been edited away from the \
+                          stored preset. FX index from get_track_fx."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "fx_index": { "type": "integer" }
+                }),
+                json!(["track_index", "fx_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_fx_preset".into(),
+            description: "Load (select) a preset for a track FX. Provide EXACTLY ONE of: name \
+                          (exact preset name), index (0-based preset index), or navigate \
+                          ('next'/'previous'). NOTE: REAPER's API can only LOAD existing presets — \
+                          it cannot SAVE a new preset (that must be done from the FX window's \
+                          preset menu). CHANGES the project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "fx_index": { "type": "integer" },
+                    "name": { "type": "string", "description": "exact preset name to load" },
+                    "index": { "type": "integer", "description": "0-based preset index to load" },
+                    "navigate": { "type": "string", "enum": ["next", "previous"], "description": "step to the next/previous preset" }
+                }),
+                json!(["track_index", "fx_index"]),
+            ),
+        },
+        ToolDef {
+            name: "get_take_fx_preset".into(),
+            description: "Read the current preset of a take (item) FX — name, 0-based preset_index \
+                          (-1 when none), total preset_count, and matches_preset. take_index \
+                          defaults to the active take. FX index from get_take_fx."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "fx_index": { "type": "integer" },
+                    "take_index": { "type": "integer" }
+                }),
+                json!(["item_index", "fx_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_take_fx_preset".into(),
+            description: "Load (select) a preset for a take (item) FX. Provide EXACTLY ONE of name, \
+                          index, or navigate ('next'/'previous'); take_index defaults to the active \
+                          take. Like set_fx_preset, the API can only LOAD presets, not save new \
+                          ones. CHANGES the project (confirmed + undo-wrapped)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "fx_index": { "type": "integer" },
+                    "take_index": { "type": "integer" },
+                    "name": { "type": "string", "description": "exact preset name to load" },
+                    "index": { "type": "integer", "description": "0-based preset index to load" },
+                    "navigate": { "type": "string", "enum": ["next", "previous"], "description": "step to the next/previous preset" }
+                }),
+                json!(["item_index", "fx_index"]),
+            ),
+        },
         // --- undo / history (reversible; not confirmation-gated) ---
         ToolDef {
             name: "undo".into(),
@@ -1530,6 +1598,26 @@ mod definition_tests {
     }
 
     #[test]
+    fn fx_preset_tools_advertised_and_gated() {
+        use serde_json::json;
+        let defs = super::definitions(false, false);
+        for name in [
+            "get_fx_preset",
+            "set_fx_preset",
+            "get_take_fx_preset",
+            "set_take_fx_preset",
+        ] {
+            assert!(defs.iter().any(|d| d.name == name), "{name} advertised");
+        }
+        // Loading a preset changes the FX state -> confirmation-gated.
+        assert!(super::preview("set_fx_preset", &json!({})).is_some());
+        assert!(super::preview("set_take_fx_preset", &json!({})).is_some());
+        // Reads are not gated.
+        assert!(super::preview("get_fx_preset", &json!({})).is_none());
+        assert!(super::preview("get_take_fx_preset", &json!({})).is_none());
+    }
+
+    #[test]
     fn envelope_tools_advertised_and_gated() {
         use serde_json::json;
         let defs = super::definitions(false, false);
@@ -1945,6 +2033,34 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "track_index")?,
             req_u32(input, "fx_index")?,
             req_bool(input, "enabled")?,
+        ),
+        "get_fx_preset" => get_fx_preset(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+        ),
+        "set_fx_preset" => set_fx_preset(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+            opt_str(input, "name"),
+            input.get("index").and_then(|v| v.as_i64()),
+            opt_str(input, "navigate"),
+        ),
+        "get_take_fx_preset" => get_take_fx_preset(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "fx_index")?,
+            opt_u32(input, "take_index"),
+        ),
+        "set_take_fx_preset" => set_take_fx_preset(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "fx_index")?,
+            opt_u32(input, "take_index"),
+            opt_str(input, "name"),
+            input.get("index").and_then(|v| v.as_i64()),
+            opt_str(input, "navigate"),
         ),
         // MIDI
         "get_take_midi" => get_take_midi(
@@ -2412,6 +2528,18 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
                 .get("step_count")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "1".into()),
+        )),
+        "set_fx_preset" => Some(format!(
+            "Load a preset ({}) for track {} FX {}",
+            preset_sel_desc(input),
+            show("track_index"),
+            show("fx_index"),
+        )),
+        "set_take_fx_preset" => Some(format!(
+            "Load a preset ({}) for item {} take FX {}",
+            preset_sel_desc(input),
+            show("item_index"),
+            show("fx_index"),
         )),
         "set_fx_enabled" => Some(format!(
             "{} track {} FX {}",
@@ -4243,6 +4371,204 @@ fn remove_take_fx(
         Ok(json!({ "removed": true, "item_index": item_index, "fx_index": fx_index }))
     } else {
         Err(format!("no take FX at index {fx_index}"))
+    }
+}
+
+// ---- FX presets -------------------------------------------------------------
+// REAPER can LOAD presets (by name, index, or next/previous) and read the current
+// one, but exposes NO API to SAVE a new preset — that stays a manual FX-window
+// action. Track and take FX share the exact same call shape (only the handle
+// differs), so these mirror each other closely.
+
+/// Fill a preset-name buffer and return `(name, matches_preset)`. The REAPER
+/// `*FX_GetPreset` bool means "current state exactly matches a stored preset";
+/// the name buffer is filled regardless, so — unlike `read_string` — we keep it.
+fn read_preset_name(f: impl FnOnce(*mut c_char, c_int) -> bool) -> (String, bool) {
+    let mut buf = vec![0u8; NAME_BUF as usize];
+    let matches = f(buf.as_mut_ptr() as *mut c_char, NAME_BUF as c_int);
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    (reaper_string(&buf[..end]), matches)
+}
+
+/// Validate that exactly one preset selector was given and resolve `navigate`
+/// into a move delta (`Some(+1/-1)` for navigate, `None` for name/index).
+fn preset_nav_move(
+    name: Option<&str>,
+    index: Option<i64>,
+    navigate: Option<&str>,
+) -> Result<Option<c_int>, String> {
+    let selectors = name.is_some() as u8 + index.is_some() as u8 + navigate.is_some() as u8;
+    if selectors != 1 {
+        return Err("provide exactly one of: name, index, or navigate".into());
+    }
+    match navigate {
+        Some("next") => Ok(Some(1)),
+        Some("previous") | Some("prev") => Ok(Some(-1)),
+        Some(other) => Err(format!(
+            "navigate must be 'next' or 'previous' (got '{other}')"
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Short human description of the chosen preset selector, for the confirm prompt.
+fn preset_sel_desc(input: &Value) -> String {
+    if let Some(n) = input.get("name").and_then(|v| v.as_str()) {
+        format!("name '{n}'")
+    } else if let Some(i) = input.get("index").and_then(|v| v.as_i64()) {
+        format!("index {i}")
+    } else if let Some(nav) = input.get("navigate").and_then(|v| v.as_str()) {
+        format!("{nav} preset")
+    } else {
+        "?".into()
+    }
+}
+
+fn get_fx_preset(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+) -> Result<Value, String> {
+    let track = reaper
+        .get_track(ProjectContext::CurrentProject, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let fx = fx_index as c_int;
+    let (name, matches) =
+        read_preset_name(|b, s| unsafe { low.TrackFX_GetPreset(track.as_ptr(), fx, b, s) });
+    let mut count: c_int = 0;
+    let index = unsafe { low.TrackFX_GetPresetIndex(track.as_ptr(), fx, &mut count) };
+    Ok(json!({
+        "track_index": track_index,
+        "fx_index": fx_index,
+        "preset": name,
+        "preset_index": index,
+        "preset_count": count,
+        "matches_preset": matches,
+    }))
+}
+
+fn set_fx_preset(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+    name: Option<&str>,
+    index: Option<i64>,
+    navigate: Option<&str>,
+) -> Result<Value, String> {
+    // Everything fallible happens BEFORE the undo block so we never leave it open.
+    let nav = preset_nav_move(name, index, navigate)?;
+    let name_c = match name {
+        Some(n) => Some(CString::new(n).map_err(|_| "preset name has a NUL byte".to_string())?),
+        None => None,
+    };
+    let project = ProjectContext::CurrentProject;
+    let track = reaper
+        .get_track(project, track_index)
+        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let low = reaper.low();
+    let fx = fx_index as c_int;
+    reaper.undo_begin_block_2(project);
+    let ok = if let Some(c) = &name_c {
+        unsafe { low.TrackFX_SetPreset(track.as_ptr(), fx, c.as_ptr()) }
+    } else if let Some(i) = index {
+        unsafe { low.TrackFX_SetPresetByIndex(track.as_ptr(), fx, i as c_int) }
+    } else {
+        unsafe { low.TrackFX_NavigatePresets(track.as_ptr(), fx, nav.unwrap_or(0)) }
+    };
+    let (current, matches) =
+        read_preset_name(|b, s| unsafe { low.TrackFX_GetPreset(track.as_ptr(), fx, b, s) });
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set track {track_index} FX {fx_index} preset"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({
+            "set": true, "track_index": track_index, "fx_index": fx_index,
+            "preset": current, "matches_preset": matches,
+        }))
+    } else {
+        Err("failed to set preset (unknown preset name/index, or none to navigate to)".into())
+    }
+}
+
+fn get_take_fx_preset(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    fx_index: u32,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    let take = match take_index {
+        Some(ti) => unsafe { low.GetMediaItemTake(item.as_ptr(), ti as c_int) },
+        None => unsafe { low.GetActiveTake(item.as_ptr()) },
+    };
+    if take.is_null() {
+        return Err("no such take".to_string());
+    }
+    let fx = fx_index as c_int;
+    let (name, matches) = read_preset_name(|b, s| unsafe { low.TakeFX_GetPreset(take, fx, b, s) });
+    let mut count: c_int = 0;
+    let index = unsafe { low.TakeFX_GetPresetIndex(take, fx, &mut count) };
+    Ok(json!({
+        "item_index": item_index,
+        "fx_index": fx_index,
+        "preset": name,
+        "preset_index": index,
+        "preset_count": count,
+        "matches_preset": matches,
+    }))
+}
+
+fn set_take_fx_preset(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    fx_index: u32,
+    take_index: Option<u32>,
+    name: Option<&str>,
+    index: Option<i64>,
+    navigate: Option<&str>,
+) -> Result<Value, String> {
+    let nav = preset_nav_move(name, index, navigate)?;
+    let name_c = match name {
+        Some(n) => Some(CString::new(n).map_err(|_| "preset name has a NUL byte".to_string())?),
+        None => None,
+    };
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    let take = match take_index {
+        Some(ti) => unsafe { low.GetMediaItemTake(item.as_ptr(), ti as c_int) },
+        None => unsafe { low.GetActiveTake(item.as_ptr()) },
+    };
+    if take.is_null() {
+        return Err("no such take".to_string());
+    }
+    let fx = fx_index as c_int;
+    reaper.undo_begin_block_2(project);
+    let ok = if let Some(c) = &name_c {
+        unsafe { low.TakeFX_SetPreset(take, fx, c.as_ptr()) }
+    } else if let Some(i) = index {
+        unsafe { low.TakeFX_SetPresetByIndex(take, fx, i as c_int) }
+    } else {
+        unsafe { low.TakeFX_NavigatePresets(take, fx, nav.unwrap_or(0)) }
+    };
+    let (current, matches) =
+        read_preset_name(|b, s| unsafe { low.TakeFX_GetPreset(take, fx, b, s) });
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set item {item_index} take FX {fx_index} preset"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({
+            "set": true, "item_index": item_index, "fx_index": fx_index,
+            "preset": current, "matches_preset": matches,
+        }))
+    } else {
+        Err("failed to set preset (unknown preset name/index, or none to navigate to)".into())
     }
 }
 
