@@ -12,7 +12,6 @@ use crate::ai::worker;
 use crate::reaper::action;
 use crate::reaper::api;
 use crate::reaper::control_surface::PumpSurface;
-use crate::reaper::osara;
 use crate::tools::ReaperOp;
 use crate::ui;
 
@@ -75,10 +74,9 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // "Open Assistant" action.
     action::register(&mut session)?;
 
-    // Readiness feedback — announced via OSARA only. We deliberately do NOT write
-    // to the REAPER console: ShowConsoleMsg pops the console window open, which is
-    // unwanted noise on every launch. (Lazy: a no-op if OSARA loads after us.)
-    osara::announce("ReaLackey loaded.");
+    // No load-time feedback: an OSARA announcement here gets swallowed by REAPER's
+    // own launch feedback anyway, and we deliberately never write to the REAPER
+    // console (ShowConsoleMsg pops the console window open — unwanted on launch).
 
     // Leak the app state so the session (and all registrations) live at a stable
     // address for the process lifetime, then publish the main-thread REAPER

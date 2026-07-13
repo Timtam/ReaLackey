@@ -84,8 +84,8 @@ ReaLackey is designed to be driven entirely by keyboard and screen reader:
    been validated in a live host yet)*. Or build it yourself (below).
 2. Copy it into REAPER's `UserPlugins` folder. *(Find it via Options → Show
    REAPER resource path.)* The filename **must** start with `reaper_`.
-3. Restart REAPER — ReaLackey announces itself through your screen reader on
-   load (it does not open the REAPER console).
+3. Restart REAPER — ReaLackey loads silently (no console window, and no
+   screen-reader chatter over REAPER's own launch feedback).
 4. **Extensions → ReaLackey → Providers** → add a provider and paste your API
    key (stored securely in your OS credential store, never in a file).
 5. **Extensions → ReaLackey → Open window** — type a message, press **Send**, and
