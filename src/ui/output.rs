@@ -194,6 +194,21 @@ pub fn ensure_created() {
                     ffi::install_webview_focus_cb();
                     webview_impl::install_focus_out_handler();
                 }
+                // macOS: wry does NOT make a *child* WKWebView the first responder
+                // (it only does so for a standalone webview), and the native dialog
+                // controls that SWELL would otherwise focus are now hidden — so
+                // without this the user has no keyboard path into the composer.
+                // `WebView::focus()` calls `window.makeFirstResponder(webview)`;
+                // then land the caret in the message box, mirroring the Windows
+                // on-focus flow (`on_webview_focus`).
+                #[cfg(target_os = "macos")]
+                STATE.with(|c| {
+                    let out = c.borrow();
+                    if let Some(wv) = &out.webview {
+                        let _ = wv.focus();
+                    }
+                    out.eval("focusInput();");
+                });
                 // No console message on success — ShowConsoleMsg pops the console
                 // window open, which is unwanted on a normal launch.
             }
@@ -317,7 +332,10 @@ mod webview_impl {
     };
     #[cfg(windows)]
     use webview2_com::MoveFocusRequestedEventHandler;
+    #[cfg(not(target_os = "macos"))]
     use wry::dpi::{PhysicalPosition, PhysicalSize};
+    #[cfg(target_os = "macos")]
+    use wry::dpi::{LogicalPosition, LogicalSize};
     use wry::http::Request;
     use wry::{Rect, WebContext, WebView, WebViewBuilder};
 
@@ -532,9 +550,28 @@ document.addEventListener('click',function(e){
     }
 
     fn bounds(x: i32, y: i32, w: i32, h: i32) -> Rect {
-        Rect {
-            position: PhysicalPosition::new(x, y).into(),
-            size: PhysicalSize::new(w.max(1) as u32, h.max(1) as u32).into(),
+        // WebView2 (Windows) positions the child in device pixels, and the Win32
+        // client rect we get is already in device pixels, so there it's Physical.
+        //
+        // wry's WKWebView path instead DIVIDES the incoming Rect by the backing
+        // scale factor (`bounds.to_logical(backingScaleFactor)`) to get the NSView
+        // frame in points. But SWELL's geometry is ALREADY in Cocoa points, so on
+        // macOS we must hand wry Logical units — otherwise `to_logical` divides a
+        // second time and the pane renders at 1/scale size in the top-left corner
+        // on a Retina display. (Logical.to_logical(sf) is the identity.)
+        #[cfg(target_os = "macos")]
+        {
+            Rect {
+                position: LogicalPosition::new(x, y).into(),
+                size: LogicalSize::new(w.max(1), h.max(1)).into(),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Rect {
+                position: PhysicalPosition::new(x, y).into(),
+                size: PhysicalSize::new(w.max(1) as u32, h.max(1) as u32).into(),
+            }
         }
     }
 

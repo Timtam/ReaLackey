@@ -115,7 +115,16 @@ fn open_external(url: &str) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn open_external(url: &str) {
+    // Hand the URL to LaunchServices via `open`, which routes it to the user's
+    // default browser / mail client. Best-effort: a spawn failure is ignored (the
+    // chat pane has no surface for this error and this must never panic — it runs
+    // from a webview IPC callback).
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn open_external(_url: &str) {}
 
 #[cfg(test)]

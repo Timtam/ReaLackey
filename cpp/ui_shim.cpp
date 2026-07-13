@@ -467,8 +467,18 @@ extern "C" int ui_translate_accel(void* msgp) {
   if (!in_webview && IsDialogMessage(g_dlg, msg)) return 1; // dialog handled it
   return -1; // ours: deliver to the window, don't apply REAPER shortcuts
 #else
-  (void)msgp;
-  return 0;
+  // macOS/SWELL: REAPER's accelerator hook (registered at the Front position) sees
+  // every keystroke before the Cocoa responder chain, so keys the user types into
+  // the webview composer would otherwise fire as global REAPER actions (Space =
+  // Play/Stop, R = record, ...). Mirror the Win32 intent: for any key targeting our
+  // dialog subtree, return -1 ("pass on to my window") so REAPER does not consume
+  // it and the keystroke reaches the webview. IsChild walks the NSView hierarchy
+  // (isDescendantOf:), so it recognises the wry-injected WKWebView subview even
+  // though SWELL never created it.
+  if (!g_dlg || !msgp) return 0;
+  MSG* msg = (MSG*)msgp;
+  if (msg->hwnd != g_dlg && !IsChild(g_dlg, msg->hwnd)) return 0; // not ours
+  return -1; // ours: deliver to the webview, don't apply REAPER shortcuts
 #endif
 }
 
