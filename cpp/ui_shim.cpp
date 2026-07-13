@@ -17,7 +17,7 @@
 #else
   #include "swell.h"
   #include <string>
-  #define RAAI_DLGRET WDL_DLGRET
+  #define RAAI_DLGRET INT_PTR
 #endif
 
 #include "resource.h"
@@ -71,7 +71,7 @@ static void layout_controls(HWND hwnd) {
   // composer). The webview tracks the output-edit rect, so stretch that to fill
   // the client area; the other native controls are hidden (see set_webview_active).
   if (g_webview_active) {
-    if (out) MoveWindow(out, 0, 0, cw, ch, TRUE);
+    if (out) SetWindowPos(out, NULL, 0, 0, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE);
     return;
   }
   const int m = 6, bw = 60, bh = 22, ih = 22, sh = 16;
@@ -84,11 +84,11 @@ static void layout_controls(HWND hwnd) {
   HWND in  = GetDlgItem(hwnd, ID_INPUT_EDIT);
   HWND sb  = GetDlgItem(hwnd, ID_SUBMIT_BTN);
   HWND cb  = GetDlgItem(hwnd, IDCANCEL);
-  if (out) MoveWindow(out, m, m, cw - 2 * m, outH, TRUE);
-  if (st)  MoveWindow(st, m, statusY, cw - 2 * m, sh, TRUE);
-  if (in)  MoveWindow(in, m, inputY, cw - 3 * m - bw, ih, TRUE);
-  if (sb)  MoveWindow(sb, cw - m - bw, inputY, bw, bh, TRUE);
-  if (cb)  MoveWindow(cb, cw - m - bw, closeY, bw, bh, TRUE);
+  if (out) SetWindowPos(out, NULL, m, m, cw - 2 * m, outH, SWP_NOZORDER | SWP_NOACTIVATE);
+  if (st)  SetWindowPos(st, NULL, m, statusY, cw - 2 * m, sh, SWP_NOZORDER | SWP_NOACTIVATE);
+  if (in)  SetWindowPos(in, NULL, m, inputY, cw - 3 * m - bw, ih, SWP_NOZORDER | SWP_NOACTIVATE);
+  if (sb)  SetWindowPos(sb, NULL, cw - m - bw, inputY, bw, bh, SWP_NOZORDER | SWP_NOACTIVATE);
+  if (cb)  SetWindowPos(cb, NULL, cw - m - bw, closeY, bw, bh, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 // ---- text helpers (UTF-8 <-> platform) --------------------------------------
@@ -116,7 +116,7 @@ static void set_ctrl_text(HWND hwnd, int id, const char* utf8) {
 #ifdef _WIN32
   SetDlgItemTextW(hwnd, id, to_wide(utf8).c_str());
 #else
-  SetDlgItemTextA(hwnd, id, utf8);
+  SetDlgItemText(hwnd, id, utf8);
 #endif
 }
 
@@ -131,7 +131,6 @@ static void append_ctrl_text(HWND edit, const char* utf8) {
   int len = GetWindowTextLength(edit);
   SendMessage(edit, EM_SETSEL, (WPARAM)len, (LPARAM)len);
   SendMessage(edit, EM_REPLACESEL, FALSE, (LPARAM)utf8);
-  SendMessage(edit, EM_SCROLLCARET, 0, 0);
 #endif
 }
 
@@ -144,7 +143,7 @@ static std::string get_ctrl_text(HWND hwnd, int id) {
 #else
   char buf[8192];
   buf[0] = 0;
-  GetDlgItemTextA(hwnd, id, buf, (int)sizeof(buf));
+  GetDlgItemText(hwnd, id, buf, (int)sizeof(buf));
   return std::string(buf);
 #endif
 }
@@ -154,9 +153,12 @@ static RAAI_DLGRET DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
   switch (msg) {
     case WM_INITDIALOG: {
       g_dlg = hwnd;
+#ifdef _WIN32
       // Raise the output edit's text limit so a long conversation isn't clipped.
+      // (SWELL edit controls have no small default limit, so this is Win32-only.)
       HWND out = GetDlgItem(hwnd, ID_OUTPUT_EDIT);
       if (out) SendMessage(out, EM_SETLIMITTEXT, (WPARAM)0, 0);
+#endif
       set_ctrl_text(hwnd, ID_STATUS_TEXT, "Ready.");
       return TRUE;  // let the dialog manager set default focus
     }
@@ -397,6 +399,9 @@ extern "C" void ui_set_destroy_cb(on_destroy_cb on_destroy) {
 }
 
 extern "C" void ui_enable_webview_tabstop(void) {
+  // The embedded webview is Windows-only (wry/WebView2), so this whole
+  // focus-forwarding dance is Win32-only; a no-op on SWELL.
+#ifdef _WIN32
   if (!g_dlg) return;
   // The webview's host window is the first direct child of the dialog that is
   // NOT one of our known controls. Give it WS_TABSTOP (so the Tab cycle lands on
@@ -410,14 +415,13 @@ extern "C" void ui_enable_webview_tabstop(void) {
     g_webview_host = child;
     LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
     SetWindowLongPtr(child, GWL_STYLE, style | WS_TABSTOP);
-#ifdef _WIN32
     if (!g_webview_prev_proc) {
       g_webview_prev_proc =
           (WNDPROC)SetWindowLongPtr(child, GWLP_WNDPROC, (LONG_PTR)WebviewSubclassProc);
     }
-#endif
     break; // one host window is enough
   }
+#endif
 }
 
 // Give the whole window to the webview: hide every native control (the webview
@@ -473,6 +477,8 @@ extern "C" void ui_set_webview_focus_cb(on_webview_focus_cb on_focus) {
 }
 
 extern "C" void ui_focus_after_webview(int forward) {
+  // Webview-only (Windows): hand focus off after a Tab out of the web content.
+#ifdef _WIN32
   if (!g_dlg) return;
   // Forward tab-out -> the input box (next control); backward -> the Close
   // button (the control before the output area in the cycle).
@@ -480,6 +486,9 @@ extern "C" void ui_focus_after_webview(int forward) {
   if (target) {
     SendMessage(g_dlg, WM_NEXTDLGCTL, (WPARAM)target, TRUE);
   }
+#else
+  (void)forward;
+#endif
 }
 
 extern "C" int ui_window_rect(void* hwnd, int* x, int* y, int* w, int* h) {
@@ -508,7 +517,7 @@ extern "C" void ui_add_menu_item(void* hmenu, const char* label, int command_id)
 #ifdef _WIN32
   AppendMenuW(m, MF_STRING, (UINT_PTR)command_id, to_wide(label).c_str());
 #else
-  AppendMenu(m, MF_STRING, (UINT_PTR)command_id, label);
+  InsertMenu(m, -1, MF_BYPOSITION | MF_STRING, (UINT_PTR)command_id, label);
 #endif
 }
 
@@ -522,7 +531,7 @@ extern "C" void ui_attach_submenu(void* parent_hmenu, void* submenu, const char*
 #ifdef _WIN32
   AppendMenuW(parent, MF_POPUP, (UINT_PTR)submenu, to_wide(title).c_str());
 #else
-  AppendMenu(parent, MF_POPUP, (UINT_PTR)submenu, title);
+  InsertMenu(parent, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)submenu, title);
 #endif
 }
 
@@ -553,7 +562,7 @@ extern "C" int ui_popup_menu(const char* items_newline) {
 #ifdef _WIN32
       AppendMenuW(menu, MF_STRING, (UINT_PTR)idx, to_wide(line.c_str()).c_str());
 #else
-      AppendMenu(menu, MF_STRING, (UINT_PTR)idx, line.c_str());
+      InsertMenu(menu, -1, MF_BYPOSITION | MF_STRING, (UINT_PTR)idx, line.c_str());
 #endif
       idx++;
     }

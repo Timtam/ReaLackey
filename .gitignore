@@ -39,3 +39,6 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# SWELL/WDL checkout (cloned fresh in CI; never committed)
+/vendor/
