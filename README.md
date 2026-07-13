@@ -140,8 +140,11 @@ every push.
 | **macOS** | ✅ CI (compiles + links) | ⏳ not yet validated in a host |
 | **Linux** | 🚧 SWELL path present | ⏳ not yet validated |
 
-Screen capture / synthetic input and the WebView2 chat pane are Windows-only for
-now; on other platforms the pane falls back to a native edit control.
+The chat pane is an embedded HTML view — **WebView2** on Windows, **WKWebView**
+on macOS — falling back to a native edit control on Linux. Screen capture and
+synthetic input have Windows (GDI / SendInput) and macOS (Core Graphics /
+CGEvent) backends. The macOS backends and webview compile and link in CI but
+have not yet been exercised in a live REAPER host.
 
 ## Contributing
 

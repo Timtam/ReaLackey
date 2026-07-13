@@ -12,9 +12,9 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
-- Native REAPER extension with an AI assistant: a modeless chat window
-  (WebView2-backed on Windows, native-control fallback elsewhere) and an
-  Extensions → ReaLackey menu.
+- Native REAPER extension with an AI assistant: a modeless chat window — an
+  embedded HTML pane (WebView2 on Windows, WKWebView on macOS) with a native
+  edit-control fallback on Linux — and an Extensions → ReaLackey menu.
 - ~100 tools spanning tracks/FX (incl. input & monitoring FX chains and preset
   load), MIDI, sends/receives, automation envelopes (track, FX-parameter and
   send/receive), markers/regions, tempo map, stretch markers, render settings,
