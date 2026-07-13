@@ -1052,9 +1052,12 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                           Kontakt mode/patch toggle) — for normal knobs/sliders prefer \
                           set_fx_param / set_fx_param_by_steps, which are undoable. x and y are \
                           PIXELS in the most recent capture_view image of that plugin (top-left is \
-                          0,0); they are clamped to the window. Requires the user to have armed \
-                          pixel control (you'll be prompted once). IMPORTANT: GUI clicks CANNOT be \
-                          undone by REAPER — after clicking, call capture_view to verify the result."
+                          0,0); they are clamped to the window. Just CALL this tool when you need \
+                          it — the first pixel action automatically asks the user once to allow \
+                          pixel control for the session; never tell the user to enable or 'turn on' \
+                          pixel control themselves (there is no such setting to find). IMPORTANT: \
+                          GUI clicks CANNOT be undone by REAPER — after clicking, call capture_view \
+                          to verify the result."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1070,8 +1073,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             description: "Type text into the FOCUSED plugin's currently focused control — e.g. a \
                           value field you just clicked (plugin_click) to enter a number or name. \
                           Set submit=true to press Enter afterward. Same rules as plugin_click: \
-                          needs pixel control armed, NOT undoable by REAPER; verify with \
-                          capture_view."
+                          pixel control is requested automatically on first use, NOT undoable by \
+                          REAPER; verify with capture_view."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1086,7 +1089,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             description: "Mouse-wheel scroll inside the FOCUSED plugin's window at pixel (x,y) from \
                           the most recent capture_view image — e.g. to scroll a preset/browser \
                           list. clicks is the number of wheel notches: positive scrolls up/away, \
-                          negative down/toward. Needs pixel control armed; verify with capture_view."
+                          negative down/toward. Pixel control is requested automatically on first \
+                          use; verify with capture_view."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1102,8 +1106,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             description: "Drag within the FOCUSED plugin's GUI from (x1,y1) to (x2,y2) — the way a \
                           knob is turned (usually a vertical drag). Coordinates are PIXELS in the \
                           most recent capture_view image, clamped to the window. Same rules as \
-                          plugin_click: needs pixel control armed, and the change is NOT undoable \
-                          by REAPER; verify with capture_view afterwards."
+                          plugin_click: pixel control is requested automatically on first use, and \
+                          the change is NOT undoable by REAPER; verify with capture_view afterwards."
                 .into(),
             input_schema: obj(
                 json!({

@@ -136,10 +136,14 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
      because those are undoable. Only for GUI-only controls that have NO host \
      parameter (e.g. a Kontakt mode or patch switch) fall back to plugin_click / \
      plugin_drag, giving pixel coordinates read from the most recent capture_view \
-     image of that plugin; the user must arm pixel control first (they are prompted \
-     once). Those synthesized clicks are NOT undoable by REAPER, so after each one \
-     call capture_view again to verify, and work in small steps. When the user says \
-     to stop operating the GUI, or you are done, call disable_pixel_control. ",
+     image of that plugin. Just CALL those tools when you need them: the first pixel \
+     action automatically asks the user once to allow pixel control for the session. \
+     Do NOT tell the user to enable, arm, or 'turn on' pixel control themselves — \
+     there is no such setting for them to find; the only way it gets enabled is you \
+     calling the tool and them approving the prompt. Those synthesized clicks are NOT \
+     undoable by REAPER, so after each one call capture_view again to verify, and \
+     work in small steps. When the user says to stop operating the GUI, or you are \
+     done, call disable_pixel_control. ",
         );
     }
 
