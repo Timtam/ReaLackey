@@ -1,0 +1,114 @@
+name: Release
+
+# Manual release: pick a version, and this builds the artifacts, rolls the
+# CHANGELOG's [Unreleased] section into that version, tags it, and publishes a
+# GitHub release with the built binaries and those changelog entries as the
+# notes. Add entries under "## [Unreleased]" in CHANGELOG.md as you go.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0 (no leading v)"
+        required: true
+        type: string
+
+# Never run two releases at once (they both push to main + create a tag).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the release commit/tag and create the GitHub release
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            src: target/release/reaper_realackey.dll
+            asset: reaper_realackey.dll
+          - name: macos
+            os: macos-latest
+            # cargo prefixes the cdylib with `lib`; REAPER wants reaper_*.dylib.
+            src: target/release/libreaper_realackey.dylib
+            asset: reaper_realackey.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PHP (macOS SWELL resgen)
+        if: matrix.name == 'macos'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+      - name: Fetch WDL / SWELL (macOS)
+        if: matrix.name == 'macos'
+        run: git clone --depth 1 https://github.com/justinfrankel/WDL.git vendor/WDL
+
+      - name: Build (Windows)
+        if: matrix.name == 'windows'
+        run: cargo build --release
+      - name: Build (macOS)
+        if: matrix.name == 'macos'
+        env:
+          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
+        run: cargo build --release
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.src }}" "dist/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Roll CHANGELOG [Unreleased] -> ${{ inputs.version }}
+        run: |
+          python3 .github/roll_changelog.py "${{ inputs.version }}" "$(date -u +%Y-%m-%d)" > release-notes.md
+
+      - name: Set Cargo.toml version
+        run: sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
+
+      - name: Commit, tag, push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md Cargo.toml
+          git commit -m "Release v${{ inputs.version }}"
+          git tag "v${{ inputs.version }}"
+          git push origin HEAD:main
+          git push origin "v${{ inputs.version }}"
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ inputs.version }}" \
+            --title "ReaLackey v${{ inputs.version }}" \
+            --notes-file release-notes.md \
+            dist/*
