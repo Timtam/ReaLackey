@@ -414,6 +414,16 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
   m.addEventListener('input',grow);
   grow();focusInput();
 })();
+// Links open in the user's default browser; the chat pane must never navigate
+// away from the conversation. preventDefault on EVERY <a> click (keyboard Enter
+// on a link also fires click, so this covers screen-reader activation), and hand
+// http(s)/mailto URLs to the host to launch externally.
+document.addEventListener('click',function(e){
+  var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;
+  e.preventDefault();
+  var u=a.getAttribute('href')||'';
+  if(/^(https?:\/\/|mailto:)/i.test(u)&&window.ipc)window.ipc.postMessage(JSON.stringify({t:'openurl',url:u}));
+});
 </script></body></html>"#;
 
     // WebView2 is COM and requires the calling (UI) thread to be in a
@@ -453,6 +463,19 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
                 let _ = std::panic::catch_unwind(move || {
                     crate::ui::bridge::on_webview_message(&body);
                 });
+            })
+            // Backstop to the in-page click handler: the pane loads via
+            // NavigateToString (about:blank), so any http(s) navigation can only
+            // come from a link. Cancel it and open it externally instead — the
+            // conversation must never be replaced by a web page.
+            .with_navigation_handler(|uri: String| {
+                let lower = uri.to_ascii_lowercase();
+                if lower.starts_with("http://") || lower.starts_with("https://") {
+                    let _ = std::panic::catch_unwind(move || crate::ui::bridge::open_url(&uri));
+                    false // deny in-pane navigation
+                } else {
+                    true // the pane's own content (about:blank, data:) — allow
+                }
             })
             .build_as_child(&host)
             .map_err(|e| e.to_string())

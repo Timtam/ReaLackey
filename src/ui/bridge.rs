@@ -55,7 +55,89 @@ pub fn on_webview_message(json: &str) {
             }
         }
         Some("cancel") => cancel(),
+        // A link was clicked in the chat: open it in the user's default browser
+        // instead of navigating the pane away from the conversation.
+        Some("openurl") => {
+            if let Some(url) = v.get("url").and_then(|u| u.as_str()) {
+                open_url(url);
+            }
+        }
         _ => {}
+    }
+}
+
+/// Open an http(s)/mailto URL (a link the user clicked in the chat) in the
+/// default browser. Model-generated links are restricted to these schemes — a
+/// local `file://` or custom scheme is never launched.
+pub(crate) fn open_url(url: &str) {
+    if is_launchable_url(url) {
+        open_external(url.trim());
+    }
+}
+
+/// Whether a clicked URL may be launched externally. Only web and mail schemes —
+/// leading whitespace is trimmed first so `" javascript:…"` can't sneak through.
+fn is_launchable_url(url: &str) -> bool {
+    let l = url.trim().to_ascii_lowercase();
+    l.starts_with("http://") || l.starts_with("https://") || l.starts_with("mailto:")
+}
+
+#[cfg(windows)]
+fn open_external(url: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: isize,
+            op: *const u16,
+            file: *const u16,
+            params: *const u16,
+            dir: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+    let wide = |s: &str| -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    };
+    let op = wide("open");
+    let file = wide(url);
+    // SW_SHOWNORMAL = 1; null hwnd. Best-effort — the returned HINSTANCE is ignored.
+    unsafe {
+        ShellExecuteW(
+            0,
+            op.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn open_external(_url: &str) {}
+
+#[cfg(test)]
+mod tests {
+    use super::is_launchable_url;
+
+    #[test]
+    fn only_web_and_mail_schemes_launch() {
+        for ok in ["https://example.com", "http://x", "HTTPS://X", "mailto:a@b.com"] {
+            assert!(is_launchable_url(ok), "{ok} should launch");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            " javascript:alert(1)",
+            "data:text/html,x",
+            "ftp://x",
+            "vbscript:x",
+            "",
+        ] {
+            assert!(!is_launchable_url(bad), "{bad} must NOT launch");
+        }
     }
 }
 
