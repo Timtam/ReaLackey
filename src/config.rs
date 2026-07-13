@@ -73,7 +73,9 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
      mutating \
      tools (add an FX, set an FX parameter, enable/bypass an FX, read and load \
      track/take FX presets (get_fx_preset/set_fx_preset and the take variants — \
-     loading only; REAPER has no API to SAVE a new preset), write MIDI \
+     loading only; REAPER has no API to SAVE a new preset); the track-FX tools \
+     take an optional chain ('normal' default, 'input' for a track's record/input \
+     FX, or 'monitor' for the global monitoring FX on the master track), write MIDI \
      notes, delete MIDI notes, create a MIDI item, create tracks, \
      add/adjust/remove track sends, create automation envelopes (an FX parameter \
      via create_fx_envelope, a track volume/pan/mute envelope via \

@@ -25,6 +25,10 @@ use crate::providers::ToolDef;
 
 const NAME_BUF: u32 = 256;
 const DEFAULT_LIMIT: usize = 200;
+/// Shared schema description for the `chain` selector on the track-FX tools.
+const CHAIN_DESC: &str = "which FX chain: 'normal' (default; the track's output FX), \
+    'input' (the track's record/input FX, applied before recording), or 'monitor' (REAPER's \
+    global Monitoring FX, which live on the master track — track_index is ignored)";
 
 /// A request from the worker for the main thread to run.
 pub enum ReaperOp {
@@ -144,10 +148,13 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         ToolDef {
             name: "get_track_fx".into(),
             description: "List the FX chain of a track: for each FX its 0-based index, name, \
-                          and enabled/offline state."
+                          and enabled/offline state. Use 'chain' for input or monitoring FX."
                 .into(),
             input_schema: obj(
-                json!({ "track_index": { "type": "integer", "description": "0-based track index" } }),
+                json!({
+                    "track_index": { "type": "integer", "description": "0-based track index" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
+                }),
                 json!(["track_index"]),
             ),
         },
@@ -159,8 +166,9 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             input_schema: obj(
                 json!({
                     "track_index": { "type": "integer" },
-                    "fx_index": { "type": "integer", "description": "0-based FX index in the track chain" },
-                    "limit": { "type": "integer", "description": "max parameters to return (default 200)" }
+                    "fx_index": { "type": "integer", "description": "0-based FX index in the chain" },
+                    "limit": { "type": "integer", "description": "max parameters to return (default 200)" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
                 }),
                 json!(["track_index", "fx_index"]),
             ),
@@ -218,13 +226,15 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         // --- mutating tools (confirmation-gated, Undo-wrapped) ---
         ToolDef {
             name: "add_fx".into(),
-            description: "Add an FX/plugin by name to a track's FX chain. This CHANGES the \
-                          project: it is confirmed by the user and wrapped in a labelled undo block."
+            description: "Add an FX/plugin by name to a track's FX chain (or its input/monitoring \
+                          chain via 'chain'). This CHANGES the project: it is confirmed by the user \
+                          and wrapped in a labelled undo block."
                 .into(),
             input_schema: obj(
                 json!({
                     "track_index": { "type": "integer" },
-                    "fx_name": { "type": "string", "description": "plugin name, e.g. \"ReaEQ\" or \"VST3: Serum\"" }
+                    "fx_name": { "type": "string", "description": "plugin name, e.g. \"ReaEQ\" or \"VST3: Serum\"" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
                 }),
                 json!(["track_index", "fx_name"]),
             ),
@@ -240,7 +250,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                     "track_index": { "type": "integer" },
                     "fx_index": { "type": "integer" },
                     "param_index": { "type": "integer" },
-                    "value": { "type": "number", "description": "normalized value 0..1" }
+                    "value": { "type": "number", "description": "normalized value 0..1" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
                 }),
                 json!(["track_index", "fx_index", "param_index", "value"]),
             ),
@@ -253,7 +264,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                 json!({
                     "track_index": { "type": "integer" },
                     "fx_index": { "type": "integer" },
-                    "enabled": { "type": "boolean" }
+                    "enabled": { "type": "boolean" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
                 }),
                 json!(["track_index", "fx_index", "enabled"]),
             ),
@@ -268,7 +280,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             input_schema: obj(
                 json!({
                     "track_index": { "type": "integer" },
-                    "fx_index": { "type": "integer" }
+                    "fx_index": { "type": "integer" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
                 }),
                 json!(["track_index", "fx_index"]),
             ),
@@ -287,7 +300,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                     "fx_index": { "type": "integer" },
                     "name": { "type": "string", "description": "exact preset name to load" },
                     "index": { "type": "integer", "description": "0-based preset index to load" },
-                    "navigate": { "type": "string", "enum": ["next", "previous"], "description": "step to the next/previous preset" }
+                    "navigate": { "type": "string", "enum": ["next", "previous"], "description": "step to the next/previous preset" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
                 }),
                 json!(["track_index", "fx_index"]),
             ),
@@ -1069,7 +1083,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                     "param_index": { "type": "integer" },
                     "direction": { "type": "string", "enum": ["up", "down"], "description": "nudge direction" },
                     "step_count": { "type": "integer", "description": "number of steps to move (default 1)" },
-                    "step_size": { "type": "number", "description": "normalized amount per step, 0..1 (default 0.01)" }
+                    "step_size": { "type": "number", "description": "normalized amount per step, 0..1 (default 0.01)" },
+                    "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
                 }),
                 json!(["track_index", "fx_index", "param_index", "direction"]),
             ),
@@ -1345,11 +1360,16 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     // --- CRUD completeness ---
     defs.push(ToolDef {
         name: "remove_fx".into(),
-        description: "Remove an FX from a track's FX chain by index (get_track_fx for indices). \
-                      CHANGES the project (confirmed + undo-wrapped)."
+        description: "Remove an FX from a track's FX chain by index (get_track_fx for indices; use \
+                      'chain' for input or monitoring FX). CHANGES the project (confirmed + \
+                      undo-wrapped)."
             .into(),
         input_schema: obj(
-            json!({ "track_index": { "type": "integer" }, "fx_index": { "type": "integer" } }),
+            json!({
+                "track_index": { "type": "integer" },
+                "fx_index": { "type": "integer" },
+                "chain": { "type": "string", "enum": ["normal", "input", "monitor"], "description": CHAIN_DESC }
+            }),
             json!(["track_index", "fx_index"]),
         ),
     });
@@ -1595,6 +1615,20 @@ mod definition_tests {
                 "{name} must be advertised"
             );
         }
+    }
+
+    #[test]
+    fn fx_chain_parse_and_raw_index() {
+        use super::FxChain;
+        assert!(matches!(FxChain::parse("").unwrap(), FxChain::Normal));
+        assert!(matches!(FxChain::parse("normal").unwrap(), FxChain::Normal));
+        assert!(matches!(FxChain::parse("input").unwrap(), FxChain::Input));
+        assert!(matches!(FxChain::parse("MONITOR").unwrap(), FxChain::Monitor));
+        assert!(FxChain::parse("bogus").is_err());
+        // input/monitor address the record chain by OR-ing 0x1000000; normal doesn't.
+        assert_eq!(FxChain::parse("normal").unwrap().raw_index(2), 2);
+        assert_eq!(FxChain::parse("input").unwrap().raw_index(2), 2 | 0x0100_0000);
+        assert_eq!(FxChain::parse("monitor").unwrap().raw_index(0), 0x0100_0000);
     }
 
     #[test]
@@ -1953,12 +1987,17 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
     match name {
         "get_project_summary" => Ok(get_project_summary(reaper)),
         "get_tracks" => Ok(get_tracks(reaper)),
-        "get_track_fx" => get_track_fx(reaper, req_u32(input, "track_index")?),
+        "get_track_fx" => get_track_fx(
+            reaper,
+            req_u32(input, "track_index")?,
+            opt_str(input, "chain").unwrap_or("normal"),
+        ),
         "get_fx_params" => get_fx_params(
             reaper,
             req_u32(input, "track_index")?,
             req_u32(input, "fx_index")?,
             opt_usize(input, "limit").unwrap_or(DEFAULT_LIMIT),
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         "get_selected_items" => Ok(get_selected_items(reaper)),
         "get_take_fx" => get_take_fx(reaper, req_u32(input, "item_index")?),
@@ -1979,6 +2018,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_u32(input, "track_index")?,
             req_str(input, "fx_name")?,
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         "set_fx_param" => set_fx_param(
             reaper,
@@ -1986,6 +2026,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "fx_index")?,
             req_u32(input, "param_index")?,
             req_f64(input, "value")?,
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         "set_fx_param_by_steps" => set_fx_param_by_steps(
             reaper,
@@ -1998,6 +2039,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
                 .get("step_size")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.01),
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         // Tier B pixel input (arm-gated in the worker before reaching here).
         "plugin_click" => plugin_click(
@@ -2033,11 +2075,13 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "track_index")?,
             req_u32(input, "fx_index")?,
             req_bool(input, "enabled")?,
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         "get_fx_preset" => get_fx_preset(
             reaper,
             req_u32(input, "track_index")?,
             req_u32(input, "fx_index")?,
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         "set_fx_preset" => set_fx_preset(
             reaper,
@@ -2046,6 +2090,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_str(input, "name"),
             input.get("index").and_then(|v| v.as_i64()),
             opt_str(input, "navigate"),
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         "get_take_fx_preset" => get_take_fx_preset(
             reaper,
@@ -2185,6 +2230,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_u32(input, "track_index")?,
             req_u32(input, "fx_index")?,
+            opt_str(input, "chain").unwrap_or("normal"),
         ),
         "remove_take_fx" => remove_take_fx(
             reaper,
@@ -2500,23 +2546,25 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
     };
     match name {
         "add_fx" => Some(format!(
-            "Add FX {} to track {}",
+            "Add FX {} to track {}{}",
             input
                 .get("fx_name")
                 .and_then(|v| v.as_str())
                 .map(|s| format!("\"{s}\""))
                 .unwrap_or_else(|| "?".into()),
             show("track_index"),
+            chain_suffix(input),
         )),
         "set_fx_param" => Some(format!(
-            "Set track {} FX {} parameter {} to {} (normalized 0..1)",
+            "Set track {} FX {} parameter {} to {} (normalized 0..1){}",
             show("track_index"),
             show("fx_index"),
             show("param_index"),
             show("value"),
+            chain_suffix(input),
         )),
         "set_fx_param_by_steps" => Some(format!(
-            "Nudge track {} FX {} parameter {} {} by {} step(s)",
+            "Nudge track {} FX {} parameter {} {} by {} step(s){}",
             show("track_index"),
             show("fx_index"),
             show("param_index"),
@@ -2528,12 +2576,14 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
                 .get("step_count")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "1".into()),
+            chain_suffix(input),
         )),
         "set_fx_preset" => Some(format!(
-            "Load a preset ({}) for track {} FX {}",
+            "Load a preset ({}) for track {} FX {}{}",
             preset_sel_desc(input),
             show("track_index"),
             show("fx_index"),
+            chain_suffix(input),
         )),
         "set_take_fx_preset" => Some(format!(
             "Load a preset ({}) for item {} take FX {}",
@@ -2542,7 +2592,7 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("fx_index"),
         )),
         "set_fx_enabled" => Some(format!(
-            "{} track {} FX {}",
+            "{} track {} FX {}{}",
             if input
                 .get("enabled")
                 .and_then(|v| v.as_bool())
@@ -2554,6 +2604,7 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             },
             show("track_index"),
             show("fx_index"),
+            chain_suffix(input),
         )),
         "insert_midi_notes" => Some(format!(
             "Insert {} MIDI note(s) into item {}",
@@ -2637,9 +2688,10 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("track_index"),
         )),
         "remove_fx" => Some(format!(
-            "Remove FX {} from track {}",
+            "Remove FX {} from track {}{}",
             show("fx_index"),
             show("track_index"),
+            chain_suffix(input),
         )),
         "remove_take_fx" => Some(format!(
             "Remove take FX {} from item {}",
@@ -2851,15 +2903,106 @@ fn get_tracks(reaper: &Reaper<MainThreadScope>) -> Value {
     json!({ "tracks": tracks })
 }
 
-fn get_track_fx(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Value, String> {
-    let track = reaper
-        .get_track(ProjectContext::CurrentProject, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
+/// Which FX chain a track/monitor FX tool targets. `Normal` = the track's main
+/// (output) FX; `Input` = its input/record FX (applied before recording);
+/// `Monitor` = REAPER's global Monitoring FX, which live on the master track's
+/// input chain (so `track_index` is ignored for `Monitor`).
+#[derive(Clone, Copy)]
+enum FxChain {
+    Normal,
+    Input,
+    Monitor,
+}
+
+impl FxChain {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_lowercase().as_str() {
+            "" | "normal" | "main" | "output" => Ok(FxChain::Normal),
+            "input" | "rec" | "record" => Ok(FxChain::Input),
+            "monitor" | "mon" | "monitoring" => Ok(FxChain::Monitor),
+            other => Err(format!(
+                "unknown chain '{other}' (use normal, input, or monitor)"
+            )),
+        }
+    }
+
+    /// Input or monitor (both are addressed as an input/record chain) vs normal.
+    fn is_input(self) -> bool {
+        !matches!(self, FxChain::Normal)
+    }
+
+    fn location(self, fx_index: u32) -> TrackFxLocation {
+        if self.is_input() {
+            TrackFxLocation::InputFxChain(fx_index)
+        } else {
+            TrackFxLocation::NormalFxChain(fx_index)
+        }
+    }
+
+    fn chain_type(self) -> TrackFxChainType {
+        if self.is_input() {
+            TrackFxChainType::InputFxChain
+        } else {
+            TrackFxChainType::NormalFxChain
+        }
+    }
+
+    /// Raw FX index for the low-level `TrackFX_*` calls that take a plain int:
+    /// input/monitor FX are addressed by OR-ing 0x1000000 into the index.
+    fn raw_index(self, fx_index: u32) -> c_int {
+        if self.is_input() {
+            (fx_index | 0x0100_0000) as c_int
+        } else {
+            fx_index as c_int
+        }
+    }
+
+    /// The track this chain lives on. Monitoring FX are on the master track, so
+    /// `track_index` is ignored for `Monitor`.
+    fn track(
+        self,
+        reaper: &Reaper<MainThreadScope>,
+        track_index: u32,
+    ) -> Result<MediaTrack, String> {
+        let project = ProjectContext::CurrentProject;
+        match self {
+            FxChain::Monitor => Ok(reaper.get_master_track(project)),
+            _ => reaper
+                .get_track(project, track_index)
+                .ok_or_else(|| format!("no track at index {track_index}")),
+        }
+    }
+
+    /// Number of FX in this chain on the given track.
+    fn count(self, reaper: &Reaper<MainThreadScope>, track: MediaTrack) -> u32 {
+        if self.is_input() {
+            unsafe { reaper.track_fx_get_rec_count(track) }
+        } else {
+            unsafe { reaper.track_fx_get_count(track) }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            FxChain::Normal => "normal",
+            FxChain::Input => "input",
+            FxChain::Monitor => "monitor",
+        }
+    }
+}
+
+fn get_track_fx(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    chain: &str,
+) -> Result<Value, String> {
+    let chain = FxChain::parse(chain)?;
+    let track = chain.track(reaper, track_index)?;
     // SAFETY: track just obtained from REAPER, used on the main thread here.
-    let count = unsafe { reaper.track_fx_get_count(track) };
+    let count = chain.count(reaper, track);
     let mut fx = Vec::new();
     for i in 0..count {
-        let loc = TrackFxLocation::NormalFxChain(i);
+        let loc = chain.location(i);
         let name = unsafe { reaper.track_fx_get_fx_name(track, loc, NAME_BUF) }
             .ok()
             .map(|s| reaper_string(s.as_c_str().to_bytes()))
@@ -2868,7 +3011,7 @@ fn get_track_fx(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Va
         let offline = unsafe { reaper.track_fx_get_offline(track, loc) };
         fx.push(json!({ "index": i, "name": name, "enabled": enabled, "offline": offline }));
     }
-    Ok(json!({ "track_index": track_index, "fx": fx }))
+    Ok(json!({ "track_index": track_index, "chain": chain.label(), "fx": fx }))
 }
 
 fn get_fx_params(
@@ -2876,11 +3019,11 @@ fn get_fx_params(
     track_index: u32,
     fx_index: u32,
     limit: usize,
+    chain: &str,
 ) -> Result<Value, String> {
-    let track = reaper
-        .get_track(ProjectContext::CurrentProject, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
-    let loc = TrackFxLocation::NormalFxChain(fx_index);
+    let chain = FxChain::parse(chain)?;
+    let track = chain.track(reaper, track_index)?;
+    let loc = chain.location(fx_index);
     let num = unsafe { reaper.track_fx_get_num_params(track, loc) };
     let cap = (limit as u32).min(num);
     let mut params = Vec::new();
@@ -2899,6 +3042,7 @@ fn get_fx_params(
     Ok(json!({
         "track_index": track_index,
         "fx_index": fx_index,
+        "chain": chain.label(),
         "param_count": num,
         "truncated": num > cap,
         "params": params,
@@ -3084,29 +3228,30 @@ fn add_fx(
     reaper: &Reaper<MainThreadScope>,
     track_index: u32,
     fx_name: &str,
+    chain: &str,
 ) -> Result<Value, String> {
+    let chain = FxChain::parse(chain)?;
     let project = ProjectContext::CurrentProject;
-    let track = reaper
-        .get_track(project, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let track = chain.track(reaper, track_index)?;
     reaper.undo_begin_block_2(project);
     // SAFETY: track valid, main thread.
     let result = unsafe {
         reaper.track_fx_add_by_name_add(
             track,
             fx_name,
-            TrackFxChainType::NormalFxChain,
+            chain.chain_type(),
             AddFxBehavior::AlwaysAdd,
         )
     };
     reaper.undo_end_block_2(
         project,
-        format!("AI: add FX \"{fx_name}\" to track {track_index}"),
+        format!("AI: add FX \"{fx_name}\" to track {track_index} ({} chain)", chain.label()),
         UndoScope::All,
     );
     match result {
         Ok(fx_index) => Ok(json!({
-            "added": true, "track_index": track_index, "fx_index": fx_index, "name": fx_name
+            "added": true, "track_index": track_index, "chain": chain.label(),
+            "fx_index": fx_index, "name": fx_name
         })),
         Err(_) => Err(format!("could not add FX \"{fx_name}\" (name not found?)")),
     }
@@ -3118,12 +3263,12 @@ fn set_fx_param(
     fx_index: u32,
     param_index: u32,
     value: f64,
+    chain: &str,
 ) -> Result<Value, String> {
+    let chain = FxChain::parse(chain)?;
     let project = ProjectContext::CurrentProject;
-    let track = reaper
-        .get_track(project, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
-    let loc = TrackFxLocation::NormalFxChain(fx_index);
+    let track = chain.track(reaper, track_index)?;
+    let loc = chain.location(fx_index);
     let v = value.clamp(0.0, 1.0);
     reaper.undo_begin_block_2(project);
     let result = unsafe {
@@ -3147,8 +3292,9 @@ fn set_fx_param(
     result
         .map(|_| {
             json!({
-                "set": true, "track_index": track_index, "fx_index": fx_index,
-                "param_index": param_index, "normalized": v, "display_value": display
+                "set": true, "track_index": track_index, "chain": chain.label(),
+                "fx_index": fx_index, "param_index": param_index, "normalized": v,
+                "display_value": display
             })
         })
         .map_err(|_| "failed to set parameter".to_string())
@@ -3159,6 +3305,7 @@ fn set_fx_param(
 /// REAPER exposes no display→normalized conversion). Reads the current value,
 /// applies `direction * step_count * step_size`, clamps to 0..1, and reports the
 /// new display value. Undo-wrapped, mirroring `set_fx_param`.
+#[allow(clippy::too_many_arguments)] // a flat, self-explanatory nudge parameter list
 fn set_fx_param_by_steps(
     reaper: &Reaper<MainThreadScope>,
     track_index: u32,
@@ -3167,7 +3314,9 @@ fn set_fx_param_by_steps(
     direction: &str,
     step_count: u32,
     step_size: f64,
+    chain: &str,
 ) -> Result<Value, String> {
+    let chain = FxChain::parse(chain)?;
     let sign = match direction.trim().to_lowercase().as_str() {
         "up" | "increase" | "+" => 1.0,
         "down" | "decrease" | "-" => -1.0,
@@ -3183,10 +3332,8 @@ fn set_fx_param_by_steps(
     let delta = sign * (steps as f64) * step;
 
     let project = ProjectContext::CurrentProject;
-    let track = reaper
-        .get_track(project, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
-    let loc = TrackFxLocation::NormalFxChain(fx_index);
+    let track = chain.track(reaper, track_index)?;
+    let loc = chain.location(fx_index);
 
     // SAFETY: track valid, main thread.
     let current = unsafe { reaper.track_fx_get_param_normalized(track, loc, param_index) }.get();
@@ -3214,10 +3361,10 @@ fn set_fx_param_by_steps(
     result
         .map(|_| {
             json!({
-                "set": true, "track_index": track_index, "fx_index": fx_index,
-                "param_index": param_index, "direction": direction, "steps": steps,
-                "step_size": step, "previous_normalized": current, "normalized": target,
-                "display_value": display
+                "set": true, "track_index": track_index, "chain": chain.label(),
+                "fx_index": fx_index, "param_index": param_index, "direction": direction,
+                "steps": steps, "step_size": step, "previous_normalized": current,
+                "normalized": target, "display_value": display
             })
         })
         .map_err(|_| "failed to set parameter".to_string())
@@ -3228,12 +3375,12 @@ fn set_fx_enabled(
     track_index: u32,
     fx_index: u32,
     enabled: bool,
+    chain: &str,
 ) -> Result<Value, String> {
+    let chain = FxChain::parse(chain)?;
     let project = ProjectContext::CurrentProject;
-    let track = reaper
-        .get_track(project, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
-    let loc = TrackFxLocation::NormalFxChain(fx_index);
+    let track = chain.track(reaper, track_index)?;
+    let loc = chain.location(fx_index);
     reaper.undo_begin_block_2(project);
     unsafe { reaper.track_fx_set_enabled(track, loc, enabled) };
     reaper.undo_end_block_2(
@@ -3244,7 +3391,10 @@ fn set_fx_enabled(
         ),
         UndoScope::All,
     );
-    Ok(json!({ "track_index": track_index, "fx_index": fx_index, "enabled": enabled }))
+    Ok(json!({
+        "track_index": track_index, "chain": chain.label(),
+        "fx_index": fx_index, "enabled": enabled
+    }))
 }
 
 // ---- undo / history ---------------------------------------------------------
@@ -4325,22 +4475,25 @@ fn remove_fx(
     reaper: &Reaper<MainThreadScope>,
     track_index: u32,
     fx_index: u32,
+    chain: &str,
 ) -> Result<Value, String> {
+    let chain = FxChain::parse(chain)?;
     let project = ProjectContext::CurrentProject;
-    let track = reaper
-        .get_track(project, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let track = chain.track(reaper, track_index)?;
     reaper.undo_begin_block_2(project);
-    let ok = unsafe { reaper.low().TrackFX_Delete(track.as_ptr(), fx_index as c_int) };
+    let ok = unsafe { reaper.low().TrackFX_Delete(track.as_ptr(), chain.raw_index(fx_index)) };
     reaper.undo_end_block_2(
         project,
-        format!("AI: remove FX {fx_index} from track {track_index}"),
+        format!("AI: remove FX {fx_index} from track {track_index} ({} chain)", chain.label()),
         UndoScope::All,
     );
     if ok {
-        Ok(json!({ "removed": true, "track_index": track_index, "fx_index": fx_index }))
+        Ok(json!({
+            "removed": true, "track_index": track_index,
+            "chain": chain.label(), "fx_index": fx_index
+        }))
     } else {
-        Err(format!("no FX at index {fx_index} on track {track_index}"))
+        Err(format!("no FX at index {fx_index} on track {track_index} ({} chain)", chain.label()))
     }
 }
 
@@ -4411,6 +4564,16 @@ fn preset_nav_move(
     }
 }
 
+/// Confirm-prompt suffix naming a non-normal FX chain (empty for the normal chain),
+/// so a blind user approving a change knows it targets input/monitoring FX.
+fn chain_suffix(input: &Value) -> &'static str {
+    match input.get("chain").and_then(|v| v.as_str()).unwrap_or("normal") {
+        "input" | "rec" | "record" => " [input FX]",
+        "monitor" | "mon" | "monitoring" => " [monitoring FX]",
+        _ => "",
+    }
+}
+
 /// Short human description of the chosen preset selector, for the confirm prompt.
 fn preset_sel_desc(input: &Value) -> String {
     if let Some(n) = input.get("name").and_then(|v| v.as_str()) {
@@ -4428,18 +4591,19 @@ fn get_fx_preset(
     reaper: &Reaper<MainThreadScope>,
     track_index: u32,
     fx_index: u32,
+    chain: &str,
 ) -> Result<Value, String> {
-    let track = reaper
-        .get_track(ProjectContext::CurrentProject, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let chain = FxChain::parse(chain)?;
+    let track = chain.track(reaper, track_index)?;
     let low = reaper.low();
-    let fx = fx_index as c_int;
+    let fx = chain.raw_index(fx_index);
     let (name, matches) =
         read_preset_name(|b, s| unsafe { low.TrackFX_GetPreset(track.as_ptr(), fx, b, s) });
     let mut count: c_int = 0;
     let index = unsafe { low.TrackFX_GetPresetIndex(track.as_ptr(), fx, &mut count) };
     Ok(json!({
         "track_index": track_index,
+        "chain": chain.label(),
         "fx_index": fx_index,
         "preset": name,
         "preset_index": index,
@@ -4455,19 +4619,19 @@ fn set_fx_preset(
     name: Option<&str>,
     index: Option<i64>,
     navigate: Option<&str>,
+    chain: &str,
 ) -> Result<Value, String> {
     // Everything fallible happens BEFORE the undo block so we never leave it open.
+    let chain = FxChain::parse(chain)?;
     let nav = preset_nav_move(name, index, navigate)?;
     let name_c = match name {
         Some(n) => Some(CString::new(n).map_err(|_| "preset name has a NUL byte".to_string())?),
         None => None,
     };
     let project = ProjectContext::CurrentProject;
-    let track = reaper
-        .get_track(project, track_index)
-        .ok_or_else(|| format!("no track at index {track_index}"))?;
+    let track = chain.track(reaper, track_index)?;
     let low = reaper.low();
-    let fx = fx_index as c_int;
+    let fx = chain.raw_index(fx_index);
     reaper.undo_begin_block_2(project);
     let ok = if let Some(c) = &name_c {
         unsafe { low.TrackFX_SetPreset(track.as_ptr(), fx, c.as_ptr()) }
@@ -4485,8 +4649,8 @@ fn set_fx_preset(
     );
     if ok {
         Ok(json!({
-            "set": true, "track_index": track_index, "fx_index": fx_index,
-            "preset": current, "matches_preset": matches,
+            "set": true, "track_index": track_index, "chain": chain.label(),
+            "fx_index": fx_index, "preset": current, "matches_preset": matches,
         }))
     } else {
         Err("failed to set preset (unknown preset name/index, or none to navigate to)".into())
