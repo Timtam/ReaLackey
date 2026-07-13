@@ -33,10 +33,12 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // REAPER's GetFunc, passed to SWELL on non-Windows (ignored on Windows).
     #[cfg(windows)]
     let get_func: *mut c_void = std::ptr::null_mut();
+    // On non-Windows, REAPER exposes a SWELL API function-getter; hand it to
+    // SWELL_dllMain so the modstub resolves SWELL against the host. (None on
+    // Windows, where the real Win32 API is used instead.)
     #[cfg(not(windows))]
     let get_func: *mut c_void = context
-        .to_raw()
-        .GetFunc
+        .swell_function_provider()
         .map(|f| f as *mut c_void)
         .unwrap_or(std::ptr::null_mut());
 

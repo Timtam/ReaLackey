@@ -73,7 +73,8 @@ keyring = { version = "3", features = ["windows-native"] }
 # (CGEvent). Window geometry / raise go through the SWELL C-shim (cross-platform).
 # UNVALIDATED until a macOS CI build compiles this target.
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.24"
+# `highsierra` exposes CGEvent::new_scroll_event (scroll-wheel synthesis).
+core-graphics = { version = "0.24", features = ["highsierra"] }
 core-foundation = "0.10"
 keyring = { version = "3", features = ["apple-native"] }
 

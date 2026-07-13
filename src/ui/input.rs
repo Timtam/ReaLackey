@@ -324,7 +324,9 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use crate::ui::ffi;
-    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+    use core_graphics::event::{
+        CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, CGScrollEventUnit,
+    };
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
 
@@ -402,7 +404,7 @@ mod imp {
         let p = to_screen(hwnd, x, y)?;
         mouse(&src, CGEventType::MouseMoved, p)?;
         // Line-unit scroll; one wheel axis, `clicks` notches.
-        let ev = CGEvent::new_scroll_event(src, 0, 1, clicks, 0, 0)
+        let ev = CGEvent::new_scroll_event(src, CGScrollEventUnit::LINE, 1, clicks, 0, 0)
             .map_err(|_| "CGEvent (scroll) creation failed".to_string())?;
         ev.post(CGEventTapLocation::HID);
         Ok(())
