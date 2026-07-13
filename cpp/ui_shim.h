@@ -108,7 +108,11 @@ int ui_message_box(const char* title, const char* text, int flags);
 typedef void (*pe_init_cb)(void);   // WM_INITDIALOG: Rust prefills the fields
 typedef void (*pe_fetch_cb)(void);  // "Fetch models" clicked: Rust fetches+picks
 typedef int (*pe_ok_cb)(void);      // OK clicked: Rust saves; returns 1=close, 0=keep open
-void ui_set_provider_edit_cbs(pe_init_cb on_init, pe_fetch_cb on_fetch, pe_ok_cb on_ok);
+// A key-list button was pressed: action 0=add, 1=delete, 2=move up, 3=move down.
+// Rust mutates its working list and repopulates the listbox via ui_pe_set_list.
+typedef void (*pe_key_cb)(int action);
+void ui_set_provider_edit_cbs(pe_init_cb on_init, pe_fetch_cb on_fetch, pe_ok_cb on_ok,
+                              pe_key_cb on_key);
 // Show the modal settings dialog; returns 1 if the user pressed OK, 0 on cancel.
 int ui_show_provider_edit(void);
 // Field accessors, valid only from the callbacks while the dialog is open. `ctrl`
@@ -118,6 +122,11 @@ void ui_pe_get_text(int ctrl, char* buf, int buf_sz);
 void ui_pe_set_check(int ctrl, int checked);
 int ui_pe_get_check(int ctrl);
 void ui_pe_show(int ctrl, int visible);
+// Listbox accessors for the key list (`ctrl` = ID_PE_KEYLIST). `items` is a
+// newline-separated, already-masked display list in priority order.
+void ui_pe_set_list(int ctrl, const char* items_newline);
+int ui_pe_get_sel(int ctrl);          // selected row, or -1 if none
+void ui_pe_set_sel(int ctrl, int index);
 
 #ifdef __cplusplus
 }

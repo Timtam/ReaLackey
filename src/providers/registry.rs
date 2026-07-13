@@ -125,15 +125,12 @@ pub fn set_default(id: &str) -> Result<(), String> {
     save(&s)
 }
 
-/// Add a new account (optionally with a key). Errors on a duplicate id. Becomes
-/// the default if it is the first account.
-pub fn add(cfg: ProviderConfig, key: Option<&str>) -> Result<(), String> {
+/// Add a new account. Its API keys are set separately via [`set_keys`]. Errors on
+/// a duplicate id. Becomes the default if it is the first account.
+pub fn add(cfg: ProviderConfig) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
     if s.providers.iter().any(|p| p.id == cfg.id) {
         return Err(format!("provider id already exists: {}", cfg.id));
-    }
-    if let Some(k) = key {
-        set_key(&cfg.id, k)?;
     }
     if s.default.is_none() {
         s.default = Some(cfg.id.clone());
@@ -142,21 +139,16 @@ pub fn add(cfg: ProviderConfig, key: Option<&str>) -> Result<(), String> {
     save(&s)
 }
 
-/// Update an existing account's config. `key_change`: `None` = leave the key
-/// as-is, `Some(None)` = clear it, `Some(Some(k))` = set it.
-pub fn update(cfg: ProviderConfig, key_change: Option<Option<&str>>) -> Result<(), String> {
+/// Update an existing account's config. Its API keys are managed separately via
+/// [`set_keys`]. Errors on an unknown id.
+pub fn update(cfg: ProviderConfig) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
     let slot = s
         .providers
         .iter_mut()
         .find(|p| p.id == cfg.id)
         .ok_or_else(|| format!("unknown provider id: {}", cfg.id))?;
-    *slot = cfg.clone();
-    match key_change {
-        None => {}
-        Some(Some(k)) => set_key(&cfg.id, k)?,
-        Some(None) => delete_key(&cfg.id),
-    }
+    *slot = cfg;
     save(&s)
 }
 
@@ -187,6 +179,44 @@ pub fn active_key() -> Option<String> {
     active().and_then(|c| resolve_key(&c))
 }
 
+/// Every usable key for an account id, in priority order — the FAILOVER list the
+/// worker rotates through when a key hits its limit. Includes the Anthropic
+/// env-var fallback. Empty if the id is unknown or no key is configured.
+pub fn keys_for(id: &str) -> Vec<String> {
+    get(id).map(|c| resolve_keys(&c)).unwrap_or_default()
+}
+
+/// The keys actually held in the credential store for an account id, in order
+/// (NO env fallback) — what the settings dialog shows and edits. `Some(vec)` on a
+/// successful read (empty = no entry stored); `None` if the store could NOT be
+/// read (locked / unavailable), so the caller can avoid treating a read failure as
+/// "no keys" and then overwriting real keys with an empty list.
+pub fn stored_keys(id: &str) -> Option<Vec<String>> {
+    match keyring_entry(&account_for(id)).and_then(|e| e.get_password()) {
+        Ok(s) => Some(split_keys(&s)),
+        Err(keyring::Error::NoEntry) => Some(Vec::new()),
+        Err(_) => None, // locked / unavailable — unknown, not "empty"
+    }
+}
+
+/// Replace an account's ordered key list (first = tried first). An empty list
+/// clears the entry.
+pub fn set_keys(id: &str, keys: &[String]) -> Result<(), String> {
+    let joined = keys
+        .iter()
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if joined.is_empty() {
+        delete_key(id);
+        return Ok(());
+    }
+    keyring_entry(&account_for(id))
+        .and_then(|e| e.set_password(&joined))
+        .map_err(|e| e.to_string())
+}
+
 // ---- key resolution (credential store) --------------------------------------
 
 /// Credential-store account name for a provider id. The seeded `anthropic`
@@ -199,28 +229,40 @@ fn account_for(id: &str) -> String {
     }
 }
 
-/// Stored key (credential store), plus an env fallback for Anthropic.
-fn resolve_key(cfg: &ProviderConfig) -> Option<String> {
-    if let Some(k) = keyring_get(&account_for(&cfg.id)) {
-        return Some(k);
-    }
-    if cfg.kind == AdapterKind::Anthropic {
-        return std::env::var("ANTHROPIC_API_KEY")
+/// All stored keys for an account, in priority order (first = tried first). The
+/// keys live newline-joined in ONE credential-store entry (a pre-multi-key single
+/// key is just a one-line list, so no migration is needed). An Anthropic account
+/// with no stored keys falls back to the ANTHROPIC_API_KEY env var as one key.
+fn resolve_keys(cfg: &ProviderConfig) -> Vec<String> {
+    let mut keys = keyring_get(&account_for(&cfg.id))
+        .map(|s| split_keys(&s))
+        .unwrap_or_default();
+    if keys.is_empty() && cfg.kind == AdapterKind::Anthropic {
+        if let Some(k) = std::env::var("ANTHROPIC_API_KEY")
             .ok()
-            .filter(|s| !s.trim().is_empty());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            keys.push(k);
+        }
     }
-    None
+    keys
 }
 
-fn set_key(id: &str, key: &str) -> Result<(), String> {
-    let key = key.trim();
-    if key.is_empty() {
-        delete_key(id);
-        return Ok(());
-    }
-    keyring_entry(&account_for(id))
-        .and_then(|e| e.set_password(key))
-        .map_err(|e| e.to_string())
+/// The first usable key, if any. The many single-key call sites (`can_send`,
+/// `key_for`, `active_key`, model fetching) just want one working key.
+fn resolve_key(cfg: &ProviderConfig) -> Option<String> {
+    resolve_keys(cfg).into_iter().next()
+}
+
+/// Split a stored key blob into trimmed, non-empty keys — one per line, in order.
+/// API keys never contain a newline, so a line split is a safe list encoding.
+fn split_keys(blob: &str) -> Vec<String> {
+    blob.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn delete_key(id: &str) {
@@ -395,4 +437,28 @@ fn default_anthropic_model() -> String {
 /// Default max agentic turns for a new/legacy account (see `config::max_turns`).
 fn default_max_turns() -> u32 {
     25
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_keys;
+
+    #[test]
+    fn split_keys_parses_ordered_list_and_is_backward_compatible() {
+        // A pre-multi-key single stored key (no newline) -> a one-element list.
+        assert_eq!(split_keys("sk-single"), vec!["sk-single".to_string()]);
+        // Multiple keys keep their order.
+        assert_eq!(
+            split_keys("sk-a\nsk-b\nsk-c"),
+            vec!["sk-a".to_string(), "sk-b".to_string(), "sk-c".to_string()]
+        );
+        // Blank lines and surrounding whitespace are dropped/trimmed.
+        assert_eq!(
+            split_keys("  sk-a  \n\n  sk-b\n"),
+            vec!["sk-a".to_string(), "sk-b".to_string()]
+        );
+        // An empty / whitespace-only blob is no keys.
+        assert!(split_keys("").is_empty());
+        assert!(split_keys("   \n  \n").is_empty());
+    }
 }

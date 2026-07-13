@@ -29,8 +29,15 @@
 #define ID_PE_FETCH          1025   // "Fetch models..." button
 #define ID_PE_MAXTOK         1026
 #define ID_PE_VISION         1027   // "Supports images" checkbox
-#define ID_PE_KEY            1028
-#define ID_PE_KEYHINT        1029   // caption under the key field
+#define ID_PE_KEY            1028   // "Add key" input (typed key -> Add button)
+#define ID_PE_KEYHINT        1029   // caption under the key list
 #define ID_PE_MAXTURNS       1030   // "Tool steps:" (max agentic turns) field
+// Multi-key list: an ordered list of API keys (top tried first, falls back to
+// the next on a per-key limit). Managed with Add / Delete / Move up / Move down.
+#define ID_PE_KEYLIST        1031   // listbox of configured keys (masked)
+#define ID_PE_KEYADD         1032   // add the typed key to the list
+#define ID_PE_KEYDEL         1033   // remove the selected key
+#define ID_PE_KEYUP          1034   // move the selected key up (higher priority)
+#define ID_PE_KEYDOWN        1035   // move the selected key down
 
 #endif // RAAI_RESOURCE_H

@@ -23,20 +23,25 @@ const API_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicProvider {
     client: reqwest::Client,
+    /// The API key this instance sends. The worker builds one provider per key in
+    /// the account's failover list; `None` falls back to config/env at send time.
+    key: Option<String>,
 }
 
 impl AnthropicProvider {
-    pub fn new() -> Self {
+    /// Build with a specific key (a `None` falls back to the active account's
+    /// resolved key / `ANTHROPIC_API_KEY` at send time).
+    pub fn with_key(key: Option<String>) -> Self {
         let client = reqwest::Client::builder()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        Self { client, key }
     }
 }
 
 impl Default for AnthropicProvider {
     fn default() -> Self {
-        Self::new()
+        Self::with_key(None)
     }
 }
 
@@ -70,7 +75,10 @@ impl LlmProvider for AnthropicProvider {
         tx: Sender<ChatEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ProviderError> {
-        let key = config::api_key()
+        let key = self
+            .key
+            .clone()
+            .or_else(config::api_key)
             .ok_or_else(|| ProviderError::MissingKey("ANTHROPIC_API_KEY".into()))?;
         let body = build_request(&req);
 
@@ -85,7 +93,7 @@ impl LlmProvider for AnthropicProvider {
 
         let resp = tokio::select! {
             _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
-            r = send => r.map_err(|e| ProviderError::Http(e.to_string()))?,
+            r = send => r.map_err(|e| ProviderError::Http { status: None, message: e.to_string() })?,
         };
 
         if !resp.status().is_success() {
@@ -93,7 +101,10 @@ impl LlmProvider for AnthropicProvider {
             let text = resp.text().await.unwrap_or_default();
             let msg = format!("API {status}: {text}");
             let _ = tx.send(ChatEvent::Error(msg.clone())).await;
-            return Err(ProviderError::Http(msg));
+            return Err(ProviderError::Http {
+                status: Some(status.as_u16()),
+                message: msg,
+            });
         }
 
         let mut byte_stream = resp.bytes_stream();
@@ -111,7 +122,7 @@ impl LlmProvider for AnthropicProvider {
                 None => break,
                 Some(Err(e)) => {
                     let _ = tx.send(ChatEvent::Error(e.to_string())).await;
-                    return Err(ProviderError::Http(e.to_string()));
+                    return Err(ProviderError::Http { status: None, message: e.to_string() });
                 }
                 Some(Ok(bytes)) => {
                     for ev in parser.feed(&bytes) {

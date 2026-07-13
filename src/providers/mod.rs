@@ -163,14 +163,31 @@ pub enum ChatEvent {
 #[allow(dead_code)] // `Other` is a catch-all for future adapters
 #[derive(thiserror::Error, Debug)]
 pub enum ProviderError {
-    #[error("HTTP: {0}")]
-    Http(String),
+    /// A failed HTTP exchange. `status` is the response code when the failure was
+    /// an HTTP error response (vs. a transport/stream error, where it is `None`),
+    /// so the worker can tell a per-key limit from a malformed request.
+    #[error("HTTP{}: {message}", .status.map(|s| format!(" {s}")).unwrap_or_default())]
+    Http { status: Option<u16>, message: String },
     #[error("missing API key: set {0}")]
     MissingKey(String),
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]
     Other(String),
+}
+
+impl ProviderError {
+    /// Whether this error means the current API KEY cannot serve the request —
+    /// rate-limit / quota exhausted (429) or auth / billing / permission
+    /// (401/402/403) — so rotating to the next configured key may succeed. A
+    /// malformed request (400) or a transport error is deliberately NOT this: it
+    /// would fail identically on every key, so rotating would just burn them all.
+    pub fn is_key_exhausted(&self) -> bool {
+        matches!(
+            self,
+            ProviderError::Http { status: Some(429 | 401 | 402 | 403), .. }
+        )
+    }
 }
 
 #[async_trait]
@@ -190,16 +207,20 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<(), ProviderError>;
 }
 
-/// Build the adapter for a configured account. The worker calls this per prompt
-/// with the currently-default account, so switching the default takes effect
-/// from the next message (design §kap-providers).
-pub fn build_provider(cfg: &registry::ProviderConfig) -> Box<dyn LlmProvider> {
+/// Build the adapter for a configured account using a SPECIFIC key — the worker
+/// passes each key of the account's failover list in turn, rebuilding when it
+/// rotates to the next one on a per-key limit. `key` is `None` for keyless local
+/// servers (Ollama/LM Studio).
+pub fn build_provider_with_key(
+    cfg: &registry::ProviderConfig,
+    key: Option<String>,
+) -> Box<dyn LlmProvider> {
     match cfg.kind {
-        registry::AdapterKind::Anthropic => Box::new(anthropic::AnthropicProvider::new()),
+        registry::AdapterKind::Anthropic => Box::new(anthropic::AnthropicProvider::with_key(key)),
         registry::AdapterKind::OpenAiCompatible => {
             Box::new(openai_compat::OpenAiCompatProvider::new(
                 cfg.base_url.clone().unwrap_or_default(),
-                registry::key_for(&cfg.id),
+                key,
                 cfg.supports_images,
                 cfg.supports_audio,
             ))

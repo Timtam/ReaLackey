@@ -80,12 +80,23 @@ async fn run(
     op_tx: CbSender<ReaperOp>,
 ) {
     let mut history: Vec<ChatMessage> = Vec::new();
+    // Per-provider "which failover key are we on" cursor, remembered across
+    // messages this session so an exhausted key isn't re-tried first every time.
+    let mut key_cursor: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     while let Some(task) = task_rx.recv().await {
         match task {
             MainTask::Cancel => { /* nothing in flight */ }
             MainTask::Prompt(prompt) => {
-                handle_prompt(&mut history, &ui_tx, &mut task_rx, &op_tx, prompt).await;
+                handle_prompt(
+                    &mut history,
+                    &ui_tx,
+                    &mut task_rx,
+                    &op_tx,
+                    &mut key_cursor,
+                    prompt,
+                )
+                .await;
             }
         }
     }
@@ -97,6 +108,16 @@ struct TurnResult {
     tool_calls: Vec<(String, String, Value, Option<String>)>, // (id, name, input, thought_signature)
     stop_reason: StopReason,
     aborted: bool, // cancelled or errored
+    /// The provider error message, if the turn errored (not set on a plain
+    /// cancel). The caller decides whether to show it or rotate to another key.
+    error: Option<String>,
+    /// Whether the error means THIS API key can't serve the request (rate-limit /
+    /// quota / auth) — i.e. rotating to the next key may help. See
+    /// [`ProviderError::is_key_exhausted`](crate::providers::ProviderError).
+    key_exhausted: bool,
+    /// The user cancelled this turn. Distinct from an error `aborted`: we must
+    /// never rotate keys or show a provider error when the user asked to stop.
+    cancelled: bool,
 }
 
 async fn handle_prompt(
@@ -104,6 +125,7 @@ async fn handle_prompt(
     ui_tx: &CbSender<UiEvent>,
     task_rx: &mut UnboundedReceiver<MainTask>,
     op_tx: &CbSender<ReaperOp>,
+    key_cursor: &mut std::collections::HashMap<String, usize>,
     prompt: String,
 ) {
     // Resolve the active (default) provider account for this prompt, so switching
@@ -135,8 +157,20 @@ async fn handle_prompt(
         let _ = ui_tx.send(UiEvent::Done);
         return;
     }
-    let provider: Arc<dyn LlmProvider> = crate::providers::build_provider(&cfg).into();
-    let provider = &provider;
+    // The account's ordered failover keys (empty = a keyless local server; one in
+    // the common case). `key_idx` starts from the session cursor so we resume on
+    // the last working key, clamped in case the list shrank since.
+    let keys = registry::keys_for(&cfg.id);
+    let mut key_idx = key_cursor
+        .get(&cfg.id)
+        .copied()
+        .unwrap_or(0)
+        .min(keys.len().saturating_sub(1));
+    let key_at = |i: usize| keys.get(i).cloned();
+
+    // Capabilities (and thus the tool set + prompt) are key-independent, so derive
+    // them from one throwaway build; the per-turn attempt loop rebuilds per key.
+    let caps = crate::providers::build_provider_with_key(&cfg, key_at(key_idx)).capabilities();
 
     let _ = ui_tx.send(UiEvent::UserMessage(prompt.clone()));
     let _ = ui_tx.send(UiEvent::Status("Thinking…".into()));
@@ -151,7 +185,6 @@ async fn handle_prompt(
 
     history.push(ChatMessage::user_text(prompt));
 
-    let caps = provider.capabilities();
     let tools = tools::definitions(caps.supports_images, caps.supports_audio);
     let cancel = CancellationToken::new();
     let mut final_answer = String::new();
@@ -175,7 +208,61 @@ async fn handle_prompt(
             tools: tools.clone(),
         };
 
-        let result = run_turn(provider, ui_tx, task_rx, &cancel, req).await;
+        // Per-turn attempt loop: on a per-key limit (rate/quota/auth), rotate to
+        // the next configured key and retry the SAME turn. `tried` is per-turn, so
+        // each turn gets one full rotation before we give up.
+        let mut tried = 0usize;
+        let result = loop {
+            let provider: Arc<dyn LlmProvider> =
+                crate::providers::build_provider_with_key(&cfg, key_at(key_idx)).into();
+            let r = run_turn(&provider, ui_tx, task_rx, &cancel, req.clone()).await;
+
+            // Rotate only when the KEY is the problem, the user didn't cancel, we
+            // have another key, and nothing was streamed yet (so a retry can't
+            // duplicate partial output).
+            if keys.len() > 1 && r.key_exhausted && r.text.is_empty() && !r.cancelled {
+                let from = key_idx;
+                key_idx = (key_idx + 1) % keys.len();
+                key_cursor.insert(cfg.id.clone(), key_idx);
+                tried += 1;
+                if tried >= keys.len() {
+                    // A full rotation and every key failed — all exhausted. Show
+                    // the last error once and stop.
+                    let last = r.error.clone().unwrap_or_else(|| "no key available".into());
+                    let _ = ui_tx.send(UiEvent::Error(format!(
+                        "All {} API keys for \"{}\" are exhausted or rejected. Last error: {last}",
+                        keys.len(),
+                        cfg.label
+                    )));
+                    break TurnResult {
+                        aborted: true,
+                        error: None, // already shown
+                        ..r
+                    };
+                }
+                let note = format!(
+                    "API key #{} hit a limit or was rejected — switching to key #{} of {}.",
+                    from + 1,
+                    key_idx + 1,
+                    keys.len()
+                );
+                let _ = ui_tx.send(UiEvent::Notice(note.clone()));
+                let _ = ui_tx.send(UiEvent::Announce(note));
+                continue; // retry the same turn with the next key
+            }
+
+            // Not a rotation. On success remember this key; on a non-rotating error
+            // surface it (run_turn no longer emits provider errors inline). A cancel
+            // shows nothing — run_turn already set the "Cancelled." status.
+            if !r.aborted {
+                key_cursor.insert(cfg.id.clone(), key_idx);
+            } else if !r.cancelled {
+                if let Some(err) = &r.error {
+                    let _ = ui_tx.send(UiEvent::Error(err.clone()));
+                }
+            }
+            break r;
+        };
 
         // Record the assistant turn (text + tool_use blocks) in history. On an
         // aborted turn, skip the tool_use blocks so history never contains a
@@ -332,6 +419,9 @@ async fn run_turn(
         tool_calls: Vec::new(),
         stop_reason: StopReason::EndTurn,
         aborted: false,
+        error: None,
+        key_exhausted: false,
+        cancelled: false,
     };
     let mut assistant_started = false;
 
@@ -353,7 +443,9 @@ async fn run_turn(
                     out.stop_reason = stop_reason;
                 }
                 Some(ChatEvent::Error(e)) => {
-                    let _ = ui_tx.send(UiEvent::Error(e));
+                    // Don't show it here: the caller decides whether to surface the
+                    // error or quietly rotate to the next key.
+                    out.error = Some(e);
                     out.aborted = true;
                 }
                 None => break, // provider finished and dropped the sender
@@ -362,6 +454,7 @@ async fn run_turn(
                 Some(MainTask::Cancel) | None => {
                     cancel.cancel();
                     out.aborted = true;
+                    out.cancelled = true;
                     let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
                 }
                 Some(MainTask::Prompt(_)) => {
@@ -374,7 +467,19 @@ async fn run_turn(
         }
     }
 
-    let _ = handle.await;
+    // The task's return carries the structured error (with an HTTP status), which
+    // the channel `ChatEvent::Error` string can't. Use it to classify whether the
+    // key is exhausted (rotate) vs. a genuine failure, and to fill the message if
+    // the channel didn't. A plain cancel is not an error.
+    if let Ok(Err(err)) = handle.await {
+        if !matches!(err, crate::providers::ProviderError::Cancelled) {
+            out.key_exhausted = err.is_key_exhausted();
+            if out.error.is_none() {
+                out.error = Some(err.to_string());
+            }
+            out.aborted = true;
+        }
+    }
     out
 }
 

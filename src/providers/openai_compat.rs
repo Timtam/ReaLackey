@@ -105,7 +105,7 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let resp = tokio::select! {
             _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
-            r = send => r.map_err(|e| ProviderError::Http(e.to_string()))?,
+            r = send => r.map_err(|e| ProviderError::Http { status: None, message: e.to_string() })?,
         };
 
         if !resp.status().is_success() {
@@ -113,7 +113,10 @@ impl LlmProvider for OpenAiCompatProvider {
             let text = resp.text().await.unwrap_or_default();
             let msg = format!("API {status}: {text}");
             let _ = tx.send(ChatEvent::Error(msg.clone())).await;
-            return Err(ProviderError::Http(msg));
+            return Err(ProviderError::Http {
+                status: Some(status.as_u16()),
+                message: msg,
+            });
         }
 
         let mut byte_stream = resp.bytes_stream();
@@ -131,17 +134,27 @@ impl LlmProvider for OpenAiCompatProvider {
                 None => break,
                 Some(Err(e)) => {
                     let _ = tx.send(ChatEvent::Error(e.to_string())).await;
-                    return Err(ProviderError::Http(e.to_string()));
+                    return Err(ProviderError::Http { status: None, message: e.to_string() });
                 }
                 Some(Ok(bytes)) => {
                     for payload in sse.feed(&bytes) {
                         if payload.trim() == "[DONE]" {
                             break 'stream;
                         }
-                        // A streamed error object (some gateways send these inline).
+                        // A streamed error object (some gateways send these inline
+                        // over HTTP 200 instead of a real status). If it's a per-key
+                        // limit, return it as an Http error with a synthetic status
+                        // so the worker can fail over to the next key; otherwise just
+                        // surface it and keep reading.
                         if let Ok(err) = serde_json::from_str::<ErrorEnvelope>(&payload) {
                             if let Some(e) = err.error {
-                                let _ = tx.send(ChatEvent::Error(e.message)).await;
+                                let _ = tx.send(ChatEvent::Error(e.message.clone())).await;
+                                if let Some(status) = e.key_exhausted_status() {
+                                    return Err(ProviderError::Http {
+                                        status: Some(status),
+                                        message: e.message,
+                                    });
+                                }
                                 continue;
                             }
                         }
@@ -541,12 +554,94 @@ struct ErrorEnvelope {
 struct ErrorBody {
     #[serde(default)]
     message: String,
+    /// Provider error code — a string ("insufficient_quota") or a number (429).
+    #[serde(default)]
+    code: Option<Value>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+impl ErrorBody {
+    /// If this inline error (streamed over an HTTP-200 SSE by gateways like
+    /// OpenRouter) denotes a per-key limit — quota / rate-limit / auth — the
+    /// HTTP-equivalent status to classify it by so the worker can fail over to the
+    /// next key. `None` for anything else (surfaced as a plain error). Heuristic:
+    /// inline errors carry no real status, so match the code/type/message text.
+    fn key_exhausted_status(&self) -> Option<u16> {
+        let code = self
+            .code
+            .as_ref()
+            .map(|c| c.to_string().to_lowercase())
+            .unwrap_or_default();
+        let kind = self.kind.as_deref().unwrap_or("").to_lowercase();
+        let msg = self.message.to_lowercase();
+        let hay = format!("{code} {kind} {msg}");
+        let has = |needle: &str| hay.contains(needle);
+        if has("429")
+            || has("rate limit")
+            || has("rate_limit")
+            || has("quota")
+            || has("resource_exhausted")
+            || has("too many requests")
+            || has("overloaded")
+        {
+            Some(429)
+        } else if has("401") || has("invalid api key") || has("invalid_api_key") || has("unauthorized")
+        {
+            Some(401)
+        } else if has("403") || has("permission") || has("forbidden") {
+            Some(403)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::providers::{ChatMessage, ToolDef};
+
+    fn err(json: &str) -> ErrorBody {
+        serde_json::from_str::<ErrorEnvelope>(json)
+            .unwrap()
+            .error
+            .unwrap()
+    }
+
+    #[test]
+    fn inline_quota_and_auth_errors_map_to_failover_statuses() {
+        // Quota / rate-limit -> 429 (rotate to the next key).
+        assert_eq!(
+            err(r#"{"error":{"message":"You exceeded your current quota","code":"insufficient_quota"}}"#)
+                .key_exhausted_status(),
+            Some(429)
+        );
+        assert_eq!(
+            err(r#"{"error":{"message":"Rate limit reached","type":"rate_limit_exceeded"}}"#)
+                .key_exhausted_status(),
+            Some(429)
+        );
+        assert_eq!(
+            err(r#"{"error":{"message":"RESOURCE_EXHAUSTED","code":429}}"#).key_exhausted_status(),
+            Some(429)
+        );
+        // Auth / permission -> 401 / 403.
+        assert_eq!(
+            err(r#"{"error":{"message":"Invalid API key provided"}}"#).key_exhausted_status(),
+            Some(401)
+        );
+        assert_eq!(
+            err(r#"{"error":{"message":"Permission denied","code":403}}"#).key_exhausted_status(),
+            Some(403)
+        );
+        // A non-key error (e.g. a bad request) must NOT trigger failover.
+        assert_eq!(
+            err(r#"{"error":{"message":"invalid 'model' field","type":"invalid_request_error"}}"#)
+                .key_exhausted_status(),
+            None
+        );
+    }
 
     #[test]
     fn tool_round_trip_maps_to_openai_roles() {

@@ -47,6 +47,7 @@ static HWND        g_pe_dlg   = NULL;  // provider settings dialog, while open
 static pe_init_cb  g_pe_init  = NULL;
 static pe_fetch_cb g_pe_fetch = NULL;
 static pe_ok_cb    g_pe_ok    = NULL;
+static pe_key_cb   g_pe_key   = NULL;  // key-list button (add/delete/move)
 
 // Classic subclass of the webview host so focus entering it (Tab) is forwarded
 // into the web content via Rust (WebView2 MoveFocus). Windows-only.
@@ -288,6 +289,11 @@ static RAAI_DLGRET ProviderEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case ID_PE_FETCH:
           if (g_pe_fetch) g_pe_fetch();
           return TRUE;
+        // Key-list buttons: Rust mutates its working list and repopulates.
+        case ID_PE_KEYADD:   if (g_pe_key) g_pe_key(0); return TRUE;
+        case ID_PE_KEYDEL:   if (g_pe_key) g_pe_key(1); return TRUE;
+        case ID_PE_KEYUP:    if (g_pe_key) g_pe_key(2); return TRUE;
+        case ID_PE_KEYDOWN:  if (g_pe_key) g_pe_key(3); return TRUE;
         case IDOK:
           // Rust saves and decides whether to close (0 = keep open on error).
           if (!g_pe_ok || g_pe_ok()) EndDialog(hwnd, 1);
@@ -602,10 +608,11 @@ extern "C" int ui_message_box(const char* title, const char* text, int flags) {
 }
 
 extern "C" void ui_set_provider_edit_cbs(pe_init_cb on_init, pe_fetch_cb on_fetch,
-                                         pe_ok_cb on_ok) {
+                                         pe_ok_cb on_ok, pe_key_cb on_key) {
   g_pe_init  = on_init;
   g_pe_fetch = on_fetch;
   g_pe_ok    = on_ok;
+  g_pe_key   = on_key;
 }
 
 extern "C" int ui_show_provider_edit(void) {
@@ -644,4 +651,37 @@ extern "C" void ui_pe_show(int ctrl, int visible) {
   if (!g_pe_dlg) return;
   HWND c = GetDlgItem(g_pe_dlg, ctrl);
   if (c) ShowWindow(c, visible ? SW_SHOW : SW_HIDE);
+}
+
+// Fill the key listbox from a newline-separated (already-masked) item list, in
+// order. Rust drives it after every add/delete/move; selection is set separately.
+extern "C" void ui_pe_set_list(int ctrl, const char* items_newline) {
+  if (!g_pe_dlg) return;
+  HWND lb = GetDlgItem(g_pe_dlg, ctrl);
+  if (!lb) return;
+  SendMessage(lb, LB_RESETCONTENT, 0, 0);
+  std::string s(items_newline ? items_newline : "");
+  size_t start = 0;
+  while (start <= s.size()) {
+    size_t nl = s.find('\n', start);
+    std::string line =
+        (nl == std::string::npos) ? s.substr(start) : s.substr(start, nl - start);
+    if (!line.empty()) add_list_item(lb, line.c_str());
+    if (nl == std::string::npos) break;
+    start = nl + 1;
+  }
+}
+
+extern "C" int ui_pe_get_sel(int ctrl) {
+  if (!g_pe_dlg) return -1;
+  HWND lb = GetDlgItem(g_pe_dlg, ctrl);
+  if (!lb) return -1;
+  int sel = (int)SendMessage(lb, LB_GETCURSEL, 0, 0);
+  return sel;  // LB_ERR is -1
+}
+
+extern "C" void ui_pe_set_sel(int ctrl, int index) {
+  if (!g_pe_dlg) return;
+  HWND lb = GetDlgItem(g_pe_dlg, ctrl);
+  if (lb) SendMessage(lb, LB_SETCURSEL, (WPARAM)index, 0);
 }

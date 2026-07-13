@@ -41,6 +41,7 @@ extern "C" {
         on_init: extern "C" fn(),
         on_fetch: extern "C" fn(),
         on_ok: extern "C" fn() -> c_int,
+        on_key: extern "C" fn(c_int),
     );
     fn ui_show_provider_edit() -> c_int;
     fn ui_pe_set_text(ctrl: c_int, utf8: *const c_char);
@@ -48,6 +49,9 @@ extern "C" {
     fn ui_pe_set_check(ctrl: c_int, checked: c_int);
     fn ui_pe_get_check(ctrl: c_int) -> c_int;
     fn ui_pe_show(ctrl: c_int, visible: c_int);
+    fn ui_pe_set_list(ctrl: c_int, items_newline: *const c_char);
+    fn ui_pe_get_sel(ctrl: c_int) -> c_int;
+    fn ui_pe_set_sel(ctrl: c_int, index: c_int);
 }
 
 // Provider settings dialog control ids — MUST match cpp/resource.h.
@@ -60,6 +64,7 @@ pub const PE_VISION: c_int = 1027;
 pub const PE_KEY: c_int = 1028;
 pub const PE_KEYHINT: c_int = 1029;
 pub const PE_MAXTURNS: c_int = 1030;
+pub const PE_KEYLIST: c_int = 1031;
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
 /// non-Windows; ignored on Windows).
@@ -144,7 +149,7 @@ pub fn install_provider_cbs() {
 
 /// Register the provider *settings* dialog callbacks. Call once at init.
 pub fn install_provider_edit_cbs() {
-    unsafe { ui_set_provider_edit_cbs(pe_init, pe_fetch, pe_ok) }
+    unsafe { ui_set_provider_edit_cbs(pe_init, pe_fetch, pe_ok, pe_key) }
 }
 
 /// Show the modal provider settings dialog; true if the user pressed OK.
@@ -183,6 +188,24 @@ pub fn pe_show(ctrl: c_int, visible: bool) {
     unsafe { ui_pe_show(ctrl, visible as c_int) }
 }
 
+/// Fill a settings-dialog listbox with `items` (already display-masked), in order.
+pub fn pe_set_list(ctrl: c_int, items: &[String]) {
+    if let Some(c) = to_cstring(&items.join("\n")) {
+        unsafe { ui_pe_set_list(ctrl, c.as_ptr()) }
+    }
+}
+
+/// The selected row of a settings-dialog listbox, or `None` if nothing is selected.
+pub fn pe_get_sel(ctrl: c_int) -> Option<usize> {
+    let sel = unsafe { ui_pe_get_sel(ctrl) };
+    (sel >= 0).then_some(sel as usize)
+}
+
+/// Select row `index` in a settings-dialog listbox.
+pub fn pe_set_sel(ctrl: c_int, index: usize) {
+    unsafe { ui_pe_set_sel(ctrl, index as c_int) }
+}
+
 extern "C" fn pe_init() {
     let _ = std::panic::catch_unwind(crate::ui::providers_ui::edit_dialog_init);
 }
@@ -194,6 +217,10 @@ extern "C" fn pe_fetch() {
 extern "C" fn pe_ok() -> c_int {
     // On panic, close the dialog (1) rather than leaving it stuck open.
     std::panic::catch_unwind(|| crate::ui::providers_ui::edit_dialog_ok() as c_int).unwrap_or(1)
+}
+
+extern "C" fn pe_key(action: c_int) {
+    let _ = std::panic::catch_unwind(|| crate::ui::providers_ui::edit_dialog_key(action));
 }
 
 /// Show the modal provider-management dialog (main thread only).
