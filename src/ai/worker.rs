@@ -96,7 +96,7 @@ async fn run(
 /// One accumulated model turn.
 struct TurnResult {
     text: String,
-    tool_calls: Vec<(String, String, Value)>, // (id, name, input)
+    tool_calls: Vec<(String, String, Value, Option<String>)>, // (id, name, input, thought_signature)
     stop_reason: StopReason,
     aborted: bool, // cancelled or errored
 }
@@ -186,11 +186,12 @@ async fn handle_prompt(
             final_answer = result.text.clone();
         }
         if !result.aborted {
-            for (id, name, input) in &result.tool_calls {
+            for (id, name, input, thought_signature) in &result.tool_calls {
                 content.push(Content::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
+                    thought_signature: thought_signature.clone(),
                 });
             }
         }
@@ -215,7 +216,7 @@ async fn handle_prompt(
                 && result
                     .tool_calls
                     .iter()
-                    .any(|(_, n, i)| tools::preview(n, i).is_some())
+                    .any(|(_, n, i, _)| tools::preview(n, i).is_some())
             {
                 changes_decision =
                     Some(confirm_apply_changes(ui_tx, op_tx, &result.tool_calls).await);
@@ -223,7 +224,7 @@ async fn handle_prompt(
             let mutations_ok = changes_decision.unwrap_or(true);
 
             let mut results = Vec::new();
-            for (id, name, input) in result.tool_calls {
+            for (id, name, input, _sig) in result.tool_calls {
                 let input_pretty = serde_json::to_string_pretty(&input).unwrap_or_default();
                 let _ = ui_tx.send(UiEvent::ToolStarted {
                     name: name.clone(),
@@ -337,8 +338,8 @@ async fn run_turn(
                     out.text.push_str(&d);
                     let _ = ui_tx.send(UiEvent::AssistantDelta(d));
                 }
-                Some(ChatEvent::ToolCall { id, name, input }) => {
-                    out.tool_calls.push((id, name, input));
+                Some(ChatEvent::ToolCall { id, name, input, thought_signature }) => {
+                    out.tool_calls.push((id, name, input, thought_signature));
                 }
                 Some(ChatEvent::Done { stop_reason, .. }) => {
                     out.stop_reason = stop_reason;
@@ -450,11 +451,11 @@ async fn run_tool(
 async fn confirm_apply_changes(
     ui_tx: &CbSender<UiEvent>,
     op_tx: &CbSender<ReaperOp>,
-    calls: &[(String, String, Value)],
+    calls: &[(String, String, Value, Option<String>)],
 ) -> bool {
     let previews: Vec<String> = calls
         .iter()
-        .filter_map(|(_, name, input)| tools::preview(name, input))
+        .filter_map(|(_, name, input, _)| tools::preview(name, input))
         .collect();
     let list = previews
         .iter()

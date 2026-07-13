@@ -51,7 +51,9 @@ pub fn build_request(req: &ChatRequest) -> Value {
 fn content_to_json(c: &Content) -> Value {
     match c {
         Content::Text(text) => json!({ "type": "text", "text": text }),
-        Content::ToolUse { id, name, input } => {
+        Content::ToolUse {
+            id, name, input, ..
+        } => {
             json!({ "type": "tool_use", "id": id, "name": name, "input": input })
         }
         Content::ToolResult {

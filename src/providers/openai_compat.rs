@@ -62,6 +62,13 @@ impl OpenAiCompatProvider {
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }
+
+    /// Google Gemini's OpenAI-compatible endpoint. Its thinking models require the
+    /// per-call `thought_signature` to be round-tripped (see `build_messages`); no
+    /// other provider uses the `extra_content` field, so we only emit it for Gemini.
+    fn is_gemini(&self) -> bool {
+        self.base_url.contains("generativelanguage.googleapis.com")
+    }
 }
 
 #[async_trait]
@@ -85,7 +92,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tx: Sender<ChatEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ProviderError> {
-        let body = build_body(&req, self.supports_images, self.supports_audio);
+        let body = build_body(&req, self.supports_images, self.supports_audio, self.is_gemini());
 
         let mut builder = self
             .client
@@ -154,6 +161,15 @@ impl LlmProvider for OpenAiCompatProvider {
                                 if let Some(id) = tc.id {
                                     acc.id = id;
                                 }
+                                // Gemini streams the opaque thought_signature under
+                                // extra_content.google; capture it whenever it appears.
+                                if let Some(sig) = tc
+                                    .extra_content
+                                    .and_then(|e| e.google)
+                                    .and_then(|g| g.thought_signature)
+                                {
+                                    acc.thought_signature = Some(sig);
+                                }
                                 if let Some(f) = tc.function {
                                     if let Some(name) = f.name {
                                         acc.name = name;
@@ -190,6 +206,7 @@ impl LlmProvider for OpenAiCompatProvider {
                     id: acc.id,
                     name: acc.name,
                     input,
+                    thought_signature: acc.thought_signature,
                 })
                 .await
                 .is_err()
@@ -213,6 +230,7 @@ struct ToolAcc {
     id: String,
     name: String,
     args: String,
+    thought_signature: Option<String>,
 }
 
 fn map_finish(reason: &str) -> StopReason {
@@ -224,14 +242,23 @@ fn map_finish(reason: &str) -> StopReason {
     }
 }
 
+/// The Google-recognised placeholder thought_signature. Gemini validates that
+/// every function call in the history carries a signature; this base64 value
+/// (`base64("skip_thought_signature_validator")`) is accepted in lieu of a real
+/// one, letting calls without a captured signature through without a 400.
+fn skip_thought_signature() -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode("skip_thought_signature_validator")
+}
+
 // ---- request building (neutral ChatRequest -> OpenAI body) -------------------
 
-fn build_body(req: &ChatRequest, vision: bool, audio: bool) -> Value {
+fn build_body(req: &ChatRequest, vision: bool, audio: bool, gemini: bool) -> Value {
     let mut body = json!({
         "model": req.model,
         "max_tokens": req.max_tokens,
         "stream": true,
-        "messages": build_messages(req, vision, audio),
+        "messages": build_messages(req, vision, audio, gemini),
     });
     if !req.tools.is_empty() {
         body["tools"] = json!(req
@@ -256,7 +283,7 @@ fn build_body(req: &ChatRequest, vision: bool, audio: bool) -> Value {
 /// tool messages are text-only, any image (when `vision`) or audio (when `audio`)
 /// in a tool result is bridged into a trailing `role:"user"` message with
 /// `image_url` / `input_audio` parts.
-fn build_messages(req: &ChatRequest, vision: bool, audio: bool) -> Vec<Value> {
+fn build_messages(req: &ChatRequest, vision: bool, audio: bool, gemini: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     if let Some(system) = &req.system {
         out.push(json!({ "role": "system", "content": system }));
@@ -339,15 +366,32 @@ fn build_messages(req: &ChatRequest, vision: bool, audio: bool) -> Vec<Value> {
                 for c in &m.content {
                     match c {
                         Content::Text(t) => text.push_str(t),
-                        Content::ToolUse { id, name, input } => {
-                            tool_calls.push(json!({
+                        Content::ToolUse {
+                            id,
+                            name,
+                            input,
+                            thought_signature,
+                        } => {
+                            let mut call = json!({
                                 "id": id,
                                 "type": "function",
                                 "function": {
                                     "name": name,
                                     "arguments": serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
                                 }
-                            }));
+                            });
+                            // Gemini requires every function call in the history to
+                            // carry a thought_signature. Echo the real one when we
+                            // captured it; otherwise send the accepted skip-validator
+                            // placeholder so the request isn't rejected (parallel-call
+                            // tails, or history from a model that had no signature).
+                            if gemini {
+                                let sig = thought_signature
+                                    .clone()
+                                    .unwrap_or_else(skip_thought_signature);
+                                call["extra_content"] = json!({ "google": { "thought_signature": sig } });
+                            }
+                            tool_calls.push(call);
                         }
                         Content::ToolResult { .. } => {}
                     }
@@ -462,6 +506,21 @@ struct ToolCallDelta {
     id: Option<String>,
     #[serde(default)]
     function: Option<FnDelta>,
+    /// Gemini-only: `{ "google": { "thought_signature": "..." } }`.
+    #[serde(default)]
+    extra_content: Option<ExtraContent>,
+}
+
+#[derive(Deserialize)]
+struct ExtraContent {
+    #[serde(default)]
+    google: Option<GoogleExtra>,
+}
+
+#[derive(Deserialize)]
+struct GoogleExtra {
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -503,6 +562,7 @@ mod tests {
                         id: "call_1".into(),
                         name: "get_tracks".into(),
                         input: json!({ "include_fx": true }),
+                        thought_signature: None,
                     }],
                 },
                 ChatMessage {
@@ -516,7 +576,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             }],
         };
-        let body = build_body(&req, false, false);
+        let body = build_body(&req, false, false, false);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["role"], "user");
@@ -533,6 +593,77 @@ mod tests {
         // Tools advertised in OpenAI function shape.
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "get_tracks");
+        // Non-Gemini providers never see the Gemini-only extra_content field.
+        assert!(msgs[2]["tool_calls"][0].get("extra_content").is_none());
+    }
+
+    #[test]
+    fn gemini_thought_signature_round_trips_with_dummy_fallback() {
+        // Two assistant tool calls: one carried a real signature, one didn't.
+        let req = ChatRequest {
+            model: "gemini-3-flash".into(),
+            system: None,
+            max_tokens: 100,
+            messages: vec![ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    Content::ToolUse {
+                        id: "call_1".into(),
+                        name: "get_project_memory".into(),
+                        input: json!({}),
+                        thought_signature: Some("REAL_SIG".into()),
+                    },
+                    Content::ToolUse {
+                        id: "call_2".into(),
+                        name: "get_tracks".into(),
+                        input: json!({}),
+                        thought_signature: None,
+                    },
+                ],
+            }],
+            tools: vec![],
+        };
+
+        // Gemini: the real signature is echoed; the missing one gets the placeholder.
+        let g = build_body(&req, false, false, true);
+        let calls = &g["messages"][0]["tool_calls"];
+        assert_eq!(
+            calls[0]["extra_content"]["google"]["thought_signature"],
+            "REAL_SIG"
+        );
+        assert_eq!(
+            calls[1]["extra_content"]["google"]["thought_signature"],
+            super::skip_thought_signature()
+        );
+
+        // Non-Gemini: no extra_content at all, even when a signature is present.
+        let o = build_body(&req, false, false, false);
+        let ocalls = &o["messages"][0]["tool_calls"];
+        assert!(ocalls[0].get("extra_content").is_none());
+        assert!(ocalls[1].get("extra_content").is_none());
+    }
+
+    #[test]
+    fn skip_signature_is_the_accepted_placeholder() {
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(super::skip_thought_signature())
+            .unwrap();
+        assert_eq!(decoded, b"skip_thought_signature_validator");
+    }
+
+    #[test]
+    fn streaming_captures_gemini_thought_signature() {
+        // A tool-call delta carrying extra_content.google.thought_signature.
+        let payload = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"{}"},"extra_content":{"google":{"thought_signature":"SIG123"}}}]}}]}"#;
+        let chunk: ChatChunk = serde_json::from_str(payload).unwrap();
+        let tc = &chunk.choices[0].delta.tool_calls.as_ref().unwrap()[0];
+        let sig = tc
+            .extra_content
+            .as_ref()
+            .and_then(|e| e.google.as_ref())
+            .and_then(|g| g.thought_signature.as_deref());
+        assert_eq!(sig, Some("SIG123"));
     }
 
     /// Build a one-turn history where capture_view returned a text+image result.
@@ -548,6 +679,7 @@ mod tests {
                         id: "call_1".into(),
                         name: "capture_view".into(),
                         input: json!({}),
+                        thought_signature: None,
                     }],
                 },
                 ChatMessage {
@@ -571,7 +703,7 @@ mod tests {
 
     #[test]
     fn image_tool_result_bridges_to_a_following_user_message() {
-        let body = build_body(&image_tool_req(), true, false);
+        let body = build_body(&image_tool_req(), true, false, false);
         let msgs = body["messages"].as_array().unwrap();
         // assistant tool call, then the (text-only) tool reply, then a user
         // message carrying the image as an image_url data-URI part.
@@ -590,7 +722,7 @@ mod tests {
 
     #[test]
     fn image_tool_result_dropped_when_vision_off() {
-        let body = build_body(&image_tool_req(), false, false);
+        let body = build_body(&image_tool_req(), false, false, false);
         let msgs = body["messages"].as_array().unwrap();
         // No trailing user image message; the tool reply notes the omission.
         assert_eq!(msgs.len(), 2);
@@ -611,6 +743,7 @@ mod tests {
                         id: "call_1".into(),
                         name: "listen_to_audio".into(),
                         input: json!({}),
+                        thought_signature: None,
                     }],
                 },
                 ChatMessage {
@@ -630,7 +763,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let body = build_body(&req, false, true);
+        let body = build_body(&req, false, true, false);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["role"], "tool");
         assert!(msgs[1]["content"].is_string()); // tool content stays text
@@ -640,7 +773,7 @@ mod tests {
         assert_eq!(parts[1]["input_audio"]["format"], "wav");
         assert_eq!(msgs.len(), 3);
         // With audio off, the clip is dropped and the omission noted.
-        let off = build_body(&req, false, false);
+        let off = build_body(&req, false, false, false);
         let m = off["messages"].as_array().unwrap();
         assert_eq!(m.len(), 2);
         assert!(m[1]["content"].as_str().unwrap().contains("omitted"));

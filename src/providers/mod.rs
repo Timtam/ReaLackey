@@ -53,6 +53,10 @@ pub enum Content {
         id: String,
         name: String,
         input: Value,
+        /// Google Gemini thinking models attach an opaque `thought_signature` to
+        /// each function call that MUST be echoed back on the next turn, or the
+        /// request 400s. Opaque to us; `None` for every other provider.
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -145,6 +149,9 @@ pub enum ChatEvent {
         id: String,
         name: String,
         input: Value,
+        /// Gemini's per-call `thought_signature` (see `Content::ToolUse`); `None`
+        /// for providers that don't emit one.
+        thought_signature: Option<String>,
     },
     Done {
         stop_reason: StopReason,

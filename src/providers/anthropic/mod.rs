@@ -153,7 +153,12 @@ impl LlmProvider for AnthropicProvider {
                                     let input: Value =
                                         serde_json::from_str(&json).unwrap_or_else(|_| json!({}));
                                     if tx
-                                        .send(ChatEvent::ToolCall { id, name, input })
+                                        .send(ChatEvent::ToolCall {
+                                            id,
+                                            name,
+                                            input,
+                                            thought_signature: None,
+                                        })
                                         .await
                                         .is_err()
                                     {
