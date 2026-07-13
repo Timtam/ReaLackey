@@ -101,7 +101,9 @@ impl Output {
                 html_escape(name),
                 html_escape(input)
             );
-            self.call_js("addBlock", &html);
+            // addTool groups consecutive tool cards into one "Used N tools"
+            // collapsible (assistant text / notices between tools break the run).
+            self.call_js("addTool", &html);
         } else {
             ffi::append_output(&format!("\r\n[tool: {name}]\r\n"));
         }
@@ -349,6 +351,14 @@ details.tool>summary::before{content:"\25b8  ";}
 details.tool[open]>summary::before{content:"\25be  ";}
 details.tool pre{margin:0;padding:8px;background:#151515;overflow:auto;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;}
 .tres.err{color:#f48771;}
+/* Grouping of consecutive tool cards ("Used N tools"). */
+details.toolgroup{border:1px solid #3a3a3a;border-radius:6px;margin:8px 0;background:#232323;}
+details.toolgroup>summary.tgsum{cursor:pointer;padding:5px 9px;list-style:none;color:#b5cea8;font-weight:600;}
+details.toolgroup>summary.tgsum::-webkit-details-marker{display:none;}
+details.toolgroup>summary.tgsum::before{content:"\25b8  ";}
+details.toolgroup[open]>summary.tgsum::before{content:"\25be  ";}
+.tgbody{padding:0 8px 4px;}
+.tgbody details.tool{margin:6px 0;background:#1b1b1b;}
 .sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;}
 #status{flex:0 0 auto;padding:2px 10px;color:#9a9a9a;font-size:12px;min-height:15px;}
 #composer{flex:0 0 auto;display:flex;gap:6px;padding:8px 10px 10px;border-top:1px solid #3a3a3a;background:#252526;}
@@ -368,6 +378,18 @@ details.tool pre{margin:0;padding:8px;background:#151515;overflow:auto;font-size
 </form><script>
 function sd(){var l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight;}
 function addBlock(h){var l=document.getElementById('log');if(l){l.insertAdjacentHTML('beforeend',h);sd();}}
+function tgCount(g){var b=g.querySelector('.tgbody');var n=b.querySelectorAll('details.tool').length;g.querySelector('.tgsum').textContent='Used '+n+' tool'+(n===1?'':'s');}
+function newToolGroup(l){var g=document.createElement('details');g.className='toolgroup';g.innerHTML='<summary class="tgsum" aria-label="tool group"></summary><div class="tgbody"></div>';return g;}
+// Group CONSECUTIVE tool cards under one collapsible. A lone tool stays a single
+// card; the second consecutive tool promotes the pair into a "Used N tools" group.
+// Anything else added to the log (assistant heading, notice, error) ends the run.
+function addTool(h){
+  var l=document.getElementById('log');if(!l)return;
+  var last=l.lastElementChild,cl=last&&last.classList;
+  if(cl&&cl.contains('toolgroup')){var b=last.querySelector('.tgbody');b.insertAdjacentHTML('beforeend',h);tgCount(last);sd();return;}
+  if(cl&&cl.contains('tool')){var g=newToolGroup(l);l.replaceChild(g,last);var gb=g.querySelector('.tgbody');gb.appendChild(last);gb.insertAdjacentHTML('beforeend',h);tgCount(g);sd();return;}
+  l.insertAdjacentHTML('beforeend',h);sd();
+}
 function startAssistant(){var o=document.getElementById('cur');if(o)o.removeAttribute('id');addBlock('<h2 class="turn assistant">Assistant</h2><div class="body" id="cur"></div>');}
 function updateAssistant(h){var c=document.getElementById('cur');if(c){c.innerHTML=h;sd();}}
 function setToolResult(h){var l=document.querySelectorAll('#log details.tool');if(l.length){var t=l[l.length-1].querySelector('.tres');if(t){t.innerHTML=h;sd();}}}
