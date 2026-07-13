@@ -10,6 +10,8 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-13
+
 ### Added
 
 - Native REAPER extension with an AI assistant: a modeless chat window — an
