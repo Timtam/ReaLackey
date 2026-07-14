@@ -728,3 +728,19 @@ extern "C" void ui_pe_set_sel(int ctrl, int index) {
   HWND lb = GetDlgItem(g_pe_dlg, ctrl);
   if (lb) SendMessage(lb, LB_SETCURSEL, (WPARAM)index, 0);
 }
+
+// ---- SWELL dialog/menu resource registration (macOS/Linux) ------------------
+// On non-Windows there is no rc.exe: SWELL learns about our dialog templates ONLY
+// from the tables swell_resgen.php generates from assistant.rc (see build.rs),
+// pulled in here. WITHOUT these includes SWELL has no record of our dialogs, so
+// CreateDialogParam / DialogBoxParam(MAKEINTRESOURCE(...)) return NULL at runtime
+// and "Open window" / "Providers" open nothing (focus just returns to REAPER).
+// swell-dlggen.h / swell-menugen.h define the macros the generated tables use;
+// each must precede its table. assistant.rc has no MENU, so the menu table is
+// empty but still generated.
+#ifndef _WIN32
+#include "swell-dlggen.h"
+#include "assistant.rc_mac_dlg"
+#include "swell-menugen.h"
+#include "assistant.rc_mac_menu"
+#endif

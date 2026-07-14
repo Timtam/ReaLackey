@@ -42,3 +42,7 @@ Thumbs.db
 
 # SWELL/WDL checkout (cloned fresh in CI; never committed)
 /vendor/
+
+# SWELL dialog/menu tables generated from assistant.rc by swell_resgen.php (build.rs)
+/cpp/assistant.rc_mac_dlg
+/cpp/assistant.rc_mac_menu
