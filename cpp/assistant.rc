@@ -40,7 +40,7 @@ BEGIN
     DEFPUSHBUTTON   "&Close", IDCANCEL, 280, 140, 54, 16
 END
 
-ID_PROVIDER_EDIT_DLG DIALOGEX 0, 0, 300, 218
+ID_PROVIDER_EDIT_DLG DIALOGEX 0, 0, 300, 214
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Provider settings"
 FONT 8, "MS Shell Dlg"
@@ -49,24 +49,24 @@ BEGIN
     EDITTEXT        ID_PE_LABEL, 66, 6, 228, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
     LTEXT           "Base &URL:", ID_PE_BASEURL_LBL, 6, 27, 58, 9
     EDITTEXT        ID_PE_BASEURL, 66, 24, 228, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
-    LTEXT           "&Model:", -1, 6, 45, 58, 9
-    EDITTEXT        ID_PE_MODEL, 66, 42, 170, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
-    PUSHBUTTON      "&Fetch models...", ID_PE_FETCH, 240, 42, 54, 13
-    LTEXT           "Max &tokens:", -1, 6, 63, 58, 9
-    EDITTEXT        ID_PE_MAXTOK, 66, 60, 60, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP | WS_BORDER
-    LTEXT           "Tool &steps:", -1, 138, 63, 48, 9
-    EDITTEXT        ID_PE_MAXTURNS, 190, 60, 44, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP | WS_BORDER
-    AUTOCHECKBOX    "Supports &images (vision)", ID_PE_VISION, 66, 78, 160, 10, WS_TABSTOP
-    LTEXT           "API keys - the top key is used; on a limit it falls back to the next:", -1, 6, 96, 288, 9
-    LTEXT           "Add ke&y:", -1, 6, 111, 58, 9
-    EDITTEXT        ID_PE_KEY, 66, 108, 170, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
-    PUSHBUTTON      "&Add", ID_PE_KEYADD, 240, 108, 54, 13
-    LTEXT           "Configured &keys:", -1, 6, 126, 58, 9
-    LISTBOX         ID_PE_KEYLIST, 66, 123, 170, 54, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | WS_BORDER
-    PUSHBUTTON      "&Delete", ID_PE_KEYDEL, 240, 123, 54, 13
-    PUSHBUTTON      "Move u&p", ID_PE_KEYUP, 240, 140, 54, 13
-    PUSHBUTTON      "Move do&wn", ID_PE_KEYDOWN, 240, 157, 54, 13
-    LTEXT           "", ID_PE_KEYHINT, 66, 180, 228, 9, SS_LEFTNOWORDWRAP
-    DEFPUSHBUTTON   "OK", IDOK, 186, 198, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 240, 198, 50, 14
+    LTEXT           "API keys - the top key is used; on a limit it falls back to the next:", -1, 6, 42, 288, 9
+    LTEXT           "Add ke&y:", -1, 6, 57, 58, 9
+    EDITTEXT        ID_PE_KEY, 66, 54, 170, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
+    PUSHBUTTON      "&Add", ID_PE_KEYADD, 240, 54, 54, 13
+    LTEXT           "Configured &keys:", -1, 6, 72, 58, 9
+    LISTBOX         ID_PE_KEYLIST, 66, 69, 170, 54, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+    PUSHBUTTON      "&Delete", ID_PE_KEYDEL, 240, 69, 54, 13
+    PUSHBUTTON      "Move u&p", ID_PE_KEYUP, 240, 86, 54, 13
+    PUSHBUTTON      "Move do&wn", ID_PE_KEYDOWN, 240, 103, 54, 13
+    LTEXT           "", ID_PE_KEYHINT, 66, 126, 228, 9, SS_LEFTNOWORDWRAP
+    LTEXT           "&Model:", -1, 6, 141, 58, 9
+    EDITTEXT        ID_PE_MODEL, 66, 138, 170, 12, ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER
+    PUSHBUTTON      "&Fetch models...", ID_PE_FETCH, 240, 138, 54, 13
+    LTEXT           "Max &tokens:", -1, 6, 159, 58, 9
+    EDITTEXT        ID_PE_MAXTOK, 66, 156, 60, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP | WS_BORDER
+    LTEXT           "Tool &steps:", -1, 138, 159, 48, 9
+    EDITTEXT        ID_PE_MAXTURNS, 190, 156, 44, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP | WS_BORDER
+    AUTOCHECKBOX    "Supports &images (vision)", ID_PE_VISION, 66, 174, 160, 10, WS_TABSTOP
+    DEFPUSHBUTTON   "OK", IDOK, 186, 192, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 240, 192, 50, 14
 END
