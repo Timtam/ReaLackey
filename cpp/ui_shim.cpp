@@ -278,22 +278,51 @@ static RAAI_DLGRET ProvidersProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 }
 
 // ---- provider settings dialog (Phase 5, M5) ---------------------------------
+static void enable_ctrl(HWND dlg, int id, int enable) {
+  HWND c = GetDlgItem(dlg, id);
+  if (c) EnableWindow(c, enable);
+}
+
+// Keep the key-list buttons matched to state so the dialog is self-explanatory
+// (a disabled button reads as "unavailable" to a screen reader) instead of
+// clicking through to a "nothing selected" message: Add only when the key field
+// has text; Delete / Move up / Move down only when a key is selected.
+static void update_pe_key_buttons(HWND hwnd) {
+  HWND edit = GetDlgItem(hwnd, ID_PE_KEY);
+  HWND lb = GetDlgItem(hwnd, ID_PE_KEYLIST);
+  int has_text = edit && GetWindowTextLength(edit) > 0;
+  int has_sel = lb && (int)SendMessage(lb, LB_GETCURSEL, 0, 0) >= 0;
+  enable_ctrl(hwnd, ID_PE_KEYADD, has_text);
+  enable_ctrl(hwnd, ID_PE_KEYDEL, has_sel);
+  enable_ctrl(hwnd, ID_PE_KEYUP, has_sel);
+  enable_ctrl(hwnd, ID_PE_KEYDOWN, has_sel);
+}
+
 static RAAI_DLGRET ProviderEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
     case WM_INITDIALOG:
       g_pe_dlg = hwnd;
-      if (g_pe_init) g_pe_init();  // Rust prefills the fields
+      if (g_pe_init) g_pe_init();  // Rust prefills the fields + key list
+      update_pe_key_buttons(hwnd); // empty field + no selection -> buttons disabled
       return TRUE;                 // default focus (first tabstop)
     case WM_COMMAND:
       switch (LOWORD(wParam)) {
         case ID_PE_FETCH:
           if (g_pe_fetch) g_pe_fetch();
           return TRUE;
-        // Key-list buttons: Rust mutates its working list and repopulates.
-        case ID_PE_KEYADD:   if (g_pe_key) g_pe_key(0); return TRUE;
-        case ID_PE_KEYDEL:   if (g_pe_key) g_pe_key(1); return TRUE;
-        case ID_PE_KEYUP:    if (g_pe_key) g_pe_key(2); return TRUE;
-        case ID_PE_KEYDOWN:  if (g_pe_key) g_pe_key(3); return TRUE;
+        // Key-list buttons: Rust mutates its working list and repopulates; then
+        // refresh which buttons are enabled for the new state.
+        case ID_PE_KEYADD:   if (g_pe_key) g_pe_key(0); update_pe_key_buttons(hwnd); return TRUE;
+        case ID_PE_KEYDEL:   if (g_pe_key) g_pe_key(1); update_pe_key_buttons(hwnd); return TRUE;
+        case ID_PE_KEYUP:    if (g_pe_key) g_pe_key(2); update_pe_key_buttons(hwnd); return TRUE;
+        case ID_PE_KEYDOWN:  if (g_pe_key) g_pe_key(3); update_pe_key_buttons(hwnd); return TRUE;
+        // Live-enable Add as the user types a key, and Delete/Move as they select.
+        case ID_PE_KEY:
+          if (HIWORD(wParam) == EN_CHANGE) update_pe_key_buttons(hwnd);
+          return FALSE;
+        case ID_PE_KEYLIST:
+          if (HIWORD(wParam) == LBN_SELCHANGE) update_pe_key_buttons(hwnd);
+          return FALSE;
         case IDOK:
           // Rust saves and decides whether to close (0 = keep open on error).
           if (!g_pe_ok || g_pe_ok()) EndDialog(hwnd, 1);
