@@ -12,6 +12,10 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Chat message navigation + copy: **Alt+1 … Alt+0** (and the key right of 0) jump
+  to that message and move focus to it (the screen reader reads it); a quick second
+  press of the same combo copies that message — your request or the model's
+  response — to the clipboard.
 - Action & keyboard-shortcut tools: `search_actions` (find actions by name),
   `get_action_info` (an action's name, toggle state, and bound shortcuts),
   `run_action` (run any action by id or named command — a catch-all for anything

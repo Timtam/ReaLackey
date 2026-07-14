@@ -377,7 +377,8 @@ body{display:flex;flex-direction:column;height:100vh;}
 #log{flex:1 1 auto;overflow-y:auto;padding:10px;}
 .msg{margin:0 0 12px;word-wrap:break-word;overflow-wrap:anywhere;}
 /* Each turn starts with a heading so a screen reader can jump between them (h). */
-h2.turn{font-size:13px;font-weight:700;margin:16px 0 4px;line-height:1.4;}
+h2.turn{font-size:13px;font-weight:700;margin:16px 0 4px;line-height:1.4;scroll-margin:8px;}
+h2.turn:focus{outline:2px solid #0e639c;outline-offset:1px;}
 h2.turn.user{color:#9cdcfe;}
 h2.turn.assistant{color:#569cd6;}
 .body{margin:0 0 12px;}
@@ -416,7 +417,7 @@ details.toolgroup[open]>summary.tgsum::before{content:"\25be  ";}
 <div id="log"></div>
 <div id="status" role="status" aria-atomic="true" aria-label="Assistant status">Ready.</div>
 <form id="composer">
-<textarea id="msg" rows="1" aria-label="Message the assistant" placeholder="Ask the assistant…  (Enter to send, Shift+Enter = new line)"></textarea>
+<textarea id="msg" rows="1" aria-label="Message the assistant. Alt plus a number jumps to that message; press it again quickly to copy the message." placeholder="Ask the assistant…  (Enter = send · Shift+Enter = new line · Alt+number = jump to a message, again to copy)"></textarea>
 <button id="send" type="submit">Send</button>
 </form><script>
 function sd(){var l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight;}
@@ -439,6 +440,17 @@ function setToolResult(h){var l=document.querySelectorAll('#log details.tool');i
 function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.textContent='';setTimeout(function(){l.textContent=t;setTimeout(function(){l.textContent='';},2500);},60);}
 function setStatus(t){var s=document.getElementById('status');if(s)s.textContent=t;}
 function focusInput(){var m=document.getElementById('msg');if(m)m.focus();}
+// Copy `t` to the clipboard. execCommand works in the webview under a user
+// gesture (about:blank isn't a secure context, so navigator.clipboard may be
+// blocked); fall back to it. Restores focus after the hidden-textarea trick.
+function copyText(t){var ok=false;try{var p=document.activeElement,ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';ta.style.top='0';document.body.appendChild(ta);ta.focus();ta.select();try{ok=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);if(p&&p.focus)p.focus();}catch(e){}if(!ok&&navigator.clipboard&&navigator.clipboard.writeText){try{navigator.clipboard.writeText(t);ok=true;}catch(e){}}return ok;}
+// Message navigation: each turn is an h2.turn (user or assistant). msgText pulls
+// the message's plain text — a user turn's own text, or the assistant turn's body.
+function msgHeadings(){return Array.prototype.slice.call(document.querySelectorAll('#log h2.turn'));}
+function msgText(h){if(!h)return '';if(h.classList.contains('assistant')){var b=h.nextElementSibling;return (b&&b.classList&&b.classList.contains('body'))?b.textContent.trim():'';}return h.textContent.trim().replace(/^You:\s*/,'');}
+var lastMsgNav={n:0,t:0};
+// Alt+N focuses message N (the screen reader reads it); a quick second Alt+N copies it.
+function gotoMessage(n){var hs=msgHeadings();if(n<1||n>hs.length){liveAnnounce(hs.length?('Only '+hs.length+' message'+(hs.length===1?'':'s')+'.'):'No messages yet.');return;}var h=hs[n-1],now=(new Date()).getTime();if(lastMsgNav.n===n&&now-lastMsgNav.t<600){lastMsgNav={n:0,t:0};liveAnnounce(copyText(msgText(h))?'Message copied.':'Copy failed.');return;}lastMsgNav={n:n,t:now};h.setAttribute('tabindex','-1');h.scrollIntoView({block:'center'});h.focus();}
 var generating=false;
 function setGenerating(b){generating=!!b;}
 function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height='auto';var max=Math.round(window.innerHeight*0.4);m.style.height=Math.min(m.scrollHeight,max)+'px';}
@@ -466,6 +478,19 @@ document.addEventListener('click',function(e){
   e.preventDefault();
   var u=a.getAttribute('href')||'';
   if(/^(https?:\/\/|mailto:)/i.test(u)&&window.ipc)window.ipc.postMessage(JSON.stringify({t:'openurl',url:u}));
+});
+// Alt+1..9 / Alt+0 (=10) / Alt+key-right-of-0 (=11) jump between messages; a quick
+// second press of the same combo copies that message. Uses e.code so it's layout-
+// independent (and preventDefault stops mac Option+digit typing a special char).
+document.addEventListener('keydown',function(e){
+  if(!e.altKey||e.ctrlKey||e.metaKey||e.shiftKey)return;
+  var c=e.code,n=0;
+  if(/^Digit[1-9]$/.test(c))n=+c.slice(5);
+  else if(c==='Digit0')n=10;
+  else if(c==='Minus')n=11;
+  else return;
+  e.preventDefault();
+  gotoMessage(n);
 });
 </script></body></html>"#;
 

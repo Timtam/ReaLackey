@@ -83,6 +83,9 @@ ReaLackey is designed to be driven entirely by keyboard and screen reader:
 - Final answers are spoken through **OSARA**; the chat pane is navigable by
   headings, links open in your browser, and the status line carries a
   `role="status"` so you can query it on demand.
+- **Alt+1 … Alt+0** jump to a message and focus it (read out by the screen
+  reader); press the same combo again quickly to copy that message — your request
+  or the reply — to the clipboard.
 - When OSARA is running, the assistant is told it's talking to a blind user and
   avoids "look for the cog icon" style directions — it reads controls out or
   operates them itself.
