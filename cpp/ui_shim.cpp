@@ -740,6 +740,15 @@ extern "C" void ui_pe_set_sel(int ctrl, int index) {
 // empty but still generated.
 #ifndef _WIN32
 #include "swell-dlggen.h"
+// SWELL doesn't define these Win32 listbox style flags — its listboxes notify and
+// hold strings unconditionally — so map them to 0 to let the generated table
+// (which carries the .rc's LISTBOX styles verbatim) compile.
+#ifndef LBS_NOTIFY
+#define LBS_NOTIFY 0
+#endif
+#ifndef LBS_HASSTRINGS
+#define LBS_HASSTRINGS 0
+#endif
 #include "assistant.rc_mac_dlg"
 #include "swell-menugen.h"
 #include "assistant.rc_mac_menu"
