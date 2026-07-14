@@ -800,19 +800,18 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             description: "Move a media item's left or right EDGE to an absolute timeline time \
                           (seconds) — trimming or extending it. CHANGES the project (confirmed + \
                           undo-wrapped, ONE undo point). The RIGHT edge just changes the item's \
-                          length. The LEFT edge moves the item start AND shifts the take's \
-                          start-in-source offset so the audio content stays put (the correct 'trim \
-                          left edge' behaviour), scaled by the take playrate; extending the left \
-                          edge before the source start shows silence (or loops if loop_source is \
-                          on). Use this instead of composing set_item_property/set_take_property by \
-                          hand. Defaults to the active take."
+                          length. The LEFT edge moves the item start AND shifts EVERY take's \
+                          start-in-source offset (each by the move scaled by its own playrate) so \
+                          the audio content stays put across all takes — the correct 'trim left \
+                          edge' behaviour; extending the left edge before the source start yields \
+                          leading silence (or loops if loop_source is on). Use this instead of \
+                          composing set_item_property/set_take_property by hand."
                 .into(),
             input_schema: obj(
                 json!({
                     "item_index": { "type": "integer" },
                     "edge": { "type": "string", "enum": ["left", "right"], "description": "which edge to move" },
-                    "time": { "type": "number", "description": "absolute timeline position (seconds) for the edge" },
-                    "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+                    "time": { "type": "number", "description": "absolute timeline position (seconds) for the edge" }
                 }),
                 json!(["item_index", "edge", "time"]),
             ),
@@ -1105,8 +1104,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                           including the Video processor's EEL code — envelopes, item list, etc.). \
                           Read-only, and can be large. Use it for advanced edits the typed tools \
                           don't cover (notably reading/editing Video processor code), then write it \
-                          back with set_track_state_chunk. If 'truncated' is true the chunk was too \
-                          big to read fully — do NOT write a truncated chunk back."
+                          back with set_track_state_chunk (edit minimally — change only what you \
+                          intend)."
                 .into(),
             input_schema: obj(
                 json!({ "track_index": { "type": "integer" } }),
@@ -2473,7 +2472,6 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "item_index")?,
             req_str(input, "edge")?,
             req_f64(input, "time")?,
-            opt_u32(input, "take_index"),
         ),
         // take properties
         "get_take_properties" => get_take_properties(
@@ -2649,10 +2647,12 @@ pub fn is_pixel_tool(name: &str) -> bool {
 pub fn consent_prompt(name: &str, input: &Value) -> Option<String> {
     match name {
         "capture_view" => {
+            // Default MUST match capture_view's own default (focused_plugin), or the
+            // consent dialog would name a different window than the one captured.
             let target = input
                 .get("target")
                 .and_then(|v| v.as_str())
-                .unwrap_or("reaper_main");
+                .unwrap_or("focused_plugin");
             // Every screenshot is consent-gated, always — a capture sends pixels
             // to the cloud, so it is never covered by the pixel-control arm (which
             // only authorizes LOCAL input), and consent is never persistent (per
@@ -6116,7 +6116,6 @@ fn set_item_edge(
     item_index: u32,
     edge: &str,
     time: f64,
-    take_index: Option<u32>,
 ) -> Result<Value, String> {
     /// Smallest length we allow — a zero/negative-length item is invalid.
     const MIN_LEN: f64 = 1e-6;
@@ -6161,29 +6160,34 @@ fn set_item_edge(
             }
             reaper.undo_begin_block_2(project);
             unsafe { low.SetMediaItemInfo_Value(ip, c"D_POSITION".as_ptr(), time) };
-            // Keep the audio content in place by shifting the take's start-in-source
-            // by delta*playrate (D_STARTOFFS is in SOURCE seconds). Empty items have
-            // no take, so just the position/length move.
-            let mut new_off_out = json!(null);
-            let mut note: Option<String> = None;
-            if let Ok(take) = resolve_take(reaper, item, take_index) {
-                let tp = take.as_ptr();
+            // The position change applies to EVERY take, so keep them all aligned:
+            // shift each take's start-in-source by delta * its OWN playrate
+            // (D_STARTOFFS is in SOURCE seconds). Do NOT clamp — REAPER represents a
+            // pre-source region (leading silence / loop padding) with a negative
+            // offset, and clamping to 0 would slide the content instead. Empty items
+            // have no takes, so only the position/length move.
+            let take_count = unsafe { low.CountTakes(ip) };
+            let active = unsafe { low.GetMediaItemInfo_Value(ip, c"I_CURTAKE".as_ptr()) } as c_int;
+            let mut active_off: Value = json!(null);
+            let mut extended_before_source = false;
+            for ti in 0..take_count {
+                let tp = unsafe { low.GetTake(ip, ti) };
+                if tp.is_null() {
+                    continue;
+                }
                 let playrate = {
                     let r = unsafe { low.GetMediaItemTakeInfo_Value(tp, c"D_PLAYRATE".as_ptr()) };
                     if r > 0.0 { r } else { 1.0 }
                 };
                 let old_off = unsafe { low.GetMediaItemTakeInfo_Value(tp, c"D_STARTOFFS".as_ptr()) };
-                let raw = old_off + delta * playrate;
-                let new_off = raw.max(0.0);
-                if raw < -1e-9 {
-                    note = Some(
-                        "extended before the source start; the added region is silence (or loops \
-                         if loop_source is on)"
-                            .into(),
-                    );
+                let new_off = old_off + delta * playrate;
+                if new_off < -1e-9 {
+                    extended_before_source = true;
                 }
                 unsafe { low.SetMediaItemTakeInfo_Value(tp, c"D_STARTOFFS".as_ptr(), new_off) };
-                new_off_out = json!(new_off);
+                if ti == active {
+                    active_off = json!(new_off);
+                }
             }
             unsafe { low.SetMediaItemInfo_Value(ip, c"D_LENGTH".as_ptr(), new_len) };
             unsafe { low.UpdateItemInProject(ip) };
@@ -6195,10 +6199,14 @@ fn set_item_edge(
             reaper.update_arrange();
             let mut out = json!({
                 "set": true, "item_index": item_index, "edge": "left",
-                "position": time, "length": new_len, "start_offset": new_off_out,
+                "position": time, "length": new_len,
+                "start_offset": active_off, "takes_adjusted": take_count,
             });
-            if let Some(n) = note {
-                out["note"] = json!(n);
+            if extended_before_source {
+                out["note"] = json!(
+                    "extended before the source start; the leading region plays silence (or loops \
+                     if loop_source is on)"
+                );
             }
             Ok(out)
         }
@@ -6242,23 +6250,14 @@ fn get_track_state_chunk(
 ) -> Result<Value, String> {
     let track = track_at(reaper, track_index)?;
     let low = reaper.low();
-    // Generous buffer — a track with big VST state blobs can be large; `truncated`
-    // flags a chunk that didn't fit (which must not be written back).
-    const CAP: usize = 2 * 1024 * 1024;
-    let mut buf = vec![0u8; CAP];
-    let ok = unsafe {
-        low.GetTrackStateChunk(track.as_ptr(), buf.as_mut_ptr() as *mut c_char, CAP as c_int, false)
-    };
-    if !ok {
-        return Err("could not read the track state chunk".to_string());
-    }
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(CAP);
-    let chunk = String::from_utf8_lossy(&buf[..end]).into_owned();
-    Ok(json!({
-        "track_index": track_index,
-        "chunk": chunk,
-        "truncated": end >= CAP - 1,
-    }))
+    // Use the shared grow-to-fit reader (GetTrackStateChunk silently truncates a
+    // too-small buffer): it grows up to 64 MiB and returns None rather than a
+    // truncated chunk, so we never hand back (and can't write back) a partial one.
+    let chunk = read_chunk(|b, s| unsafe {
+        low.GetTrackStateChunk(track.as_ptr(), b, s, false)
+    })
+    .ok_or("could not read the track state chunk (too large or unavailable)")?;
+    Ok(json!({ "track_index": track_index, "chunk": chunk }))
 }
 
 /// Replace a track's full state chunk. Mutation (confirmed + undo-wrapped).
@@ -7027,9 +7026,14 @@ fn analyze_audio_timeline(
     target_hz: Option<f64>,
 ) -> Result<Value, String> {
     let low = reaper.low();
-    // Resolve an audio accessor + channel count + start time for an item take XOR
-    // a track (both accessor creators return the same handle type).
-    let (acc, channels, acc_start, available, label) = if let Some(ii) = item_index {
+    // Resolve an audio accessor + channel count + read-start + the TIMELINE offset
+    // to add so reported times are absolute, for an item take XOR a track (both
+    // accessor creators return the same handle type).
+    //
+    // A track accessor's start time IS project time. A take accessor's is
+    // item-local (0 = the item's start), so its results must be offset by the
+    // item's timeline position D_POSITION to become absolute.
+    let (acc, channels, acc_start, available, time_offset, label) = if let Some(ii) = item_index {
         let item = item_at(reaper, ii)?;
         let take = resolve_take(reaper, item, take_index)?;
         let source = unsafe { low.GetMediaItemTake_Source(take.as_ptr()) };
@@ -7044,7 +7048,15 @@ fn analyze_audio_timeline(
         }
         let s = unsafe { low.GetAudioAccessorStartTime(acc) };
         let e = unsafe { low.GetAudioAccessorEndTime(acc) };
-        (acc, channels, s, (e - s).max(0.0), json!({ "item_index": ii, "take_index": take_index }))
+        let item_pos = unsafe { low.GetMediaItemInfo_Value(item.as_ptr(), c"D_POSITION".as_ptr()) };
+        (
+            acc,
+            channels,
+            s,
+            (e - s).max(0.0),
+            item_pos + s,
+            json!({ "item_index": ii, "take_index": take_index, "item_position": item_pos }),
+        )
     } else if let Some(ti) = track_index {
         let track = track_at(reaper, ti)?;
         let channels = (unsafe {
@@ -7058,7 +7070,7 @@ fn analyze_audio_timeline(
         let s0 = unsafe { low.GetAudioAccessorStartTime(acc) };
         let e = unsafe { low.GetAudioAccessorEndTime(acc) };
         let s = param_start.unwrap_or(s0).max(s0);
-        (acc, channels, s, (e - s).max(0.0), json!({ "track_index": ti }))
+        (acc, channels, s, (e - s).max(0.0), s, json!({ "track_index": ti }))
     } else {
         return Err("provide item_index or track_index".to_string());
     };
@@ -7074,14 +7086,14 @@ fn analyze_audio_timeline(
         min_silence_ms,
         detect_transients,
         target_hz,
-        time_offset: acc_start,
+        time_offset,
         max_points: 512,
     };
     let analysis = crate::dsp::analyze_timeline(&samples, channels as usize, ANALYZE_SR as f64, &opts);
 
     let mut out = json!({
         "source": label,
-        "analysis_start": acc_start,
+        "analysis_start": time_offset,
         "analysis_length": length,
         "truncated": requested > MAX_ANALYZE_SECONDS,
         "analysis": serde_json::to_value(&analysis).unwrap_or(Value::Null),

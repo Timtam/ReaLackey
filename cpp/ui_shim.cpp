@@ -536,6 +536,15 @@ struct FindWinCtx { std::string needle; HWND found; };
 static BOOL CALLBACK find_win_cb(HWND hwnd, LPARAM lp) {
   FindWinCtx* ctx = (FindWinCtx*)lp;
   if (!IsWindowVisible(hwnd)) return TRUE;
+#ifdef _WIN32
+  // Only OUR (REAPER's) windows — EnumWindows is desktop-wide on Win32, so without
+  // this a foreign window merely CONTAINING the title (e.g. a browser tab about the
+  // REAPER video window) could be matched and its pixels captured/uploaded. On
+  // macOS/Linux SWELL enumerates only in-process windows, so no filter is needed.
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != GetCurrentProcessId()) return TRUE;
+#endif
   char title[512];
   title[0] = 0;
   GetWindowText(hwnd, title, (int)sizeof(title));

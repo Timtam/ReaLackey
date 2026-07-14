@@ -900,11 +900,14 @@ pub fn analyze_timeline(
                 let mag: Vec<f64> =
                     (0..=half).map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt()).collect();
                 if let Some(tb) = target_bin {
-                    // Average a ±1-bin neighbourhood for stability; scale to a
-                    // rough amplitude (Hann coherent gain 0.5 -> factor 4/N).
+                    // Take the PEAK of a ±1-bin neighbourhood (so a tone landing
+                    // between bins still reads its true level), scaled to amplitude
+                    // (Hann coherent gain 0.5 -> factor 4/N): a bin-centred
+                    // full-scale tone reads ~0 dBFS. (A mean/3 here underreads by
+                    // ~3.5 dB.)
                     let lo = tb.saturating_sub(1);
                     let hi = (tb + 1).min(half);
-                    let m = mag[lo..=hi].iter().sum::<f64>() / ((hi - lo + 1) as f64);
+                    let m = mag[lo..=hi].iter().copied().fold(0.0_f64, f64::max);
                     let level = to_dbfs(4.0 * m / FFT_SIZE as f64);
                     if freq_peak.map_or(true, |(l, _)| level > l) {
                         freq_peak = Some((level, t));
@@ -1037,7 +1040,8 @@ mod tests {
         let a = analyze_timeline(&sig, 1, sr, &opts);
         let f = a.frequency.expect("frequency track present");
         assert!((f.bin_hz - 1000.0).abs() < 15.0, "tracked bin ~1000Hz, got {}", f.bin_hz);
-        assert!(f.peak_level_db > -20.0, "a strong tone should read loud, got {}", f.peak_level_db);
+        // Peak-bin scaling: a 0.8-amplitude tone reads near -2 dBFS, not ~-20.
+        assert!(f.peak_level_db > -6.0, "a strong tone should read near full, got {}", f.peak_level_db);
         assert!(!f.series.is_empty());
     }
 
