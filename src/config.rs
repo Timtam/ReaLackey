@@ -128,7 +128,10 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
      project file: at the START of a session call get_project_memory to recall \
      context, and use set_project_memory to record decisions, TODOs, and \
      progress as you work. You can also read/append the project's Notes and \
-     per-track notes. ",
+     per-track notes. You can search REAPER's action list (search_actions), read \
+     an action's shortcuts (get_action_info), run any action by id or name \
+     (run_action) as a fallback for anything without a dedicated tool, and add or \
+     remove its keyboard shortcuts. ",
     );
 
     // Audio: only advertise listening when the active model can actually hear.

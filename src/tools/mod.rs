@@ -1438,6 +1438,72 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             .into(),
         input_schema: empty(),
     });
+    // --- REAPER actions + keyboard shortcuts ---
+    defs.push(ToolDef {
+        name: "search_actions".into(),
+        description: "Search REAPER's Main action list by name (case-insensitive substring). \
+                      Returns matching actions with their command_id, name, toggle_state \
+                      (on/off/null), and bound key shortcuts. Use this to find an action to run \
+                      (run_action) or whose shortcuts to inspect/edit. Results are capped (limit, \
+                      default 40); 'truncated' says whether more matched."
+            .into(),
+        input_schema: obj(
+            json!({
+                "query": { "type": "string", "description": "text to match in the action name" },
+                "limit": { "type": "integer", "description": "max results (default 40, max 200)" }
+            }),
+            json!(["query"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "get_action_info".into(),
+        description: "Read one action's name, toggle_state (on/off/null), and key shortcuts. \
+                      command is a numeric id (e.g. '40364') or a named command (e.g. '_SWS_ABOUT'). \
+                      Read-only."
+            .into(),
+        input_schema: obj(
+            json!({ "command": { "type": "string", "description": "numeric id or named command" } }),
+            json!(["command"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "run_action".into(),
+        description: "Run a REAPER action by command id or named command (Main action section). \
+                      CHANGES the project (confirmed). A catch-all for anything without a dedicated \
+                      tool; the action manages its own undo. Prefer the dedicated tools where they \
+                      exist. Returns the action's new toggle_state where applicable."
+            .into(),
+        input_schema: obj(
+            json!({ "command": { "type": "string", "description": "numeric id or named command" } }),
+            json!(["command"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "delete_action_shortcut".into(),
+        description: "Remove a keyboard shortcut from an action. CHANGES the key map (confirmed). \
+                      command is the action; shortcut_index is 0-based into the action's shortcut \
+                      list (see get_action_info/search_actions). Returns the remaining shortcuts."
+            .into(),
+        input_schema: obj(
+            json!({
+                "command": { "type": "string", "description": "numeric id or named command" },
+                "shortcut_index": { "type": "integer", "description": "0-based index of the shortcut to remove" }
+            }),
+            json!(["command", "shortcut_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "add_action_shortcut".into(),
+        description: "Assign a NEW keyboard shortcut to an action. REAPER has no API to set a key \
+                      directly, so this opens its interactive key-assignment dialog for the USER to \
+                      press the desired combo (confirmed before opening). Use delete_action_shortcut \
+                      to remove one non-interactively."
+            .into(),
+        input_schema: obj(
+            json!({ "command": { "type": "string", "description": "numeric id or named command" } }),
+            json!(["command"]),
+        ),
+    });
     defs.push(ToolDef {
         name: "set_playrate".into(),
         description: "Set the master playback speed (playrate). 1.0 = normal, 2.0 = double, 0.5 = \
@@ -2365,6 +2431,19 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_bool(input, "seek").unwrap_or(false),
         ),
         "clear_time_selection" => clear_time_selection(reaper),
+        "search_actions" => search_actions(
+            reaper,
+            req_str(input, "query")?,
+            opt_u32(input, "limit").unwrap_or(40) as usize,
+        ),
+        "get_action_info" => get_action_info(reaper, req_str(input, "command")?),
+        "run_action" => run_action(reaper, req_str(input, "command")?),
+        "delete_action_shortcut" => delete_action_shortcut(
+            reaper,
+            req_str(input, "command")?,
+            req_u32(input, "shortcut_index")?,
+        ),
+        "add_action_shortcut" => add_action_shortcut(reaper, req_str(input, "command")?),
         "set_playrate" => set_playrate(reaper, req_f64(input, "rate")?),
         "set_ruler_unit" => set_ruler_unit(reaper, req_str(input, "unit")?),
         "get_global_toggles" => Ok(get_global_toggles(reaper)),
@@ -2967,6 +3046,19 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         "set_track_state_chunk" => Some(format!(
             "Replace the full state chunk of track {}",
             show("track_index"),
+        )),
+        "run_action" => Some(format!(
+            "Run REAPER action {}",
+            input.get("command").and_then(|v| v.as_str()).unwrap_or("?"),
+        )),
+        "delete_action_shortcut" => Some(format!(
+            "Remove shortcut #{} from action {}",
+            show("shortcut_index"),
+            input.get("command").and_then(|v| v.as_str()).unwrap_or("?"),
+        )),
+        "add_action_shortcut" => Some(format!(
+            "Open the key-assignment dialog for action {}",
+            input.get("command").and_then(|v| v.as_str()).unwrap_or("?"),
         )),
         "set_take_property" => Some(format!(
             "Set take {} of item {} to {}",
@@ -4621,6 +4713,206 @@ fn clear_time_selection(reaper: &Reaper<MainThreadScope>) -> Result<Value, Strin
     unsafe { low.GetSet_LoopTimeRange(true, true, &mut z0, &mut z1, false) };
     reaper.update_arrange();
     Ok(json!({ "cleared": true }))
+}
+
+// ---- REAPER actions + keyboard shortcuts (main action section) --------------
+
+/// Resolve an action `command` — a numeric id ("40364") or a named command
+/// ("_SWS_ABOUT") — to a numeric command id.
+fn resolve_command(low: &reaper_low::Reaper, command: &str) -> Result<i32, String> {
+    let t = command.trim();
+    if let Ok(n) = t.parse::<i32>() {
+        if n != 0 {
+            return Ok(n);
+        }
+    }
+    if t.is_empty() || t.as_bytes().contains(&0) {
+        return Err("invalid action command".to_string());
+    }
+    let mut bytes = t.as_bytes().to_vec();
+    bytes.push(0);
+    let id = unsafe { low.NamedCommandLookup(bytes.as_ptr() as *const c_char) };
+    if id != 0 {
+        Ok(id)
+    } else {
+        Err(format!(
+            "unknown action '{command}' (not a numeric id or a known named command)"
+        ))
+    }
+}
+
+/// The key shortcuts bound to `cmd`, as human-readable strings (e.g. "Ctrl+S").
+fn action_shortcuts(
+    low: &reaper_low::Reaper,
+    section: *mut reaper_low::raw::KbdSectionInfo,
+    cmd: i32,
+) -> Vec<String> {
+    let n = unsafe { low.CountActionShortcuts(section, cmd) };
+    (0..n)
+        .filter_map(|i| read_string(512, |b, s| unsafe {
+            low.GetActionShortcutDesc(section, cmd, i, b, s)
+        }))
+        .collect()
+}
+
+/// The display name of `cmd`, or an empty string.
+fn action_name(
+    low: &reaper_low::Reaper,
+    section: *mut reaper_low::raw::KbdSectionInfo,
+    cmd: i32,
+) -> String {
+    let p = unsafe { low.kbd_getTextFromCmd(cmd, section) };
+    if p.is_null() {
+        String::new()
+    } else {
+        unsafe { cstr_to_string(p) }
+    }
+}
+
+/// -1 → not a toggle; 0 → off; 1 → on (JSON: null/"off"/"on").
+fn toggle_json(state: i32) -> Value {
+    match state {
+        0 => json!("off"),
+        1 => json!("on"),
+        _ => Value::Null,
+    }
+}
+
+/// Name + toggle state + shortcuts for one command id.
+fn action_json(
+    low: &reaper_low::Reaper,
+    section: *mut reaper_low::raw::KbdSectionInfo,
+    cmd: i32,
+) -> Value {
+    let toggle = unsafe { low.GetToggleCommandState2(section, cmd) };
+    json!({
+        "command_id": cmd,
+        "name": action_name(low, section, cmd),
+        "toggle_state": toggle_json(toggle),
+        "shortcuts": action_shortcuts(low, section, cmd),
+    })
+}
+
+fn get_action_info(reaper: &Reaper<MainThreadScope>, command: &str) -> Result<Value, String> {
+    let low = reaper.low();
+    let cmd = resolve_command(low, command)?;
+    let section = low.SectionFromUniqueID(0);
+    if section.is_null() {
+        return Err("could not resolve the main action section".to_string());
+    }
+    Ok(action_json(low, section, cmd))
+}
+
+fn search_actions(
+    reaper: &Reaper<MainThreadScope>,
+    query: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Err("provide a non-empty search query".to_string());
+    }
+    let low = reaper.low();
+    let section = low.SectionFromUniqueID(0);
+    if section.is_null() {
+        return Err("could not resolve the main action section".to_string());
+    }
+    let limit = limit.clamp(1, 200);
+    let mut matches: Vec<Value> = Vec::new();
+    let mut total = 0usize;
+    let mut idx: c_int = 0;
+    loop {
+        let mut name_ptr: *const c_char = std::ptr::null();
+        let cmd = unsafe { low.kbd_enumerateActions(section, idx, &mut name_ptr) };
+        if cmd == 0 || idx > 200_000 {
+            break; // 0 = end of list; the cap is a runaway guard
+        }
+        idx += 1;
+        // Use kbd_getTextFromCmd for the authoritative display name (the
+        // enumerator's nameOut can be the internal command name for some actions).
+        let name = action_name(low, section, cmd);
+        if name.to_lowercase().contains(&q) {
+            total += 1;
+            if matches.len() < limit {
+                matches.push(action_json(low, section, cmd));
+            }
+        }
+    }
+    Ok(json!({
+        "query": query,
+        "total_matched": total,
+        "returned": matches.len(),
+        "truncated": total > matches.len(),
+        "actions": matches,
+    }))
+}
+
+fn run_action(reaper: &Reaper<MainThreadScope>, command: &str) -> Result<Value, String> {
+    let low = reaper.low();
+    let cmd = resolve_command(low, command)?;
+    let section = low.SectionFromUniqueID(0);
+    let name = if section.is_null() {
+        String::new()
+    } else {
+        action_name(low, section, cmd)
+    };
+    // REAPER actions manage their own undo, so don't wrap this in an undo block.
+    low.Main_OnCommand(cmd, 0);
+    let toggle = if section.is_null() {
+        -1
+    } else {
+        unsafe { low.GetToggleCommandState2(section, cmd) }
+    };
+    Ok(json!({
+        "ran": true, "command_id": cmd, "name": name, "toggle_state": toggle_json(toggle),
+    }))
+}
+
+fn delete_action_shortcut(
+    reaper: &Reaper<MainThreadScope>,
+    command: &str,
+    shortcut_index: u32,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    let cmd = resolve_command(low, command)?;
+    let section = low.SectionFromUniqueID(0);
+    if section.is_null() {
+        return Err("could not resolve the main action section".to_string());
+    }
+    let count = unsafe { low.CountActionShortcuts(section, cmd) };
+    let i = i32::try_from(shortcut_index).map_err(|_| "shortcut_index out of range".to_string())?;
+    if i >= count {
+        return Err(format!(
+            "action has {count} shortcut(s); no shortcut at index {shortcut_index}"
+        ));
+    }
+    let ok = unsafe { low.DeleteActionShortcut(section, cmd, i) };
+    if !ok {
+        return Err("REAPER could not delete the shortcut".to_string());
+    }
+    Ok(json!({
+        "deleted": true, "command_id": cmd, "shortcuts": action_shortcuts(low, section, cmd),
+    }))
+}
+
+fn add_action_shortcut(reaper: &Reaper<MainThreadScope>, command: &str) -> Result<Value, String> {
+    let low = reaper.low();
+    let cmd = resolve_command(low, command)?;
+    let section = low.SectionFromUniqueID(0);
+    if section.is_null() {
+        return Err("could not resolve the main action section".to_string());
+    }
+    // REAPER has no API to bind a specific key; the only way to ADD a shortcut is
+    // its interactive dialog. Passing the current count opens the "add new" slot;
+    // the user then presses the key combo to assign.
+    let count = unsafe { low.CountActionShortcuts(section, cmd) };
+    let hwnd = low.GetMainHwnd();
+    unsafe { low.DoActionShortcutDialog(hwnd, section, cmd, count) };
+    Ok(json!({
+        "command_id": cmd,
+        "shortcuts": action_shortcuts(low, section, cmd),
+        "note": "Opened REAPER's key-assignment dialog for you to press the shortcut; the list reflects any key added.",
+    }))
 }
 
 fn transport(reaper: &Reaper<MainThreadScope>, action: &str) -> Result<Value, String> {

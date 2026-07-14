@@ -12,6 +12,11 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Action & keyboard-shortcut tools: `search_actions` (find actions by name),
+  `get_action_info` (an action's name, toggle state, and bound shortcuts),
+  `run_action` (run any action by id or named command — a catch-all for anything
+  without a dedicated tool), `delete_action_shortcut`, and `add_action_shortcut`
+  (opens REAPER's key-assignment dialog, since the API can't bind a key directly).
 - Time-selection tools: `get_time_selection`, `set_time_selection` (with an
   optional `seek` to move the edit cursor to the start), and
   `clear_time_selection`; the time selection is also reported by `get_transport`.

@@ -36,6 +36,9 @@ each one confirmed and undoable. Highlights:
 - **Transport & session** — play/stop/record, move the edit cursor, set/read the
   time selection (loop/edit range), change the playback rate and ruler unit,
   toggle metronome/snap/ripple.
+- **Actions & shortcuts** — search REAPER's action list, run any action by name
+  or id (a fallback for anything without a dedicated tool), and read or edit an
+  action's keyboard shortcuts.
 - **Listen & measure** — pure-Rust DSP analysis of a take or track: loudness
   (integrated **LUFS**, LRA, true-peak), peak/RMS, clipping and a spectral
   profile — for the raw source *or* the **processed** post-FX signal — plus
