@@ -1080,6 +1080,56 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                 json!([]),
             ),
         },
+        // --- advanced: FX config + raw track state chunk (e.g. Video processor code) ---
+        ToolDef {
+            name: "get_fx_config".into(),
+            description: "Read a named config value of a track FX (TrackFX_GetNamedConfigParm) — \
+                          e.g. 'fx_type' (VST/JS/VIDEO/...), 'fx_name', 'fx_ident', 'renamed_name'. \
+                          Read-only. 'fx_type' == 'VIDEO' confirms an FX is the Video processor. Its \
+                          parameters and presets use the normal FX tools (get_fx_params / \
+                          set_fx_param / get_fx_preset / set_fx_preset); only its EEL CODE needs the \
+                          track state chunk below."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "fx_index": { "type": "integer" },
+                    "name": { "type": "string", "description": "config parameter name, e.g. 'fx_type'" }
+                }),
+                json!(["track_index", "fx_index", "name"]),
+            ),
+        },
+        ToolDef {
+            name: "get_track_state_chunk".into(),
+            description: "Read a track's full REAPER state chunk (RPP-format text: its FX chain — \
+                          including the Video processor's EEL code — envelopes, item list, etc.). \
+                          Read-only, and can be large. Use it for advanced edits the typed tools \
+                          don't cover (notably reading/editing Video processor code), then write it \
+                          back with set_track_state_chunk. If 'truncated' is true the chunk was too \
+                          big to read fully — do NOT write a truncated chunk back."
+                .into(),
+            input_schema: obj(
+                json!({ "track_index": { "type": "integer" } }),
+                json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "set_track_state_chunk".into(),
+            description: "Replace a track's full state chunk (RPP-format text from \
+                          get_track_state_chunk). CHANGES the project (confirmed + undo-wrapped). \
+                          ADVANCED/powerful: REAPER rejects a malformed chunk and the edit is \
+                          undoable, but only pass a chunk derived from a FRESH, non-truncated \
+                          get_track_state_chunk with a minimal, intentional change (e.g. the Video \
+                          processor's code). Do not hand-craft chunks."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "track_index": { "type": "integer" },
+                    "chunk": { "type": "string", "description": "the full replacement state chunk" }
+                }),
+                json!(["track_index", "chunk"]),
+            ),
+        },
         // --- track/MIDI creation & deletion ---
         ToolDef {
             name: "create_track".into(),
@@ -1149,13 +1199,17 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                           (from get_track_fx) to open and capture a SPECIFIC unfocused track FX \
                           (the reliable way to view a plugin you just added); these take precedence \
                           over target. Otherwise target: 'focused_plugin' (default), 'reaper_main', \
-                          or 'full_screen'."
+                          'full_screen', or 'video' (REAPER's Video window — the processed video \
+                          frame at the cursor, with all video FX applied; the Video window must be \
+                          open and floating). Capturing 'video' repeatedly during playback is a way \
+                          to watch video processing, but each frame is a separate consent-gated \
+                          still, not a live stream."
                 .into(),
             input_schema: obj(
                 json!({
                     "target": {
                         "type": "string",
-                        "enum": ["focused_plugin", "reaper_main", "full_screen"],
+                        "enum": ["focused_plugin", "reaper_main", "full_screen", "video"],
                         "description": "what to capture when track_index/fx_index are not given (default 'focused_plugin')"
                     },
                     "track_index": {
@@ -1810,11 +1864,30 @@ fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome 
                         crate::ui::screenshot::capture_hwnd(hwnd, false, Some(MAX_EDGE))
                     }
                     "full_screen" => crate::ui::screenshot::capture_screen(Some(MAX_EDGE)),
+                    "video" => {
+                        // REAPER renders the fully-processed video frame (all video
+                        // FX applied) into its Video window at the play/edit cursor.
+                        // There's no API for that window's handle, so find the
+                        // floating window by title and screen-capture it.
+                        match crate::ui::ffi::find_window_by_title("Video Window") {
+                            Some(hwnd) => {
+                                crate::ui::screenshot::capture_hwnd(hwnd, true, Some(MAX_EDGE))
+                            }
+                            None => {
+                                return ToolOutcome::error(
+                                    json!({
+                                        "error": "The REAPER Video window isn't open (or is docked). Open it via View -> Video and make it a floating window, then try again."
+                                    })
+                                    .to_string(),
+                                );
+                            }
+                        }
+                    }
                     other => {
                         return ToolOutcome::error(
                             json!({
                                 "error": format!(
-                                    "capture target '{other}' is not supported; use 'focused_plugin', 'reaper_main', 'full_screen', or pass track_index+fx_index"
+                                    "capture target '{other}' is not supported; use 'focused_plugin', 'reaper_main', 'full_screen', 'video', or pass track_index+fx_index"
                                 )
                             })
                             .to_string(),
@@ -2505,6 +2578,21 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
         ),
         "analyze_processed_audio" => analyze_processed_audio(reaper, input),
         "measure_loudness" => measure_loudness(reaper, input),
+        // advanced: FX config + raw track state chunk
+        "get_fx_config" => get_fx_config(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_u32(input, "fx_index")?,
+            req_str(input, "name")?,
+        ),
+        "get_track_state_chunk" => {
+            get_track_state_chunk(reaper, req_u32(input, "track_index")?)
+        }
+        "set_track_state_chunk" => set_track_state_chunk(
+            reaper,
+            req_u32(input, "track_index")?,
+            req_str(input, "chunk")?,
+        ),
         // track / MIDI creation & deletion
         "create_track" => create_track(reaper, opt_u32(input, "index"), opt_str(input, "name")),
         "delete_midi_notes" => delete_midi_notes(
@@ -2574,6 +2662,7 @@ pub fn consent_prompt(name: &str, input: &Value) -> Option<String> {
                 "reaper_main" => "the REAPER main window",
                 "focused_plugin" => "the focused plugin window",
                 "full_screen" => "the entire screen",
+                "video" => "the REAPER video window (the processed video frame)",
                 _ => "a window",
             };
             Some(format!(
@@ -2835,6 +2924,10 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("item_index"),
             input.get("edge").and_then(|v| v.as_str()).unwrap_or("?"),
             show("time"),
+        )),
+        "set_track_state_chunk" => Some(format!(
+            "Replace the full state chunk of track {}",
+            show("track_index"),
         )),
         "set_take_property" => Some(format!(
             "Set take {} of item {} to {}",
@@ -6110,6 +6203,92 @@ fn set_item_edge(
             Ok(out)
         }
         other => Err(format!("edge must be 'left' or 'right', got '{other}'")),
+    }
+}
+
+/// Read a named FX config value (TrackFX_GetNamedConfigParm), e.g. "fx_type".
+fn get_fx_config(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    fx_index: u32,
+    name: &str,
+) -> Result<Value, String> {
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    if name.as_bytes().contains(&0) {
+        return Err("name contains a NUL byte".to_string());
+    }
+    let fx = i32::try_from(fx_index).map_err(|_| "fx_index out of range".to_string())?;
+    let mut nb = name.as_bytes().to_vec();
+    nb.push(0);
+    let val = read_string(8192, |b, s| unsafe {
+        low.TrackFX_GetNamedConfigParm(track.as_ptr(), fx, nb.as_ptr() as *const c_char, b, s)
+    });
+    match val {
+        Some(v) => Ok(json!({
+            "track_index": track_index, "fx_index": fx_index, "name": name, "value": v,
+        })),
+        None => Err(format!(
+            "no config value '{name}' for FX {fx_index} on track {track_index}"
+        )),
+    }
+}
+
+/// Read a track's full RPP-format state chunk (contains the Video processor's EEL
+/// code, among everything else). Read-only.
+fn get_track_state_chunk(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+) -> Result<Value, String> {
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    // Generous buffer — a track with big VST state blobs can be large; `truncated`
+    // flags a chunk that didn't fit (which must not be written back).
+    const CAP: usize = 2 * 1024 * 1024;
+    let mut buf = vec![0u8; CAP];
+    let ok = unsafe {
+        low.GetTrackStateChunk(track.as_ptr(), buf.as_mut_ptr() as *mut c_char, CAP as c_int, false)
+    };
+    if !ok {
+        return Err("could not read the track state chunk".to_string());
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(CAP);
+    let chunk = String::from_utf8_lossy(&buf[..end]).into_owned();
+    Ok(json!({
+        "track_index": track_index,
+        "chunk": chunk,
+        "truncated": end >= CAP - 1,
+    }))
+}
+
+/// Replace a track's full state chunk. Mutation (confirmed + undo-wrapped).
+fn set_track_state_chunk(
+    reaper: &Reaper<MainThreadScope>,
+    track_index: u32,
+    chunk: &str,
+) -> Result<Value, String> {
+    let track = track_at(reaper, track_index)?;
+    let low = reaper.low();
+    if chunk.as_bytes().contains(&0) {
+        return Err("chunk contains a NUL byte".to_string());
+    }
+    let mut bytes = chunk.as_bytes().to_vec();
+    bytes.push(0);
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe {
+        low.SetTrackStateChunk(track.as_ptr(), bytes.as_ptr() as *const c_char, false)
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set track {track_index} state chunk"),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+    if ok {
+        Ok(json!({ "set": true, "track_index": track_index }))
+    } else {
+        Err("REAPER rejected the state chunk (likely malformed)".to_string())
     }
 }
 

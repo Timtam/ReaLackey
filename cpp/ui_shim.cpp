@@ -527,6 +527,40 @@ extern "C" void ui_window_to_front(void* hwnd) {
   SetForegroundWindow(h);
 }
 
+// Find the first VISIBLE top-level window whose title contains `needle`
+// (case-insensitive). Used to locate REAPER's floating Video window (title
+// "Video Window") for capture, since REAPER exposes no API for its HWND.
+// Returns NULL if none matches. Main thread only.
+struct FindWinCtx { std::string needle; HWND found; };
+
+static BOOL CALLBACK find_win_cb(HWND hwnd, LPARAM lp) {
+  FindWinCtx* ctx = (FindWinCtx*)lp;
+  if (!IsWindowVisible(hwnd)) return TRUE;
+  char title[512];
+  title[0] = 0;
+  GetWindowText(hwnd, title, (int)sizeof(title));
+  std::string t(title);
+  for (char& c : t) {
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+  }
+  if (t.find(ctx->needle) != std::string::npos) {
+    ctx->found = hwnd;
+    return FALSE; // stop enumerating
+  }
+  return TRUE;
+}
+
+extern "C" void* ui_find_window_by_title(const char* needle_utf8) {
+  if (!needle_utf8 || !needle_utf8[0]) return NULL;
+  std::string needle(needle_utf8);
+  for (char& c : needle) {
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+  }
+  FindWinCtx ctx{needle, NULL};
+  EnumWindows(find_win_cb, (LPARAM)&ctx);
+  return (void*)ctx.found;
+}
+
 extern "C" void ui_add_menu_item(void* hmenu, const char* label, int command_id) {
   if (!hmenu || !label) return;
   HMENU m = (HMENU)hmenu;

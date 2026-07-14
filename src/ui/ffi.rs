@@ -52,6 +52,7 @@ extern "C" {
     fn ui_pe_set_list(ctrl: c_int, items_newline: *const c_char);
     fn ui_pe_get_sel(ctrl: c_int) -> c_int;
     fn ui_pe_set_sel(ctrl: c_int, index: c_int);
+    fn ui_find_window_by_title(needle: *const c_char) -> *mut c_void;
 }
 
 // Provider settings dialog control ids — MUST match cpp/resource.h.
@@ -102,6 +103,15 @@ pub fn close() {
 /// The dialog's native window handle (null if the dialog isn't created yet).
 pub fn get_hwnd() -> *mut c_void {
     unsafe { ui_get_hwnd() }
+}
+
+/// Find the first visible top-level window whose title contains `needle`
+/// (case-insensitive), as an `isize` HWND, or `None`. Used to locate REAPER's
+/// floating Video window for capture (REAPER has no API for its handle).
+pub fn find_window_by_title(needle: &str) -> Option<isize> {
+    let c = to_cstring(needle)?;
+    let h = unsafe { ui_find_window_by_title(c.as_ptr()) } as isize;
+    (h != 0).then_some(h)
 }
 
 /// The output area's rect in dialog client pixels, if the dialog exists.

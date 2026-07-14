@@ -73,6 +73,11 @@ void ui_focus_after_webview(int forward);
 int ui_window_rect(void* hwnd, int* x, int* y, int* w, int* h);
 void ui_window_to_front(void* hwnd);
 
+// Find the first visible top-level window whose title contains `needle`
+// (case-insensitive), as a void* HWND, or NULL if none. Used to locate REAPER's
+// floating Video window (which has no API-exposed handle) for capture.
+void* ui_find_window_by_title(const char* needle);
+
 // Append a menu item wired to a REAPER command id. Used to add an entry to
 // REAPER's Extensions menu from a hookcustommenu callback (main thread only).
 void ui_add_menu_item(void* hmenu, const char* label, int command_id);
