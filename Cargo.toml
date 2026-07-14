@@ -2,7 +2,7 @@
 # Single-process native REAPER extension (cdylib).
 [package]
 name = "reaper-realackey"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"          # c"..." CStr literals (1.77) + std::sync::LazyLock (1.80, provider registry)
 publish = false

@@ -10,6 +10,8 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-14
+
 ### Added
 
 - Item-edge trimming (`set_item_edge`): move an item's left or right edge to an
