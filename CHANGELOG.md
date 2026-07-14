@@ -36,6 +36,13 @@ into a versioned heading and attaches its entries to the GitHub release — see
   menu. API keys are now managed entirely in the Providers dialog (per provider,
   as a key list), so the separate action was redundant.
 
+### Fixed
+
+- **macOS: the assistant windows never opened.** "Open window" and "Providers"
+  in the Extensions menu did nothing (focus just returned to REAPER). The SWELL
+  dialog-resource tables generated from `assistant.rc` weren't compiled into the
+  extension, so the native dialogs couldn't be created; they now are.
+
 ## [0.1.0] - 2026-07-13
 
 ### Added
