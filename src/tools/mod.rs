@@ -4718,27 +4718,38 @@ fn clear_time_selection(reaper: &Reaper<MainThreadScope>) -> Result<Value, Strin
 // ---- REAPER actions + keyboard shortcuts (main action section) --------------
 
 /// Resolve an action `command` — a numeric id ("40364") or a named command
-/// ("_SWS_ABOUT") — to a numeric command id.
-fn resolve_command(low: &reaper_low::Reaper, command: &str) -> Result<i32, String> {
+/// ("_SWS_ABOUT") — to a numeric command id, verifying it names a real action.
+fn resolve_command(
+    low: &reaper_low::Reaper,
+    section: *mut reaper_low::raw::KbdSectionInfo,
+    command: &str,
+) -> Result<i32, String> {
     let t = command.trim();
-    if let Ok(n) = t.parse::<i32>() {
-        if n != 0 {
-            return Ok(n);
+    let cmd = if let Ok(n) = t.parse::<i32>() {
+        if n == 0 {
+            return Err("invalid action command '0'".to_string());
         }
-    }
-    if t.is_empty() || t.as_bytes().contains(&0) {
+        n
+    } else if t.is_empty() || t.as_bytes().contains(&0) {
         return Err("invalid action command".to_string());
-    }
-    let mut bytes = t.as_bytes().to_vec();
-    bytes.push(0);
-    let id = unsafe { low.NamedCommandLookup(bytes.as_ptr() as *const c_char) };
-    if id != 0 {
-        Ok(id)
     } else {
-        Err(format!(
-            "unknown action '{command}' (not a numeric id or a known named command)"
-        ))
+        let mut bytes = t.as_bytes().to_vec();
+        bytes.push(0);
+        let id = unsafe { low.NamedCommandLookup(bytes.as_ptr() as *const c_char) };
+        if id == 0 {
+            return Err(format!(
+                "unknown action '{command}' (not a numeric id or a known named command)"
+            ));
+        }
+        id
+    };
+    // A numeric id is otherwise unvalidated; confirm it names a real action
+    // (kbd_getTextFromCmd yields an empty name for an unknown command id), so we
+    // never run — or report success for — a nonexistent action.
+    if action_name(low, section, cmd).is_empty() {
+        return Err(format!("no action with command id {cmd}"));
     }
+    Ok(cmd)
 }
 
 /// The key shortcuts bound to `cmd`, as human-readable strings (e.g. "Ctrl+S").
@@ -4795,11 +4806,11 @@ fn action_json(
 
 fn get_action_info(reaper: &Reaper<MainThreadScope>, command: &str) -> Result<Value, String> {
     let low = reaper.low();
-    let cmd = resolve_command(low, command)?;
     let section = low.SectionFromUniqueID(0);
     if section.is_null() {
         return Err("could not resolve the main action section".to_string());
     }
+    let cmd = resolve_command(low, section, command)?;
     Ok(action_json(low, section, cmd))
 }
 
@@ -4849,20 +4860,15 @@ fn search_actions(
 
 fn run_action(reaper: &Reaper<MainThreadScope>, command: &str) -> Result<Value, String> {
     let low = reaper.low();
-    let cmd = resolve_command(low, command)?;
     let section = low.SectionFromUniqueID(0);
-    let name = if section.is_null() {
-        String::new()
-    } else {
-        action_name(low, section, cmd)
-    };
+    if section.is_null() {
+        return Err("could not resolve the main action section".to_string());
+    }
+    let cmd = resolve_command(low, section, command)?;
+    let name = action_name(low, section, cmd);
     // REAPER actions manage their own undo, so don't wrap this in an undo block.
     low.Main_OnCommand(cmd, 0);
-    let toggle = if section.is_null() {
-        -1
-    } else {
-        unsafe { low.GetToggleCommandState2(section, cmd) }
-    };
+    let toggle = unsafe { low.GetToggleCommandState2(section, cmd) };
     Ok(json!({
         "ran": true, "command_id": cmd, "name": name, "toggle_state": toggle_json(toggle),
     }))
@@ -4874,11 +4880,11 @@ fn delete_action_shortcut(
     shortcut_index: u32,
 ) -> Result<Value, String> {
     let low = reaper.low();
-    let cmd = resolve_command(low, command)?;
     let section = low.SectionFromUniqueID(0);
     if section.is_null() {
         return Err("could not resolve the main action section".to_string());
     }
+    let cmd = resolve_command(low, section, command)?;
     let count = unsafe { low.CountActionShortcuts(section, cmd) };
     let i = i32::try_from(shortcut_index).map_err(|_| "shortcut_index out of range".to_string())?;
     if i >= count {
@@ -4897,11 +4903,11 @@ fn delete_action_shortcut(
 
 fn add_action_shortcut(reaper: &Reaper<MainThreadScope>, command: &str) -> Result<Value, String> {
     let low = reaper.low();
-    let cmd = resolve_command(low, command)?;
     let section = low.SectionFromUniqueID(0);
     if section.is_null() {
         return Err("could not resolve the main action section".to_string());
     }
+    let cmd = resolve_command(low, section, command)?;
     // REAPER has no API to bind a specific key; the only way to ADD a shortcut is
     // its interactive dialog. Passing the current count opens the "add new" slot;
     // the user then presses the key combo to assign.

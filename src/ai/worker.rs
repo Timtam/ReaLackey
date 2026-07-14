@@ -663,6 +663,20 @@ async fn confirm(op_tx: &CbSender<ReaperOp>, message: String) -> bool {
 
 /// Send a tool to the main thread for execution and await its result.
 async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> ToolOutcome {
+    // Nearly all tools reply within a tick, and the post-FX render (the slow case)
+    // is capped at 30 s, so a 90 s ceiling catches a main-thread callback that
+    // never fires without hanging the agent. But some tools legitimately BLOCK on a
+    // modal dialog until the user responds — add_action_shortcut opens REAPER's
+    // key-assignment dialog, and run_action can invoke an action that opens a
+    // Preferences/Render dialog. For those, 90 s would falsely report "timed out"
+    // (dropping the real result and possibly prompting a duplicate) while the user
+    // is still interacting, so give them a long ceiling that still bails on a true
+    // hang.
+    let timeout = if matches!(name.as_str(), "add_action_shortcut" | "run_action") {
+        std::time::Duration::from_secs(3600)
+    } else {
+        std::time::Duration::from_secs(90)
+    };
     let (reply_tx, reply_rx) = oneshot::channel();
     if op_tx
         .send(ReaperOp::Tool {
@@ -674,11 +688,7 @@ async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> To
     {
         return ToolOutcome::error("{\"error\":\"main thread unavailable\"}");
     }
-    // Bounded wait: nearly all tools reply within a tick; the post-FX render is
-    // the slow case (it renders synchronously on the main thread, window capped
-    // at 30 s). A generous ceiling means a main-thread callback that never fires
-    // can't hang the agent forever.
-    match tokio::time::timeout(std::time::Duration::from_secs(90), reply_rx).await {
+    match tokio::time::timeout(timeout, reply_rx).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => ToolOutcome::error("{\"error\":\"no reply from main thread\"}"),
         Err(_) => ToolOutcome::error("{\"error\":\"the tool timed out\"}"),
