@@ -520,7 +520,12 @@ extern "C" int ui_translate_accel(void* msgp) {
   bool ours = msg->hwnd == g_dlg || IsChild(g_dlg, msg->hwnd) ||
               fg == g_dlg || (fg && IsChild(g_dlg, fg));
   if (!ours) return 0; // not our window — let REAPER handle it
-  return -1;           // ours: deliver to the window/webview
+  // -10 = "process event raw" (macOS): hand the original NSEvent back to Cocoa's
+  // normal flow (keyWindow performKeyEquivalent: -> responder chain -> menu) so the
+  // WKWebView does its OWN native editing — Cmd+C/V/X/A, arrows, typing. Returning
+  // -1 routes through REAPER's key delivery instead, which never reaches the
+  // webview natively, so e.g. Cmd+V got swallowed by REAPER's Edit > Paste.
+  return -10;
 #endif
 }
 

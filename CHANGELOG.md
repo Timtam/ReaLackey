@@ -25,9 +25,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
-- macOS: keys pressed in the chat composer (e.g. arrow keys) could jump focus out
-  to REAPER's main window, because REAPER consumed them as global shortcuts. The
-  window now claims keystrokes whenever it is the front window.
+- macOS: keyboard handling in the chat window. Keys typed in the composer could be
+  swallowed by REAPER — arrow keys jumping focus to the arrange, and Cmd+C/V/X not
+  reaching the text field (they hit REAPER's Edit menu). When the window is in
+  front, its keystrokes are now handed to the webview's native editing
+  (copy/paste/cut/select-all, arrow keys, typing) instead of REAPER's global
+  shortcuts/menu.
 
 ## [0.2.0] - 2026-07-14
 

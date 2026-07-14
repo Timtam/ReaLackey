@@ -56,6 +56,10 @@ impl TranslateAccel for AccelHook {
         match ui::ffi::translate_accel(&mut msg as *mut _ as *mut c_void) {
             1 => TranslateAccelResult::Eat,
             -1 => TranslateAccelResult::PassOnToWindow,
+            // macOS: hand the raw NSEvent back to Cocoa so the WKWebView handles
+            // native editing itself (Cmd+C/V/X/A, arrows, typing) instead of REAPER
+            // swallowing it (e.g. Cmd+V hitting REAPER's Edit > Paste).
+            -10 => TranslateAccelResult::ProcessEventRaw,
             // Deliver Alt/WM_SYSKEY* to the window (plain pass-on drops them).
             -20 => TranslateAccelResult::ForcePassOnToWindow,
             _ => TranslateAccelResult::NotOurWindow,
