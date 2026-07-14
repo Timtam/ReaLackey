@@ -105,7 +105,9 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
      copy/move/delete items, create empty items, copy a take, duplicate/delete \
      tracks, remove track/take FX, edit markers and regions, delete automation \
      points, and manage track groups and item groups; and control the session: \
-     transport (play/stop/pause/record), move the edit cursor, change the playback \
+     transport (play/stop/pause/record), move the edit cursor, set/read the time \
+     selection (the loop/edit range — which the analyze/render/measure tools default \
+     to), change the playback \
      speed and ruler unit, and toggle global options (metronome, repeat, snapping, \
      ripple editing). Track/take volume and pan, record-arm/mute/solo, and free \
      item positioning are set via the track/item/take property tools). \

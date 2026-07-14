@@ -1408,6 +1408,37 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         ),
     });
     defs.push(ToolDef {
+        name: "get_time_selection".into(),
+        description: "Read the current time selection (the arrange loop/edit range): start, end and \
+                      length in seconds, and is_set (false when there is no selection). Read-only."
+            .into(),
+        input_schema: empty(),
+    });
+    defs.push(ToolDef {
+        name: "set_time_selection".into(),
+        description: "Set the time selection (and the matching loop range) to [start, end] in \
+                      seconds; start/end are ordered and clamped to >= 0. seek (default false) also \
+                      moves the edit cursor to the start (and seeks playback there). Transient \
+                      view/selection state, like moving the cursor — not undo-wrapped. Useful to \
+                      mark a range for the analyze_*/render/measure_loudness tools, which default to \
+                      the time selection when no explicit range is given."
+            .into(),
+        input_schema: obj(
+            json!({
+                "start": { "type": "number", "description": "selection start in seconds" },
+                "end": { "type": "number", "description": "selection end in seconds" },
+                "seek": { "type": "boolean", "description": "also move the edit cursor to the start (default false)" }
+            }),
+            json!(["start", "end"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "clear_time_selection".into(),
+        description: "Remove the time selection (and loop range). Transient, not undo-wrapped."
+            .into(),
+        input_schema: empty(),
+    });
+    defs.push(ToolDef {
         name: "set_playrate".into(),
         description: "Set the master playback speed (playrate). 1.0 = normal, 2.0 = double, 0.5 = \
                       half; usable range ~0.25..4.0. Pitch is preserved unless REAPER's 'preserve \
@@ -2326,6 +2357,14 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_bool(input, "seek_playback").unwrap_or(false),
             opt_bool(input, "move_view").unwrap_or(false),
         ),
+        "get_time_selection" => Ok(get_time_selection(reaper)),
+        "set_time_selection" => set_time_selection(
+            reaper,
+            req_f64(input, "start")?,
+            req_f64(input, "end")?,
+            opt_bool(input, "seek").unwrap_or(false),
+        ),
+        "clear_time_selection" => clear_time_selection(reaper),
         "set_playrate" => set_playrate(reaper, req_f64(input, "rate")?),
         "set_ruler_unit" => set_ruler_unit(reaper, req_str(input, "unit")?),
         "get_global_toggles" => Ok(get_global_toggles(reaper)),
@@ -4512,6 +4551,13 @@ fn get_transport(reaper: &Reaper<MainThreadScope>) -> Value {
     } else {
         "stopped"
     };
+    let (mut ts_start, mut ts_end) = (0.0f64, 0.0f64);
+    unsafe { low.GetSet_LoopTimeRange(false, false, &mut ts_start, &mut ts_end, false) };
+    let time_selection = if ts_end > ts_start {
+        json!({ "start": ts_start, "end": ts_end, "length": ts_end - ts_start })
+    } else {
+        Value::Null
+    };
     json!({
         "play_state": play_state,
         "play_position": low.GetPlayPosition(),
@@ -4520,7 +4566,61 @@ fn get_transport(reaper: &Reaper<MainThreadScope>) -> Value {
         "tempo": low.Master_GetTempo(),
         "repeat": low.GetSetRepeat(-1) != 0,
         "ruler_unit": current_ruler_unit(low),
+        "time_selection": time_selection,
     })
+}
+
+/// Read the current time selection (arrange loop/edit range). Read-only.
+fn get_time_selection(reaper: &Reaper<MainThreadScope>) -> Value {
+    let low = reaper.low();
+    let (mut s, mut e) = (0.0f64, 0.0f64);
+    unsafe { low.GetSet_LoopTimeRange(false, false, &mut s, &mut e, false) };
+    json!({
+        "start": s,
+        "end": e,
+        "length": (e - s).max(0.0),
+        "is_set": e > s,
+    })
+}
+
+/// Set the time selection (and matching loop range) to [start, end] seconds.
+/// Transient project state — like the edit cursor, it's not undo-wrapped.
+fn set_time_selection(
+    reaper: &Reaper<MainThreadScope>,
+    start: f64,
+    end: f64,
+    seek: bool,
+) -> Result<Value, String> {
+    if !start.is_finite() || !end.is_finite() {
+        return Err("start and end must be finite numbers of seconds".to_string());
+    }
+    // Order defensively and clamp to >= 0.
+    let (mut s, mut e) = if start <= end { (start, end) } else { (end, start) };
+    s = s.max(0.0);
+    e = e.max(s);
+    let low = reaper.low();
+    // Set the time selection; also set the loop range to match (REAPER links them
+    // by default), so the loop bar reflects the selection. `seek` (allowautoseek)
+    // moves PLAYBACK to the start when playing.
+    unsafe { low.GetSet_LoopTimeRange(true, false, &mut s, &mut e, seek) };
+    unsafe { low.GetSet_LoopTimeRange(true, true, &mut s, &mut e, false) };
+    if seek {
+        // Move the EDIT cursor to the start too (and scroll it into view).
+        low.SetEditCurPos(s, true, false);
+    }
+    reaper.update_arrange();
+    Ok(json!({ "start": s, "end": e, "length": e - s, "seek": seek }))
+}
+
+/// Remove the time selection (and loop range). Transient — not undo-wrapped.
+fn clear_time_selection(reaper: &Reaper<MainThreadScope>) -> Result<Value, String> {
+    let low = reaper.low();
+    // A zero-length range means "no time selection" (REAPER's remove-selection).
+    let (mut z0, mut z1) = (0.0f64, 0.0f64);
+    unsafe { low.GetSet_LoopTimeRange(true, false, &mut z0, &mut z1, false) };
+    unsafe { low.GetSet_LoopTimeRange(true, true, &mut z0, &mut z1, false) };
+    reaper.update_arrange();
+    Ok(json!({ "cleared": true }))
 }
 
 fn transport(reaper: &Reaper<MainThreadScope>, action: &str) -> Result<Value, String> {

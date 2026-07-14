@@ -33,8 +33,9 @@ each one confirmed and undoable. Highlights:
 - **Arrangement & editing** — markers and regions, the tempo/time-signature map,
   take stretch markers, render settings; item/take/track properties, **edge
   trimming**, grouping, and copy/move/delete/duplicate.
-- **Transport & session** — play/stop/record, move the edit cursor, change the
-  playback rate and ruler unit, toggle metronome/snap/ripple.
+- **Transport & session** — play/stop/record, move the edit cursor, set/read the
+  time selection (loop/edit range), change the playback rate and ruler unit,
+  toggle metronome/snap/ripple.
 - **Listen & measure** — pure-Rust DSP analysis of a take or track: loudness
   (integrated **LUFS**, LRA, true-peak), peak/RMS, clipping and a spectral
   profile — for the raw source *or* the **processed** post-FX signal — plus

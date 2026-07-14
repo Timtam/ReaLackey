@@ -10,6 +10,14 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+### Added
+
+- Time-selection tools: `get_time_selection`, `set_time_selection` (with an
+  optional `seek` to move the edit cursor to the start), and
+  `clear_time_selection`; the time selection is also reported by `get_transport`.
+  The assistant can now mark a range and then analyse, render, or measure it (the
+  analysis/render tools default to the time selection).
+
 ## [0.2.0] - 2026-07-14
 
 ### Added
