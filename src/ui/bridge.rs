@@ -146,6 +146,18 @@ fn open_external(url: &str) {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn open_external(_url: &str) {}
 
+/// "Confirm" pressed (Phase 3 mutations). No-op in Phase 0.
+pub fn confirm(_confirm_id: i32) {}
+
+/// Dialog closed / "Stopp": abort any in-flight generation and disarm pixel
+/// control (a physical kill switch for the Tier-B click/drag capability).
+pub fn cancel() {
+    crate::tools::disarm_pixel_control();
+    if let Some(tx) = TASK_TX.get() {
+        let _ = tx.send(MainTask::Cancel);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_launchable_url;
@@ -166,17 +178,5 @@ mod tests {
         ] {
             assert!(!is_launchable_url(bad), "{bad} must NOT launch");
         }
-    }
-}
-
-/// "Confirm" pressed (Phase 3 mutations). No-op in Phase 0.
-pub fn confirm(_confirm_id: i32) {}
-
-/// Dialog closed / "Stopp": abort any in-flight generation and disarm pixel
-/// control (a physical kill switch for the Tier-B click/drag capability).
-pub fn cancel() {
-    crate::tools::disarm_pixel_control();
-    if let Some(tx) = TASK_TX.get() {
-        let _ = tx.send(MainTask::Cancel);
     }
 }
