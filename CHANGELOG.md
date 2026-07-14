@@ -23,6 +23,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
   The assistant can now mark a range and then analyse, render, or measure it (the
   analysis/render tools default to the time selection).
 
+### Fixed
+
+- macOS: keys pressed in the chat composer (e.g. arrow keys) could jump focus out
+  to REAPER's main window, because REAPER consumed them as global shortcuts. The
+  window now claims keystrokes whenever it is the front window.
+
 ## [0.2.0] - 2026-07-14
 
 ### Added
