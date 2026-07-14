@@ -12,6 +12,17 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Item-edge trimming (`set_item_edge`): move an item's left or right edge to an
+  absolute time in one undo block — the left edge shifts the take's source offset
+  so the audio content stays put.
+- Over-time audio analysis (`analyze_audio_timeline`): a level envelope, silent
+  regions, transient onsets, and single-frequency tracking across a passage —
+  a time-series, not just one aggregate number.
+- Video production support: `capture_view` can now snapshot REAPER's Video window
+  (the processed frame, with video FX applied) so the assistant can see it; the
+  Video processor's parameters and presets already work via the FX tools, and new
+  `get_fx_config` / `get_track_state_chunk` / `set_track_state_chunk` tools reach
+  its EEL code and other advanced RPP-level edits.
 - Multiple API keys per provider, with automatic failover. A provider can hold an
   ordered list of keys (add / delete / move up / move down in the settings dialog);
   the top key is used and, on a quota or auth error, the assistant switches to the

@@ -31,19 +31,22 @@ each one confirmed and undoable. Highlights:
 - **Automation** — create envelopes (FX-parameter, track volume/pan/mute, and
   send/receive) and write, edit, or clear their points.
 - **Arrangement & editing** — markers and regions, the tempo/time-signature map,
-  take stretch markers, render settings; item/take/track properties, grouping,
-  and copy/move/delete/duplicate.
+  take stretch markers, render settings; item/take/track properties, **edge
+  trimming**, grouping, and copy/move/delete/duplicate.
 - **Transport & session** — play/stop/record, move the edit cursor, change the
   playback rate and ruler unit, toggle metronome/snap/ripple.
 - **Listen & measure** — pure-Rust DSP analysis of a take or track: loudness
   (integrated **LUFS**, LRA, true-peak), peak/RMS, clipping and a spectral
-  profile — for the raw source *or* the **processed** post-FX signal. On
-  audio-capable models it can even **listen** to a rendered clip to judge tone.
+  profile — for the raw source *or* the **processed** post-FX signal — plus
+  **over-time** analysis: level envelopes, silence detection, transient onsets,
+  and tracking a single frequency across a passage. On audio-capable models it
+  can even **listen** to a rendered clip to judge tone.
 - **See inaccessible GUIs** — for custom-drawn plugin interfaces a screen reader
   can't parse, ReaLackey takes a screenshot, reasons about it, and (with your
   one-time consent) clicks/drags/types directly in the plugin window. It always
   prefers the undoable parameter API and only falls back to pixel input for
-  controls that have no automatable parameter (e.g. a Kontakt patch switch).
+  controls that have no automatable parameter (e.g. a Kontakt patch switch). It
+  can also snapshot the **Video window** to see the processed video frame.
 - **Per-project memory** — a scratchpad stored in the `.rpp` so it remembers
   decisions, TODOs and progress across sessions, plus read/append access to the
   project and per-track notes.
