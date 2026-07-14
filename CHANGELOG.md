@@ -30,6 +30,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
   one that works or all are exhausted. Useful when you have several keys for the
   same provider (e.g. Gemini's free tier).
 
+### Removed
+
+- The standalone "Set Anthropic API key" entry in the Extensions → ReaLackey
+  menu. API keys are now managed entirely in the Providers dialog (per provider,
+  as a key list), so the separate action was redundant.
+
 ## [0.1.0] - 2026-07-13
 
 ### Added
