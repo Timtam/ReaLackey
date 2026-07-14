@@ -739,6 +739,246 @@ pub fn encode_pcm16_wav(samples: &[f64], channels: usize, sample_rate: f64) -> V
     out
 }
 
+// ---- time-series (over-time) analysis ---------------------------------------
+// Aggregate `analyze()` collapses the whole take to scalars. `analyze_timeline`
+// keeps the TIME axis: a per-window level envelope (for silence detection),
+// transient onsets (spectral flux), and a single frequency's level over time.
+
+/// One window of the level envelope. `t` is absolute timeline seconds.
+#[derive(Debug, Clone, Serialize)]
+pub struct LevelPoint {
+    pub t: f64,
+    pub rms_db: f64,
+    pub peak_db: f64,
+}
+
+/// A stretch of audio below the silence threshold. Absolute timeline seconds.
+#[derive(Debug, Clone, Serialize)]
+pub struct SilentRegion {
+    pub start: f64,
+    pub end: f64,
+    pub duration: f64,
+}
+
+/// One point of a single-frequency level track.
+#[derive(Debug, Clone, Serialize)]
+pub struct FreqPoint {
+    pub t: f64,
+    pub level_db: f64,
+}
+
+/// A single frequency's level over time.
+#[derive(Debug, Clone, Serialize)]
+pub struct FreqTrack {
+    pub target_hz: f64,
+    /// The actual FFT bin centre tracked (nearest bin to `target_hz`).
+    pub bin_hz: f64,
+    pub peak_level_db: f64,
+    pub peak_time: Option<f64>,
+    pub series: Vec<FreqPoint>,
+}
+
+/// Result of [`analyze_timeline`].
+#[derive(Debug, Clone, Serialize)]
+pub struct TimelineAnalysis {
+    pub window_seconds: f64,
+    pub hop_seconds: f64,
+    /// Number of envelope windows analysed (before any decimation of `envelope`).
+    pub windows: usize,
+    pub envelope: Vec<LevelPoint>,
+    pub silent_regions: Vec<SilentRegion>,
+    pub loudest_time: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transients: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<FreqTrack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Parameters for [`analyze_timeline`].
+pub struct TimelineOpts {
+    pub window_ms: f64,
+    pub silence_threshold_db: f64,
+    pub min_silence_ms: f64,
+    pub detect_transients: bool,
+    pub target_hz: Option<f64>,
+    /// Added to every reported time so results are absolute timeline seconds.
+    pub time_offset: f64,
+    /// Cap on each returned series length (envelope, frequency) — uniformly
+    /// decimated past this so a long analysis doesn't bloat the JSON result.
+    pub max_points: usize,
+}
+
+/// Time-series analysis of `samples` (interleaved, `channels` per frame). Pure
+/// and host-independent, like [`analyze`].
+pub fn analyze_timeline(
+    samples: &[f64],
+    channels: usize,
+    sample_rate: f64,
+    opts: &TimelineOpts,
+) -> TimelineAnalysis {
+    let channels = channels.max(1);
+    let sr = if sample_rate > 0.0 { sample_rate } else { 48_000.0 };
+    let frames = samples.len() / channels;
+    let mono = downmix(samples, channels, frames);
+
+    let win = ((opts.window_ms.max(1.0) * sr / 1000.0).round() as usize).max(1);
+    let hop = (win / 2).max(1);
+
+    // ---- per-window RMS/peak envelope + loudest window ----
+    let mut env: Vec<LevelPoint> = Vec::new();
+    let mut loudest: Option<(f64, f64)> = None; // (rms_db, t)
+    let mut start = 0usize;
+    while start < mono.len() {
+        let end = (start + win).min(mono.len());
+        let slice = &mono[start..end];
+        let (mut ss, mut pk) = (0.0f64, 0.0f64);
+        for &x in slice {
+            let x = if x.is_finite() { x } else { 0.0 };
+            ss += x * x;
+            let a = x.abs();
+            if a > pk {
+                pk = a;
+            }
+        }
+        let rms_db = to_dbfs((ss / slice.len() as f64).sqrt());
+        let t = opts.time_offset + start as f64 / sr;
+        if loudest.map_or(true, |(r, _)| rms_db > r) {
+            loudest = Some((rms_db, t));
+        }
+        env.push(LevelPoint { t, rms_db, peak_db: to_dbfs(pk) });
+        start += hop;
+    }
+
+    // ---- silent regions: runs of windows below the threshold ----
+    let min_sil = opts.min_silence_ms.max(0.0) / 1000.0;
+    let mut silent_regions: Vec<SilentRegion> = Vec::new();
+    let mut run_start: Option<f64> = None;
+    let push_region = |v: &mut Vec<SilentRegion>, s: f64, e: f64| {
+        if e - s >= min_sil {
+            v.push(SilentRegion { start: s, end: e, duration: e - s });
+        }
+    };
+    for p in &env {
+        if p.rms_db < opts.silence_threshold_db {
+            run_start.get_or_insert(p.t);
+        } else if let Some(s) = run_start.take() {
+            push_region(&mut silent_regions, s, p.t);
+        }
+    }
+    if let Some(s) = run_start.take() {
+        push_region(&mut silent_regions, s, opts.time_offset + frames as f64 / sr);
+    }
+
+    // ---- STFT: transients (spectral flux) and/or single-frequency tracking ----
+    let mut transients: Vec<f64> = Vec::new();
+    let mut frequency: Option<FreqTrack> = None;
+    let mut note: Option<String> = None;
+    if opts.detect_transients || opts.target_hz.is_some() {
+        if mono.len() >= FFT_SIZE {
+            let window = hann(FFT_SIZE);
+            let sh = (FFT_SIZE / 4).max(1); // ~21 ms hop at 48 kHz
+            let bin_hz = sr / FFT_SIZE as f64;
+            let half = FFT_SIZE / 2;
+            let target_bin = opts
+                .target_hz
+                .map(|hz| ((hz / bin_hz).round() as usize).clamp(1, half));
+            let mut freq_series: Vec<FreqPoint> = Vec::new();
+            let mut freq_peak: Option<(f64, f64)> = None;
+            let mut flux: Vec<(f64, f64)> = Vec::new();
+            let mut prev_mag: Option<Vec<f64>> = None;
+            let mut s = 0usize;
+            while s + FFT_SIZE <= mono.len() {
+                let mut re = vec![0.0f64; FFT_SIZE];
+                let mut im = vec![0.0f64; FFT_SIZE];
+                for i in 0..FFT_SIZE {
+                    re[i] = mono[s + i] * window[i];
+                }
+                fft(&mut re, &mut im);
+                let t = opts.time_offset + (s + FFT_SIZE / 2) as f64 / sr; // window centre
+                let mag: Vec<f64> =
+                    (0..=half).map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt()).collect();
+                if let Some(tb) = target_bin {
+                    // Average a ±1-bin neighbourhood for stability; scale to a
+                    // rough amplitude (Hann coherent gain 0.5 -> factor 4/N).
+                    let lo = tb.saturating_sub(1);
+                    let hi = (tb + 1).min(half);
+                    let m = mag[lo..=hi].iter().sum::<f64>() / ((hi - lo + 1) as f64);
+                    let level = to_dbfs(4.0 * m / FFT_SIZE as f64);
+                    if freq_peak.map_or(true, |(l, _)| level > l) {
+                        freq_peak = Some((level, t));
+                    }
+                    freq_series.push(FreqPoint { t, level_db: level });
+                }
+                if opts.detect_transients {
+                    if let Some(pm) = &prev_mag {
+                        let f: f64 = mag.iter().zip(pm).map(|(&m, &p)| (m - p).max(0.0)).sum();
+                        flux.push((t, f));
+                    }
+                    prev_mag = Some(mag);
+                }
+                s += sh;
+            }
+            // Peak-pick the spectral flux above an adaptive threshold, min 50 ms apart.
+            if opts.detect_transients && !flux.is_empty() {
+                let vals: Vec<f64> = flux.iter().map(|&(_, f)| f).collect();
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64;
+                let thresh = mean + 1.5 * var.sqrt();
+                let mut last_t = f64::NEG_INFINITY;
+                for i in 0..flux.len() {
+                    let (t, f) = flux[i];
+                    let is_peak = f > thresh
+                        && (i == 0 || flux[i - 1].1 <= f)
+                        && (i + 1 >= flux.len() || flux[i + 1].1 < f);
+                    if is_peak && t - last_t >= 0.05 {
+                        transients.push(t);
+                        last_t = t;
+                    }
+                }
+            }
+            if let Some(tb) = target_bin {
+                frequency = Some(FreqTrack {
+                    target_hz: opts.target_hz.unwrap_or(0.0),
+                    bin_hz: tb as f64 * bin_hz,
+                    peak_level_db: freq_peak.map(|(l, _)| l).unwrap_or(DBFS_FLOOR),
+                    peak_time: freq_peak.map(|(_, t)| t),
+                    series: decimate(freq_series, opts.max_points),
+                });
+            }
+        } else {
+            note = Some(
+                "audio too short for transient/frequency analysis (need at least one FFT window)"
+                    .into(),
+            );
+        }
+    }
+
+    let windows = env.len();
+    TimelineAnalysis {
+        window_seconds: win as f64 / sr,
+        hop_seconds: hop as f64 / sr,
+        windows,
+        envelope: decimate(env, opts.max_points),
+        silent_regions,
+        loudest_time: loudest.map(|(_, t)| t),
+        transients,
+        frequency,
+        note,
+    }
+}
+
+/// Uniformly downsample a series to at most `max` points (keeps the overall
+/// shape). `max == 0` means no cap.
+fn decimate<T>(v: Vec<T>, max: usize) -> Vec<T> {
+    if max == 0 || v.len() <= max {
+        return v;
+    }
+    let stride = v.len().div_ceil(max);
+    v.into_iter().step_by(stride).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +998,63 @@ mod tests {
         assert!(f.peak_dbfs <= DBFS_FLOOR + 1.0);
         assert_eq!(f.clip_count, 0);
         assert!(f.integrated_lufs.is_none() || f.integrated_lufs.unwrap() < -60.0);
+    }
+
+    fn timeline_opts() -> TimelineOpts {
+        TimelineOpts {
+            window_ms: 50.0,
+            silence_threshold_db: -60.0,
+            min_silence_ms: 200.0,
+            detect_transients: false,
+            target_hz: None,
+            time_offset: 0.0,
+            max_points: 512,
+        }
+    }
+
+    #[test]
+    fn timeline_detects_silent_gap() {
+        let sr = 48000.0;
+        // tone (0.5s) | silence (0.5s) | tone (0.5s)
+        let mut sig = sine(440.0, 0.5, 0.5, sr);
+        sig.extend(std::iter::repeat(0.0).take((0.5 * sr) as usize));
+        sig.extend(sine(440.0, 0.5, 0.5, sr));
+        let a = analyze_timeline(&sig, 1, sr, &timeline_opts());
+        let gap = a
+            .silent_regions
+            .iter()
+            .find(|r| r.start > 0.4 && r.start < 0.6)
+            .expect("should find the silent gap near 0.5s");
+        assert!(gap.end > 0.95 && gap.end < 1.05, "gap end ~1.0s, got {}", gap.end);
+        assert!(gap.duration >= 0.2);
+    }
+
+    #[test]
+    fn timeline_tracks_target_frequency() {
+        let sr = 48000.0;
+        let sig = sine(1000.0, 0.8, 1.0, sr);
+        let opts = TimelineOpts { target_hz: Some(1000.0), ..timeline_opts() };
+        let a = analyze_timeline(&sig, 1, sr, &opts);
+        let f = a.frequency.expect("frequency track present");
+        assert!((f.bin_hz - 1000.0).abs() < 15.0, "tracked bin ~1000Hz, got {}", f.bin_hz);
+        assert!(f.peak_level_db > -20.0, "a strong tone should read loud, got {}", f.peak_level_db);
+        assert!(!f.series.is_empty());
+    }
+
+    #[test]
+    fn timeline_detects_transient_onset() {
+        let sr = 48000.0;
+        // 0.3s silence, then a sudden 1kHz tone onset.
+        let mut sig = vec![0.0f64; (0.3 * sr) as usize];
+        sig.extend(sine(1000.0, 1.0, 0.2, sr));
+        let opts = TimelineOpts { detect_transients: true, ..timeline_opts() };
+        let a = analyze_timeline(&sig, 1, sr, &opts);
+        assert!(!a.transients.is_empty(), "should detect the onset");
+        assert!(
+            a.transients.iter().any(|&t| t > 0.25 && t < 0.45),
+            "an onset near 0.3s, got {:?}",
+            a.transients
+        );
     }
 
     #[test]

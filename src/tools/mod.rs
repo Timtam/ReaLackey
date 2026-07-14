@@ -795,6 +795,28 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                 json!(["item_index", "property", "value"]),
             ),
         },
+        ToolDef {
+            name: "set_item_edge".into(),
+            description: "Move a media item's left or right EDGE to an absolute timeline time \
+                          (seconds) — trimming or extending it. CHANGES the project (confirmed + \
+                          undo-wrapped, ONE undo point). The RIGHT edge just changes the item's \
+                          length. The LEFT edge moves the item start AND shifts the take's \
+                          start-in-source offset so the audio content stays put (the correct 'trim \
+                          left edge' behaviour), scaled by the take playrate; extending the left \
+                          edge before the source start shows silence (or loops if loop_source is \
+                          on). Use this instead of composing set_item_property/set_take_property by \
+                          hand. Defaults to the active take."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "edge": { "type": "string", "enum": ["left", "right"], "description": "which edge to move" },
+                    "time": { "type": "number", "description": "absolute timeline position (seconds) for the edge" },
+                    "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+                }),
+                json!(["item_index", "edge", "time"]),
+            ),
+        },
         // --- take properties ---
         ToolDef {
             name: "get_take_properties".into(),
@@ -1029,6 +1051,33 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                     "length": { "type": "number", "description": "seconds to analyse (default: whole track, capped at 30 s)" }
                 }),
                 json!(["track_index"]),
+            ),
+        },
+        ToolDef {
+            name: "analyze_audio_timeline".into(),
+            description: "Analyse audio OVER TIME (a time-SERIES, not one aggregate number) for a \
+                          take or a track: a per-window RMS/peak level envelope, detected SILENT \
+                          regions, optional TRANSIENT onset times, and optional tracking of a single \
+                          FREQUENCY's level over time. Read-only, local DSP (nothing is uploaded). \
+                          Give item_index (+optional take_index) OR track_index (+optional \
+                          start/length). Reads up to 30 s per call; all times reported are absolute \
+                          timeline seconds. Use it to find silence, locate transients, or monitor \
+                          how one frequency behaves across a longer passage."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer", "description": "analyse this item's take" },
+                    "take_index": { "type": "integer", "description": "0-based; omit for the active take" },
+                    "track_index": { "type": "integer", "description": "analyse this track's summed pre-FX audio instead of an item" },
+                    "start": { "type": "number", "description": "track only: start time in seconds (default: track start)" },
+                    "length": { "type": "number", "description": "seconds to analyse (capped at 30)" },
+                    "window_ms": { "type": "number", "description": "envelope/silence window in ms (default 50)" },
+                    "silence_threshold_db": { "type": "number", "description": "RMS dBFS below which a window counts as silent (default -60)" },
+                    "min_silence_ms": { "type": "number", "description": "shortest silent region to report, in ms (default 200)" },
+                    "detect_transients": { "type": "boolean", "description": "also return transient onset times (default false)" },
+                    "target_hz": { "type": "number", "description": "if set, track this frequency's level over time" }
+                }),
+                json!([]),
             ),
         },
         // --- track/MIDI creation & deletion ---
@@ -2346,6 +2395,13 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_str(input, "property")?,
             req_f64(input, "value")?,
         ),
+        "set_item_edge" => set_item_edge(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_str(input, "edge")?,
+            req_f64(input, "time")?,
+            opt_u32(input, "take_index"),
+        ),
         // take properties
         "get_take_properties" => get_take_properties(
             reaper,
@@ -2433,6 +2489,19 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "track_index")?,
             input.get("start").and_then(|v| v.as_f64()),
             input.get("length").and_then(|v| v.as_f64()),
+        ),
+        "analyze_audio_timeline" => analyze_audio_timeline(
+            reaper,
+            opt_u32(input, "item_index"),
+            opt_u32(input, "take_index"),
+            opt_u32(input, "track_index"),
+            input.get("start").and_then(|v| v.as_f64()),
+            input.get("length").and_then(|v| v.as_f64()),
+            input.get("window_ms").and_then(|v| v.as_f64()).unwrap_or(50.0),
+            input.get("silence_threshold_db").and_then(|v| v.as_f64()).unwrap_or(-60.0),
+            input.get("min_silence_ms").and_then(|v| v.as_f64()).unwrap_or(200.0),
+            input.get("detect_transients").and_then(|v| v.as_bool()).unwrap_or(false),
+            input.get("target_hz").and_then(|v| v.as_f64()),
         ),
         "analyze_processed_audio" => analyze_processed_audio(reaper, input),
         "measure_loudness" => measure_loudness(reaper, input),
@@ -2760,6 +2829,12 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("?"),
             show("value"),
+        )),
+        "set_item_edge" => Some(format!(
+            "Move item {} {} edge to {}s",
+            show("item_index"),
+            input.get("edge").and_then(|v| v.as_str()).unwrap_or("?"),
+            show("time"),
         )),
         "set_take_property" => Some(format!(
             "Set take {} of item {} to {}",
@@ -5940,6 +6015,104 @@ fn set_item_property(
     }
 }
 
+/// Move an item's left or right edge to an absolute timeline time, atomically.
+/// Right edge = a length change. Left edge = move position + shift the take's
+/// source offset (scaled by playrate) so the content stays put + shrink length.
+fn set_item_edge(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    edge: &str,
+    time: f64,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    /// Smallest length we allow — a zero/negative-length item is invalid.
+    const MIN_LEN: f64 = 1e-6;
+    let edge = edge.trim().to_ascii_lowercase();
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let low = reaper.low();
+    let ip = item.as_ptr();
+    let old_pos = unsafe { low.GetMediaItemInfo_Value(ip, c"D_POSITION".as_ptr()) };
+    let old_len = unsafe { low.GetMediaItemInfo_Value(ip, c"D_LENGTH".as_ptr()) };
+
+    match edge.as_str() {
+        "right" => {
+            let new_len = time - old_pos;
+            if new_len < MIN_LEN {
+                return Err(format!(
+                    "right edge {time:.6}s is at or before the item start {old_pos:.6}s"
+                ));
+            }
+            reaper.undo_begin_block_2(project);
+            unsafe { low.SetMediaItemInfo_Value(ip, c"D_LENGTH".as_ptr(), new_len) };
+            unsafe { low.UpdateItemInProject(ip) };
+            reaper.undo_end_block_2(
+                project,
+                format!("AI: set item {item_index} right edge"),
+                UndoScope::All,
+            );
+            reaper.update_arrange();
+            Ok(json!({
+                "set": true, "item_index": item_index, "edge": "right",
+                "position": old_pos, "length": new_len, "right_edge": old_pos + new_len,
+            }))
+        }
+        "left" => {
+            let delta = time - old_pos; // > 0 trims from the left, < 0 extends left
+            let new_len = old_len - delta;
+            if new_len < MIN_LEN {
+                return Err(format!(
+                    "left edge {time:.6}s would leave a non-positive length (item ends at {:.6}s)",
+                    old_pos + old_len
+                ));
+            }
+            reaper.undo_begin_block_2(project);
+            unsafe { low.SetMediaItemInfo_Value(ip, c"D_POSITION".as_ptr(), time) };
+            // Keep the audio content in place by shifting the take's start-in-source
+            // by delta*playrate (D_STARTOFFS is in SOURCE seconds). Empty items have
+            // no take, so just the position/length move.
+            let mut new_off_out = json!(null);
+            let mut note: Option<String> = None;
+            if let Ok(take) = resolve_take(reaper, item, take_index) {
+                let tp = take.as_ptr();
+                let playrate = {
+                    let r = unsafe { low.GetMediaItemTakeInfo_Value(tp, c"D_PLAYRATE".as_ptr()) };
+                    if r > 0.0 { r } else { 1.0 }
+                };
+                let old_off = unsafe { low.GetMediaItemTakeInfo_Value(tp, c"D_STARTOFFS".as_ptr()) };
+                let raw = old_off + delta * playrate;
+                let new_off = raw.max(0.0);
+                if raw < -1e-9 {
+                    note = Some(
+                        "extended before the source start; the added region is silence (or loops \
+                         if loop_source is on)"
+                            .into(),
+                    );
+                }
+                unsafe { low.SetMediaItemTakeInfo_Value(tp, c"D_STARTOFFS".as_ptr(), new_off) };
+                new_off_out = json!(new_off);
+            }
+            unsafe { low.SetMediaItemInfo_Value(ip, c"D_LENGTH".as_ptr(), new_len) };
+            unsafe { low.UpdateItemInProject(ip) };
+            reaper.undo_end_block_2(
+                project,
+                format!("AI: set item {item_index} left edge"),
+                UndoScope::All,
+            );
+            reaper.update_arrange();
+            let mut out = json!({
+                "set": true, "item_index": item_index, "edge": "left",
+                "position": time, "length": new_len, "start_offset": new_off_out,
+            });
+            if let Some(n) = note {
+                out["note"] = json!(n);
+            }
+            Ok(out)
+        }
+        other => Err(format!("edge must be 'left' or 'right', got '{other}'")),
+    }
+}
+
 fn get_take_properties(
     reaper: &Reaper<MainThreadScope>,
     item_index: u32,
@@ -6655,6 +6828,89 @@ fn analyze_track_audio(
         read_error,
         features,
     ))
+}
+
+/// Time-series (over-time) analysis of a take or track: RMS/peak envelope, silent
+/// regions, and optionally transient onsets + a single-frequency level track.
+/// Read-only (local DSP), so no confirmation/consent gate.
+#[allow(clippy::too_many_arguments)]
+fn analyze_audio_timeline(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: Option<u32>,
+    take_index: Option<u32>,
+    track_index: Option<u32>,
+    param_start: Option<f64>,
+    param_length: Option<f64>,
+    window_ms: f64,
+    silence_threshold_db: f64,
+    min_silence_ms: f64,
+    detect_transients: bool,
+    target_hz: Option<f64>,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    // Resolve an audio accessor + channel count + start time for an item take XOR
+    // a track (both accessor creators return the same handle type).
+    let (acc, channels, acc_start, available, label) = if let Some(ii) = item_index {
+        let item = item_at(reaper, ii)?;
+        let take = resolve_take(reaper, item, take_index)?;
+        let source = unsafe { low.GetMediaItemTake_Source(take.as_ptr()) };
+        let channels = if source.is_null() {
+            2
+        } else {
+            unsafe { low.GetMediaSourceNumChannels(source) }.clamp(1, 2)
+        };
+        let acc = unsafe { low.CreateTakeAudioAccessor(take.as_ptr()) };
+        if acc.is_null() {
+            return Err("could not create an audio accessor for the take".to_string());
+        }
+        let s = unsafe { low.GetAudioAccessorStartTime(acc) };
+        let e = unsafe { low.GetAudioAccessorEndTime(acc) };
+        (acc, channels, s, (e - s).max(0.0), json!({ "item_index": ii, "take_index": take_index }))
+    } else if let Some(ti) = track_index {
+        let track = track_at(reaper, ti)?;
+        let channels = (unsafe {
+            low.GetMediaTrackInfo_Value(track.as_ptr(), c"I_NCHAN".as_ptr())
+        } as c_int)
+            .clamp(1, 2);
+        let acc = unsafe { low.CreateTrackAudioAccessor(track.as_ptr()) };
+        if acc.is_null() {
+            return Err("could not create an audio accessor for the track".to_string());
+        }
+        let s0 = unsafe { low.GetAudioAccessorStartTime(acc) };
+        let e = unsafe { low.GetAudioAccessorEndTime(acc) };
+        let s = param_start.unwrap_or(s0).max(s0);
+        (acc, channels, s, (e - s).max(0.0), json!({ "track_index": ti }))
+    } else {
+        return Err("provide item_index or track_index".to_string());
+    };
+
+    let requested = param_length.unwrap_or(available).clamp(0.0, available);
+    let length = requested.min(MAX_ANALYZE_SECONDS);
+    let (samples, read_error) = read_accessor_samples(low, acc, channels, acc_start, length);
+    unsafe { low.DestroyAudioAccessor(acc) };
+
+    let opts = crate::dsp::TimelineOpts {
+        window_ms,
+        silence_threshold_db,
+        min_silence_ms,
+        detect_transients,
+        target_hz,
+        time_offset: acc_start,
+        max_points: 512,
+    };
+    let analysis = crate::dsp::analyze_timeline(&samples, channels as usize, ANALYZE_SR as f64, &opts);
+
+    let mut out = json!({
+        "source": label,
+        "analysis_start": acc_start,
+        "analysis_length": length,
+        "truncated": requested > MAX_ANALYZE_SECONDS,
+        "analysis": serde_json::to_value(&analysis).unwrap_or(Value::Null),
+    });
+    if read_error {
+        out["read_error"] = json!(true);
+    }
+    Ok(out)
 }
 
 // ---- processed (post-FX) audio via an offline render ------------------------
