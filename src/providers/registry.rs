@@ -331,7 +331,9 @@ fn config_base() -> Option<PathBuf> {
     }
 }
 
-fn config_dir() -> Option<PathBuf> {
+/// The config directory (`<REAPER resource path>/ReaLackey`, portable), shared
+/// with sibling stores like the prompt-preset registry (`presets.json`).
+pub(crate) fn config_dir() -> Option<PathBuf> {
     // Portable: live under REAPER's resource path (like OSARA), so a portable
     // REAPER install carries ReaLackey's config with it. Needs the REAPER API,
     // which is available by the time the store loads (init runs after api::set).

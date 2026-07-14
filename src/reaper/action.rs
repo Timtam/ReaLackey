@@ -17,6 +17,7 @@ use crate::ui;
 
 static CMD_OPEN: OnceLock<u32> = OnceLock::new();
 static CMD_PROVIDERS: OnceLock<u32> = OnceLock::new();
+static CMD_PRESETS: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<usize> = OnceLock::new();
 
 struct Commands;
@@ -34,6 +35,9 @@ impl HookCommand for Commands {
             true
         } else if Some(id) == CMD_PROVIDERS.get().copied() {
             ui::ffi::show_providers();
+            true
+        } else if Some(id) == CMD_PRESETS.get().copied() {
+            ui::ffi::show_presets();
             true
         } else {
             false
@@ -88,6 +92,9 @@ impl HookCustomMenu for ExtMenu {
         if let Some(id) = CMD_PROVIDERS.get().copied() {
             ui::ffi::add_menu_item(submenu, "Providers\u{2026}", id as i32);
         }
+        if let Some(id) = CMD_PRESETS.get().copied() {
+            ui::ffi::add_menu_item(submenu, "Prompt presets\u{2026}", id as i32);
+        }
         ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
     }
 }
@@ -114,7 +121,16 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
         "ReaLackey: Providers",
     ))?;
 
-    // One handler dispatches both command ids.
+    // Action: manage prompt presets (reusable prompts inserted into the composer).
+    // No default key binding — the user binds it in REAPER's Actions list.
+    let cmd_presets = session.plugin_register_add_command_id("RAAI_Presets")?;
+    let _ = CMD_PRESETS.set(cmd_presets.get());
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        cmd_presets,
+        "ReaLackey: Prompt presets",
+    ))?;
+
+    // One handler dispatches all command ids.
     session.plugin_register_add_hook_command::<Commands>()?;
 
     // Keyboard router for the (unowned) assistant window: keeps Tab/Esc working

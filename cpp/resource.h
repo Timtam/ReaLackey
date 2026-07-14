@@ -40,4 +40,17 @@
 #define ID_PE_KEYUP          1034   // move the selected key up (higher priority)
 #define ID_PE_KEYDOWN        1035   // move the selected key down
 
+// Prompt presets: reusable prompt bodies inserted into the chat composer.
+// List dialog (add / edit / delete; no reorder).
+#define ID_PRESETS_DLG       1040
+#define ID_PRESET_LIST       1041   // listbox of preset names
+#define ID_PRESET_ADD        1042
+#define ID_PRESET_EDIT       1043
+#define ID_PRESET_DELETE     1044
+#define ID_PRESET_HINT       1045   // "N presets" summary line (spoken)
+// Edit sub-dialog: a name field + a multiline prompt body.
+#define ID_PRESET_EDIT_DLG   1050
+#define ID_PRE_NAME          1051   // preset name (single line)
+#define ID_PRE_BODY          1052   // preset body (multiline)
+
 #endif // RAAI_RESOURCE_H

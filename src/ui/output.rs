@@ -155,6 +155,14 @@ impl Output {
         }
     }
 
+    /// Insert a prompt preset's body into the composer at the caret (leaving it
+    /// editable before send). No-op without the webview.
+    fn insert_preset(&self, body: &str) {
+        if self.active() {
+            self.call_js("insertPreset", body);
+        }
+    }
+
     /// Tell the composer whether a turn is in flight (gates its Escape = stop).
     fn set_generating(&self, on: bool) {
         if self.active() {
@@ -289,6 +297,12 @@ pub fn announce(text: &str) {
 pub fn status(text: &str) {
     STATE.with(|c| c.borrow().status(text));
 }
+
+/// Insert a prompt preset's body into the chat composer (main thread). Triggered
+/// from the webview preset picker; no-op when the webview isn't up.
+pub fn insert_preset(body: &str) {
+    STATE.with(|c| c.borrow().insert_preset(body));
+}
 /// Mirror the "generating" state into the webview composer (gates Esc = stop).
 pub fn set_generating(on: bool) {
     STATE.with(|c| c.borrow().set_generating(on));
@@ -409,6 +423,8 @@ details.toolgroup[open]>summary.tgsum::before{content:"\25be  ";}
 #msg{flex:1 1 auto;min-width:0;resize:none;overflow-y:auto;font:inherit;color:#e6e6e6;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:4px;padding:6px 8px;}
 #send{flex:0 0 auto;padding:6px 16px;cursor:pointer;color:#fff;background:#0e639c;border:1px solid #1177bb;border-radius:4px;font:inherit;}
 #send:hover{background:#1177bb;}
+#preset{flex:0 0 auto;padding:6px 12px;cursor:pointer;color:#e6e6e6;background:#333;border:1px solid #3a3a3a;border-radius:4px;font:inherit;}
+#preset:hover{background:#3d3d3d;}
 </style></head><body>
 <div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
 <!-- NOT a live region: streaming re-renders it token-by-token; role="log"/
@@ -417,7 +433,8 @@ details.toolgroup[open]>summary.tgsum::before{content:"\25be  ";}
 <div id="log"></div>
 <div id="status" role="status" aria-atomic="true" aria-label="Assistant status">Ready.</div>
 <form id="composer">
-<textarea id="msg" rows="1" aria-label="Message the assistant. Alt plus a number jumps to that message; press it again quickly to copy the message." placeholder="Ask the assistant…  (Enter = send · Shift+Enter = new line · Alt+number = jump to a message, again to copy)"></textarea>
+<textarea id="msg" rows="1" aria-label="Message the assistant. Alt plus a number jumps to that message; press it again quickly to copy the message. Alt plus P inserts a saved prompt preset." placeholder="Ask the assistant…  (Enter = send · Shift+Enter = new line · Alt+number = jump to a message, again to copy · Alt+P = insert a preset)"></textarea>
+<button id="preset" type="button" aria-label="Insert a saved prompt preset. Keyboard shortcut Alt plus P. Opens a menu.">Presets</button>
 <button id="send" type="submit">Send</button>
 </form><script>
 function sd(){var l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight;}
@@ -440,6 +457,10 @@ function setToolResult(h){var l=document.querySelectorAll('#log details.tool');i
 function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.textContent='';setTimeout(function(){l.textContent=t;setTimeout(function(){l.textContent='';},2500);},60);}
 function setStatus(t){var s=document.getElementById('status');if(s)s.textContent=t;}
 function focusInput(){var m=document.getElementById('msg');if(m)m.focus();}
+// Prompt presets: the host shows a native picker; on a choice it calls
+// insertPreset with the chosen body, spliced at the caret so it stays editable.
+function pickPreset(){if(window.ipc)window.ipc.postMessage(JSON.stringify({t:'presets:pick'}));}
+function insertPreset(text){var m=document.getElementById('msg');if(!m||!text)return;var a=m.selectionStart,b=m.selectionEnd,v=m.value;m.value=v.slice(0,a)+text+v.slice(b);var c=a+text.length;m.selectionStart=m.selectionEnd=c;grow();m.focus();}
 // Copy `t` to the clipboard. execCommand works in the webview under a user
 // gesture (about:blank isn't a secure context, so navigator.clipboard may be
 // blocked); fall back to it. Restores focus after the hidden-textarea trick.
@@ -467,6 +488,7 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
     else if(e.key==='Escape'&&generating){e.preventDefault();window.ipc.postMessage(JSON.stringify({t:'cancel'}));}
   });
   m.addEventListener('input',grow);
+  var pbtn=document.getElementById('preset');if(pbtn)pbtn.addEventListener('click',pickPreset);
   grow();focusInput();
 })();
 // Links open in the user's default browser; the chat pane must never navigate
@@ -491,6 +513,14 @@ document.addEventListener('keydown',function(e){
   else return;
   e.preventDefault();
   gotoMessage(n);
+});
+// Alt+P opens the prompt-preset picker. e.code is layout-independent, and
+// preventDefault stops mac Option+P typing a special character (\u{03c0}).
+document.addEventListener('keydown',function(e){
+  if(!e.altKey||e.ctrlKey||e.metaKey||e.shiftKey)return;
+  if(e.code!=='KeyP')return;
+  e.preventDefault();
+  pickPreset();
 });
 </script></body></html>"#;
 

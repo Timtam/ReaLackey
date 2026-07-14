@@ -48,8 +48,41 @@ pub fn on_webview_message(json: &str) {
                 open_url(url);
             }
         }
+        // The composer's "Presets" button / Alt+P: show the native preset picker
+        // and insert the chosen prompt into the composer.
+        Some("presets:pick") => pick_preset(),
         _ => {}
     }
+}
+
+/// Show the native picker of saved prompt presets and, on a choice, insert its
+/// body into the chat composer. Runs on the main thread (wry dispatches the IPC
+/// handler there), where the native menu and the webview both live.
+fn pick_preset() {
+    use crate::ui::presets_ui::display_name;
+    let presets = crate::prompts::registry::list();
+    if presets.is_empty() {
+        crate::ui::output::announce(
+            "No presets saved yet. Add one from the Extensions menu, ReaLackey, Prompt presets.",
+        );
+        return;
+    }
+    // Non-empty, one-line labels so the popup's index maps 1:1 to `presets`
+    // (ui_popup_menu drops empty lines).
+    let labels: Vec<String> = presets.iter().map(|p| display_name(&p.name)).collect();
+    let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let choice = crate::ui::ffi::popup_menu(&refs);
+    if choice == 0 || choice > presets.len() {
+        return; // cancelled
+    }
+    let preset = &presets[choice - 1];
+    crate::ui::output::insert_preset(&preset.body);
+    // Announce the name through both accessible channels (matching the project's
+    // dual-channel convention): OSARA speaks directly (focus-independent, Windows)
+    // and the webview aria-live region carries it for VoiceOver on macOS.
+    let msg = format!("Preset inserted: {}.", display_name(&preset.name));
+    crate::reaper::osara::announce(&msg);
+    crate::ui::output::announce(&msg);
 }
 
 /// Open an http(s)/mailto URL (a link the user clicked in the chat) in the

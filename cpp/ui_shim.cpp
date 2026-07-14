@@ -48,6 +48,12 @@ static pe_init_cb  g_pe_init  = NULL;
 static pe_fetch_cb g_pe_fetch = NULL;
 static pe_ok_cb    g_pe_ok    = NULL;
 static pe_key_cb   g_pe_key   = NULL;  // key-list button (add/delete/move)
+static HWND        g_preset_dlg      = NULL;  // prompt-preset LIST dialog, while open
+static HWND        g_preset_edit_dlg = NULL;  // prompt-preset EDIT sub-dialog, while open
+static preset_list_cb   g_preset_list   = NULL;
+static preset_action_cb g_preset_action = NULL;
+static preset_init_cb   g_preset_init   = NULL;
+static preset_ok_cb     g_preset_ok     = NULL;
 
 // Classic subclass of the webview host so focus entering it (Tab) is forwarded
 // into the web content via Rust (WebView2 MoveFocus). Windows-only.
@@ -135,17 +141,26 @@ static void append_ctrl_text(HWND edit, const char* utf8) {
 #endif
 }
 
+// Read a control's full text, sized to its actual length (NOT a fixed cap) — the
+// multiline prompt-preset body can be far longer than a single-line field, and a
+// fixed buffer would silently truncate it.
 static std::string get_ctrl_text(HWND hwnd, int id) {
+  HWND c = GetDlgItem(hwnd, id);
+  if (!c) return std::string();
 #ifdef _WIN32
-  wchar_t buf[8192];
-  buf[0] = 0;
-  GetDlgItemTextW(hwnd, id, buf, (int)(sizeof(buf) / sizeof(buf[0])));
-  return to_utf8(buf);
+  int len = GetWindowTextLengthW(c);  // UTF-16 units, excluding the NUL
+  if (len <= 0) return std::string();
+  std::wstring w((size_t)len + 1, L'\0');
+  int got = GetWindowTextW(c, &w[0], len + 1);
+  w.resize(got < 0 ? 0 : (size_t)got);
+  return to_utf8(w.c_str());
 #else
-  char buf[8192];
-  buf[0] = 0;
-  GetDlgItemText(hwnd, id, buf, (int)sizeof(buf));
-  return std::string(buf);
+  int len = GetWindowTextLength(c);
+  if (len <= 0) return std::string();
+  std::string s((size_t)len + 1, '\0');
+  int got = GetWindowText(c, &s[0], len + 1);
+  s.resize(got < 0 ? 0 : (size_t)got);
+  return s;
 #endif
 }
 
@@ -334,6 +349,136 @@ static RAAI_DLGRET ProviderEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
       return FALSE;
     case WM_DESTROY:
       g_pe_dlg = NULL;
+      return FALSE;
+  }
+  return FALSE;
+}
+
+// ---- prompt-preset dialogs --------------------------------------------------
+// Repopulate the preset listbox from Rust, preserving the selection index if
+// possible, and refresh the spoken "N presets" summary line.
+static void populate_preset_list(HWND hwnd) {
+  HWND lb = GetDlgItem(hwnd, ID_PRESET_LIST);
+  if (!lb) return;
+  int sel = (int)SendMessage(lb, LB_GETCURSEL, 0, 0);
+  SendMessage(lb, LB_RESETCONTENT, 0, 0);
+  if (g_preset_list) {
+    char buf[16384];
+    buf[0] = 0;
+    g_preset_list(buf, (int)sizeof(buf));
+    std::string s(buf);
+    size_t start = 0;
+    while (start <= s.size()) {
+      size_t nl = s.find('\n', start);
+      std::string line =
+          (nl == std::string::npos) ? s.substr(start) : s.substr(start, nl - start);
+      if (!line.empty()) add_list_item(lb, line.c_str());
+      if (nl == std::string::npos) break;
+      start = nl + 1;
+    }
+  }
+  int count = (int)SendMessage(lb, LB_GETCOUNT, 0, 0);
+  if (count > 0) {
+    if (sel < 0) sel = 0;
+    if (sel >= count) sel = count - 1;
+    SendMessage(lb, LB_SETCURSEL, (WPARAM)sel, 0);
+  }
+  std::string hint = (count == 0)   ? "No presets yet. Add one to get started."
+                     : (count == 1) ? "1 preset."
+                                    : (std::to_string(count) + " presets.");
+  set_ctrl_text(hwnd, ID_PRESET_HINT, hint.c_str());
+}
+
+// Add always enabled; Edit / Delete only with a selected row (so a disabled
+// button reads as "unavailable" to a screen reader rather than clicking through
+// to a "nothing selected" message).
+static void update_preset_buttons(HWND hwnd) {
+  HWND lb = GetDlgItem(hwnd, ID_PRESET_LIST);
+  int has_sel = lb && (int)SendMessage(lb, LB_GETCURSEL, 0, 0) >= 0;
+  // If focus sits on a button we're about to disable (e.g. after deleting the
+  // last preset, Delete still holds focus), move it to the listbox first so a
+  // screen-reader user isn't stranded on a dead control (Win32 doesn't auto-move
+  // focus off a control disabled via EnableWindow).
+  if (!has_sel && lb) {
+    HWND f = GetFocus();
+    if (f && (f == GetDlgItem(hwnd, ID_PRESET_EDIT) || f == GetDlgItem(hwnd, ID_PRESET_DELETE))) {
+      SetFocus(lb);
+    }
+  }
+  enable_ctrl(hwnd, ID_PRESET_EDIT, has_sel);
+  enable_ctrl(hwnd, ID_PRESET_DELETE, has_sel);
+}
+
+// Run a preset action in Rust for the selected row; repopulate if it changed.
+static void do_preset_action(HWND hwnd, int action) {
+  if (!g_preset_action) return;
+  HWND lb = GetDlgItem(hwnd, ID_PRESET_LIST);
+  int sel = lb ? (int)SendMessage(lb, LB_GETCURSEL, 0, 0) : -1;
+  if (g_preset_action(action, sel)) {
+    populate_preset_list(hwnd);
+    update_preset_buttons(hwnd);
+  }
+}
+
+static RAAI_DLGRET PresetsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_INITDIALOG:
+      g_preset_dlg = hwnd;  // so the edit sub-dialog can own (disable) this one
+      populate_preset_list(hwnd);
+      update_preset_buttons(hwnd);
+      return TRUE;
+    case WM_COMMAND:
+      switch (LOWORD(wParam)) {
+        case ID_PRESET_ADD:    do_preset_action(hwnd, 0); return TRUE;
+        case ID_PRESET_EDIT:   do_preset_action(hwnd, 1); return TRUE;
+        case ID_PRESET_DELETE: do_preset_action(hwnd, 2); return TRUE;
+        case ID_PRESET_LIST:
+          if (HIWORD(wParam) == LBN_DBLCLK) { do_preset_action(hwnd, 1); return TRUE; }
+          if (HIWORD(wParam) == LBN_SELCHANGE) { update_preset_buttons(hwnd); return FALSE; }
+          return FALSE;
+        case IDCANCEL:
+          EndDialog(hwnd, 0);
+          return TRUE;
+      }
+      return FALSE;
+    case WM_DESTROY:
+      g_preset_dlg = NULL;
+      return FALSE;
+  }
+  return FALSE;
+}
+
+// Keep OK matched to state: a preset must have a name. (The body is validated in
+// Rust on OK — an empty body keeps the dialog open with a spoken message.)
+static void update_preset_ok_button(HWND hwnd) {
+  HWND name = GetDlgItem(hwnd, ID_PRE_NAME);
+  int has_name = name && GetWindowTextLength(name) > 0;
+  enable_ctrl(hwnd, IDOK, has_name);
+}
+
+static RAAI_DLGRET PresetEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_INITDIALOG:
+      g_preset_edit_dlg = hwnd;
+      if (g_preset_init) g_preset_init();  // Rust prefills name + body
+      update_preset_ok_button(hwnd);       // empty name -> OK disabled
+      return TRUE;
+    case WM_COMMAND:
+      switch (LOWORD(wParam)) {
+        case ID_PRE_NAME:
+          if (HIWORD(wParam) == EN_CHANGE) update_preset_ok_button(hwnd);
+          return FALSE;
+        case IDOK:
+          // Rust saves and decides whether to close (0 = keep open on error).
+          if (!g_preset_ok || g_preset_ok()) EndDialog(hwnd, 1);
+          return TRUE;
+        case IDCANCEL:
+          EndDialog(hwnd, 0);
+          return TRUE;
+      }
+      return FALSE;
+    case WM_DESTROY:
+      g_preset_edit_dlg = NULL;
       return FALSE;
   }
   return FALSE;
@@ -669,7 +814,12 @@ extern "C" int ui_popup_menu(const char* items_newline) {
     if (nl == std::string::npos) break;
     start = nl + 1;
   }
-  HWND owner = g_pe_dlg ? g_pe_dlg : (g_prov_dlg ? g_prov_dlg : (g_dlg ? g_dlg : GetForegroundWindow()));
+  HWND owner = g_preset_edit_dlg ? g_preset_edit_dlg
+             : g_preset_dlg      ? g_preset_dlg
+             : g_pe_dlg          ? g_pe_dlg
+             : g_prov_dlg        ? g_prov_dlg
+             : g_dlg             ? g_dlg
+                                 : GetForegroundWindow();
   POINT pt;
   GetCursorPos(&pt);
   int chosen = (int)TrackPopupMenu(
@@ -680,7 +830,12 @@ extern "C" int ui_popup_menu(const char* items_newline) {
 }
 
 extern "C" int ui_message_box(const char* title, const char* text, int flags) {
-  HWND owner = g_pe_dlg ? g_pe_dlg : (g_prov_dlg ? g_prov_dlg : (g_dlg ? g_dlg : GetForegroundWindow()));
+  HWND owner = g_preset_edit_dlg ? g_preset_edit_dlg
+             : g_preset_dlg      ? g_preset_dlg
+             : g_pe_dlg          ? g_pe_dlg
+             : g_prov_dlg        ? g_prov_dlg
+             : g_dlg             ? g_dlg
+                                 : GetForegroundWindow();
   UINT type = (flags == 1) ? (MB_YESNO | MB_ICONQUESTION) : (MB_OK | MB_ICONINFORMATION);
 #ifdef _WIN32
   int r = MessageBoxW(owner, to_wide(text ? text : "").c_str(),
@@ -770,6 +925,75 @@ extern "C" void ui_pe_set_sel(int ctrl, int index) {
   if (lb) SendMessage(lb, LB_SETCURSEL, (WPARAM)index, 0);
 }
 
+// ---- prompt-preset C-ABI ----------------------------------------------------
+extern "C" void ui_set_preset_cbs(preset_list_cb on_list, preset_action_cb on_action) {
+  g_preset_list   = on_list;
+  g_preset_action = on_action;
+}
+
+extern "C" void ui_show_presets(void) {
+  // Modal, parented to the assistant window if it exists (else REAPER's front
+  // window). Rust owns the list/action logic via the registered callbacks.
+  HWND parent = g_dlg ? g_dlg : GetForegroundWindow();
+  DialogBoxParam(g_hinst, MAKEINTRESOURCE(ID_PRESETS_DLG), parent, PresetsProc, 0);
+}
+
+extern "C" void ui_set_preset_edit_cbs(preset_init_cb on_init, preset_ok_cb on_ok) {
+  g_preset_init = on_init;
+  g_preset_ok   = on_ok;
+}
+
+extern "C" int ui_show_preset_edit(void) {
+  // Own the preset LIST dialog so it's disabled while the sub-dialog is open;
+  // fall back to the assistant window, then the foreground window.
+  HWND parent = g_preset_dlg ? g_preset_dlg : (g_dlg ? g_dlg : GetForegroundWindow());
+  INT_PTR r = DialogBoxParam(g_hinst, MAKEINTRESOURCE(ID_PRESET_EDIT_DLG), parent,
+                             PresetEditProc, 0);
+  return r == 1 ? 1 : 0;
+}
+
+extern "C" void ui_preset_set_text(int ctrl, const char* utf8) {
+  if (!g_preset_edit_dlg) return;
+#ifdef _WIN32
+  // Windows multiline EDIT controls need CRLF for line breaks; stored bodies are
+  // LF-only, so expand LF -> CRLF on the way into the body field.
+  if (ctrl == ID_PRE_BODY && utf8) {
+    std::string in(utf8), out;
+    out.reserve(in.size() + 16);
+    for (size_t i = 0; i < in.size(); i++) {
+      char c = in[i];
+      if (c == '\r') continue;          // drop bare CR; the LF (if any) adds CRLF
+      if (c == '\n') out.push_back('\r');
+      out.push_back(c);
+    }
+    set_ctrl_text(g_preset_edit_dlg, ctrl, out.c_str());
+    return;
+  }
+#endif
+  set_ctrl_text(g_preset_edit_dlg, ctrl, utf8);
+}
+
+extern "C" void ui_preset_get_text(int ctrl, char* buf, int buf_sz) {
+  if (!buf || buf_sz <= 0) return;
+  buf[0] = 0;
+  if (!g_preset_edit_dlg) return;
+  std::string s = get_ctrl_text(g_preset_edit_dlg, ctrl);
+#ifdef _WIN32
+  // Normalize CRLF -> LF so stored bodies are canonical and cross-platform.
+  if (ctrl == ID_PRE_BODY) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++)
+      if (s[i] != '\r') out.push_back(s[i]);
+    s.swap(out);
+  }
+#endif
+  int n = (int)s.size();
+  if (n > buf_sz - 1) n = buf_sz - 1;
+  if (n > 0) memcpy(buf, s.data(), (size_t)n);
+  buf[n] = 0;
+}
+
 // ---- SWELL dialog/menu resource registration (macOS/Linux) ------------------
 // On non-Windows there is no rc.exe: SWELL learns about our dialog templates ONLY
 // from the tables swell_resgen.php generates from assistant.rc (see build.rs),
@@ -789,6 +1013,12 @@ extern "C" void ui_pe_set_sel(int ctrl, int index) {
 #endif
 #ifndef LBS_HASSTRINGS
 #define LBS_HASSTRINGS 0
+#endif
+// SWELL multiline edits accept Enter natively, so it may not define ES_WANTRETURN
+// (used by the prompt-preset body field, and needed by rc.exe on Windows). Map it
+// to 0 so the generated table compiles.
+#ifndef ES_WANTRETURN
+#define ES_WANTRETURN 0
 #endif
 // swell-dlggen.h defines CHECKBOX but not AUTOCHECKBOX (which the .rc uses, and
 // which rc.exe needs on Windows). SWELL checkboxes auto-toggle anyway, and both

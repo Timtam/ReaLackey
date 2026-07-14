@@ -49,6 +49,8 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     ui::ffi::install_callbacks();
     ui::ffi::install_provider_cbs();
     ui::ffi::install_provider_edit_cbs();
+    ui::ffi::install_preset_cbs();
+    ui::ffi::install_preset_edit_cbs();
 
     // Channels: worker -> main (crossbeam) for UI events and tool ops;
     // main/UI -> worker (tokio mpsc) for user intents.
@@ -84,5 +86,7 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     // (resource-path config dir + one-time config/keyring migrations). Runs here
     // on the main thread, before any prompt can touch the registry.
     crate::config::init_key_cache();
+    // Load the prompt-preset store (empty on first run; shares the config dir).
+    crate::prompts::registry::init();
     Ok(())
 }

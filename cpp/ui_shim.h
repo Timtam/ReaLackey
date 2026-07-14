@@ -133,6 +133,32 @@ void ui_pe_set_list(int ctrl, const char* items_newline);
 int ui_pe_get_sel(int ctrl);          // selected row, or -1 if none
 void ui_pe_set_sel(int ctrl, int index);
 
+// --- prompt presets ----------------------------------------------------------
+// A LIST dialog (add / edit / delete a saved prompt, no reorder) plus a small
+// EDIT sub-dialog (Name field + multiline Prompt-text field). Same three-layer
+// pattern as the provider dialogs: Rust owns the logic via these callbacks.
+// Rust fills `buf` (UTF-8, NUL-terminated, capacity `buf_sz`) with the preset
+// names, one per line, in list order.
+typedef void (*preset_list_cb)(char* buf, int buf_sz);
+// Rust performs an action on the selected row: 0=add, 1=edit, 2=delete; `index`
+// is the selected row (or -1 if none). Returns 1 if the list changed (the dialog
+// then repopulates), 0 otherwise. May open nested modal dialogs.
+typedef int (*preset_action_cb)(int action, int index);
+void ui_set_preset_cbs(preset_list_cb on_list, preset_action_cb on_action);
+// Show the modal preset-management dialog. Main thread only.
+void ui_show_presets(void);
+// Edit sub-dialog callbacks.
+typedef void (*preset_init_cb)(void);  // WM_INITDIALOG: Rust prefills name+body
+typedef int (*preset_ok_cb)(void);     // OK clicked: Rust saves; 1=close, 0=keep open
+void ui_set_preset_edit_cbs(preset_init_cb on_init, preset_ok_cb on_ok);
+// Show the modal preset edit sub-dialog; returns 1 if the user pressed OK.
+int ui_show_preset_edit(void);
+// Field accessors, valid only from the edit-dialog callbacks. `ctrl` is
+// ID_PRE_NAME or ID_PRE_BODY. The body's line endings are normalized to LF on the
+// way out and back to the platform's convention on the way in.
+void ui_preset_set_text(int ctrl, const char* utf8);
+void ui_preset_get_text(int ctrl, char* buf, int buf_sz);
+
 #ifdef __cplusplus
 }
 #endif

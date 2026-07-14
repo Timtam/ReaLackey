@@ -52,6 +52,15 @@ extern "C" {
     fn ui_pe_set_list(ctrl: c_int, items_newline: *const c_char);
     fn ui_pe_get_sel(ctrl: c_int) -> c_int;
     fn ui_pe_set_sel(ctrl: c_int, index: c_int);
+    fn ui_set_preset_cbs(
+        on_list: extern "C" fn(*mut c_char, c_int),
+        on_action: extern "C" fn(c_int, c_int) -> c_int,
+    );
+    fn ui_show_presets();
+    fn ui_set_preset_edit_cbs(on_init: extern "C" fn(), on_ok: extern "C" fn() -> c_int);
+    fn ui_show_preset_edit() -> c_int;
+    fn ui_preset_set_text(ctrl: c_int, utf8: *const c_char);
+    fn ui_preset_get_text(ctrl: c_int, buf: *mut c_char, buf_sz: c_int);
     fn ui_find_window_by_title(needle: *const c_char) -> *mut c_void;
 }
 
@@ -66,6 +75,10 @@ pub const PE_KEY: c_int = 1028;
 pub const PE_KEYHINT: c_int = 1029;
 pub const PE_MAXTURNS: c_int = 1030;
 pub const PE_KEYLIST: c_int = 1031;
+
+// Prompt-preset edit dialog control ids — MUST match cpp/resource.h.
+pub const PRE_NAME: c_int = 1051;
+pub const PRE_BODY: c_int = 1052;
 
 /// One-time init. `get_func` is REAPER's `rec->GetFunc` (used by SWELL on
 /// non-Windows; ignored on Windows).
@@ -231,6 +244,64 @@ extern "C" fn pe_ok() -> c_int {
 
 extern "C" fn pe_key(action: c_int) {
     let _ = std::panic::catch_unwind(|| crate::ui::providers_ui::edit_dialog_key(action));
+}
+
+/// Register the prompt-preset list/action callbacks. Call once at init.
+pub fn install_preset_cbs() {
+    unsafe { ui_set_preset_cbs(preset_list, preset_action) }
+}
+
+/// Register the prompt-preset edit sub-dialog callbacks. Call once at init.
+pub fn install_preset_edit_cbs() {
+    unsafe { ui_set_preset_edit_cbs(preset_init, preset_ok) }
+}
+
+/// Show the modal prompt-preset management dialog (main thread only).
+pub fn show_presets() {
+    unsafe { ui_show_presets() }
+}
+
+/// Show the modal preset edit sub-dialog; true if the user pressed OK.
+pub fn show_preset_edit() -> bool {
+    unsafe { ui_show_preset_edit() != 0 }
+}
+
+/// Set a preset-edit text control (valid only from the edit-dialog callbacks).
+pub fn preset_set_text(ctrl: c_int, text: &str) {
+    if let Some(c) = to_cstring(text) {
+        unsafe { ui_preset_set_text(ctrl, c.as_ptr()) }
+    }
+}
+
+/// Read a preset-edit text control (valid only from the edit-dialog callbacks).
+/// Uses a generous buffer since the body field holds a whole prompt.
+pub fn preset_get_text(ctrl: c_int) -> String {
+    const CAP: usize = 65536;
+    let mut buf = vec![0u8; CAP];
+    unsafe { ui_preset_get_text(ctrl, buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(CAP);
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+extern "C" fn preset_list(buf: *mut c_char, buf_sz: c_int) {
+    let _ = std::panic::catch_unwind(|| {
+        let text = crate::ui::presets_ui::list_text();
+        unsafe { write_cstr(buf, buf_sz, &text) };
+    });
+}
+
+extern "C" fn preset_action(action: c_int, index: c_int) -> c_int {
+    std::panic::catch_unwind(|| crate::ui::presets_ui::on_action(action, index) as c_int)
+        .unwrap_or(0)
+}
+
+extern "C" fn preset_init() {
+    let _ = std::panic::catch_unwind(crate::ui::presets_ui::edit_dialog_init);
+}
+
+extern "C" fn preset_ok() -> c_int {
+    // On panic, close the dialog (1) rather than leaving it stuck open.
+    std::panic::catch_unwind(|| crate::ui::presets_ui::edit_dialog_ok() as c_int).unwrap_or(1)
 }
 
 /// Show the modal provider-management dialog (main thread only).

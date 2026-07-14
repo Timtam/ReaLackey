@@ -12,6 +12,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Prompt presets: save reusable prompts and drop them into the chat composer
+  instead of retyping. Manage them (add / edit / delete) from **Extensions →
+  ReaLackey → "Prompt presets…"**; in the chat window the **Presets** button (or
+  **Alt+P**) opens a picker that inserts the chosen prompt into the composer so
+  you can tweak it before sending. Stored globally in `presets.json`, next to
+  `providers.json`.
 - Chat message navigation + copy: **Alt+1 … Alt+0** (and the key right of 0) jump
   to that message and move focus to it (the screen reader reads it); a quick second
   press of the same combo copies that message — your request or the model's

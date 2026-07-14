@@ -17,6 +17,7 @@ mod ai;
 mod app;
 mod config;
 mod dsp;
+mod prompts;
 mod providers;
 mod reaper;
 mod text;
