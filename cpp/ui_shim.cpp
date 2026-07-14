@@ -749,6 +749,13 @@ extern "C" void ui_pe_set_sel(int ctrl, int index) {
 #ifndef LBS_HASSTRINGS
 #define LBS_HASSTRINGS 0
 #endif
+// swell-dlggen.h defines CHECKBOX but not AUTOCHECKBOX (which the .rc uses, and
+// which rc.exe needs on Windows). SWELL checkboxes auto-toggle anyway, and both
+// take the same .rc arg layout, so alias it — otherwise the undefined macro leaves
+// a stray token that breaks the generated struct ("expected '}'").
+#ifndef AUTOCHECKBOX
+#define AUTOCHECKBOX CHECKBOX
+#endif
 #include "assistant.rc_mac_dlg"
 #include "swell-menugen.h"
 #include "assistant.rc_mac_menu"
