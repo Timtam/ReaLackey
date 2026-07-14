@@ -505,15 +505,22 @@ extern "C" int ui_translate_accel(void* msgp) {
   // macOS/SWELL: REAPER's accelerator hook (registered at the Front position) sees
   // every keystroke before the Cocoa responder chain, so keys the user types into
   // the webview composer would otherwise fire as global REAPER actions (Space =
-  // Play/Stop, R = record, ...). Mirror the Win32 intent: for any key targeting our
-  // dialog subtree, return -1 ("pass on to my window") so REAPER does not consume
-  // it and the keystroke reaches the webview. IsChild walks the NSView hierarchy
-  // (isDescendantOf:), so it recognises the wry-injected WKWebView subview even
-  // though SWELL never created it.
+  // Play/Stop, arrows = move edit cursor, ...) and yank focus out of the composer.
+  // Mirror the Win32 intent: for keys aimed at our window return -1 ("pass on to my
+  // window") so REAPER does not consume them and they reach the webview.
+  //
+  // The webview is a raw NSView subview that SWELL never created, so on a
+  // webview-focused key `msg->hwnd` does NOT reliably resolve to our dialog subtree
+  // (which is why arrow keys sometimes escaped). So ALSO claim the key whenever our
+  // window is the one in front — when the webview owns the whole window, every key
+  // belongs to it; the user switches to REAPER's own window for REAPER shortcuts.
   if (!g_dlg || !msgp) return 0;
   MSG* msg = (MSG*)msgp;
-  if (msg->hwnd != g_dlg && !IsChild(g_dlg, msg->hwnd)) return 0; // not ours
-  return -1; // ours: deliver to the webview, don't apply REAPER shortcuts
+  HWND fg = GetForegroundWindow();
+  bool ours = msg->hwnd == g_dlg || IsChild(g_dlg, msg->hwnd) ||
+              fg == g_dlg || (fg && IsChild(g_dlg, fg));
+  if (!ours) return 0; // not our window — let REAPER handle it
+  return -1;           // ours: deliver to the window/webview
 #endif
 }
 
