@@ -26,9 +26,8 @@ use crate::providers::ToolDef;
 const NAME_BUF: u32 = 256;
 const DEFAULT_LIMIT: usize = 200;
 /// Shared schema description for the `chain` selector on the track-FX tools.
-const CHAIN_DESC: &str = "which FX chain: 'normal' (default; the track's output FX), \
-    'input' (the track's record/input FX, applied before recording), or 'monitor' (REAPER's \
-    global Monitoring FX, which live on the master track — track_index is ignored)";
+const CHAIN_DESC: &str = "FX chain: 'normal' (default, output FX), 'input' (record/input FX), \
+    or 'monitor' (master monitoring FX; track_index ignored)";
 
 /// A request from the worker for the main thread to run.
 pub enum ReaperOp {
@@ -245,9 +244,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "set_fx_param".into(),
-            description: "Set a track-FX parameter to a normalized value in 0..1. CHANGES the \
-                          project (confirmed + undo-wrapped). Call get_fx_params first to choose \
-                          the parameter index and understand its current value."
+            description: "Set a track-FX parameter to a normalized 0..1 value. Call get_fx_params \
+                          first to choose the parameter index and read its current value."
                 .into(),
             input_schema: obj(
                 json!({
@@ -262,8 +260,7 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "set_fx_enabled".into(),
-            description: "Enable or bypass a track FX. CHANGES the project (confirmed + undo-wrapped)."
-                .into(),
+            description: "Enable or bypass a track FX.".into(),
             input_schema: obj(
                 json!({
                     "track_index": { "type": "integer" },
@@ -292,11 +289,9 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "set_fx_preset".into(),
-            description: "Load (select) a preset for a track FX. Provide EXACTLY ONE of: name \
-                          (exact preset name), index (0-based preset index), or navigate \
-                          ('next'/'previous'). NOTE: REAPER's API can only LOAD existing presets — \
-                          it cannot SAVE a new preset (that must be done from the FX window's \
-                          preset menu). CHANGES the project (confirmed + undo-wrapped)."
+            description: "Load (select) a preset for a track FX. Provide EXACTLY ONE of: name (exact), \
+                          index (0-based), or navigate ('next'/'previous'). REAPER can only LOAD \
+                          existing presets, not SAVE new ones (that's done from the FX window)."
                 .into(),
             input_schema: obj(
                 json!({
@@ -382,9 +377,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "insert_midi_notes".into(),
-            description: "Insert MIDI notes into an item's active take. CHANGES the project \
-                          (confirmed + undo-wrapped). Times are in quarter notes relative to the \
-                          item start."
+            description: "Insert MIDI notes into an item's active take. Times are in quarter notes \
+                          relative to the item start."
                 .into(),
             input_schema: obj(
                 json!({
@@ -410,9 +404,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "create_midi_item".into(),
-            description: "Create an empty MIDI item on a track. CHANGES the project (confirmed + \
-                          undo-wrapped). Position and length are in quarter notes. Returns the new \
-                          item_index for use with insert_midi_notes."
+            description: "Create an empty MIDI item on a track (position/length in quarter notes). \
+                          Returns the new item_index for insert_midi_notes."
                 .into(),
             input_schema: obj(
                 json!({
@@ -801,15 +794,12 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "set_item_edge".into(),
-            description: "Move a media item's left or right EDGE to an absolute timeline time \
-                          (seconds) — trimming or extending it. CHANGES the project (confirmed + \
-                          undo-wrapped, ONE undo point). The RIGHT edge just changes the item's \
-                          length. The LEFT edge moves the item start AND shifts EVERY take's \
-                          start-in-source offset (each by the move scaled by its own playrate) so \
-                          the audio content stays put across all takes — the correct 'trim left \
-                          edge' behaviour; extending the left edge before the source start yields \
-                          leading silence (or loops if loop_source is on). Use this instead of \
-                          composing set_item_property/set_take_property by hand."
+            description: "Move a media item's left or right EDGE to an absolute time (seconds), \
+                          trimming/extending it. RIGHT edge changes length only. LEFT edge moves the \
+                          item start AND shifts every take's source offset (scaled by playrate) so \
+                          the audio content stays put — the correct 'trim left edge'; extending left \
+                          past the source start yields leading silence (or loops if loop_source is \
+                          on). Prefer this over hand-composing set_item_property/set_take_property."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1058,14 +1048,11 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "analyze_audio_timeline".into(),
-            description: "Analyse audio OVER TIME (a time-SERIES, not one aggregate number) for a \
-                          take or a track: a per-window RMS/peak level envelope, detected SILENT \
-                          regions, optional TRANSIENT onset times, and optional tracking of a single \
-                          FREQUENCY's level over time. Read-only, local DSP (nothing is uploaded). \
-                          Give item_index (+optional take_index) OR track_index (+optional \
-                          start/length). Reads up to 30 s per call; all times reported are absolute \
-                          timeline seconds. Use it to find silence, locate transients, or monitor \
-                          how one frequency behaves across a longer passage."
+            description: "Analyse audio OVER TIME (a time-series, not one aggregate) for a take or \
+                          track: a per-window RMS/peak level envelope, silent regions, optional \
+                          transient onsets, and optional single-frequency level tracking. Read-only \
+                          local DSP. Give item_index (+take_index) OR track_index (+start/length). \
+                          Reads up to 30 s/call; times are absolute timeline seconds."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1104,12 +1091,10 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "get_track_state_chunk".into(),
-            description: "Read a track's full REAPER state chunk (RPP-format text: its FX chain — \
-                          including the Video processor's EEL code — envelopes, item list, etc.). \
-                          Read-only, and can be large. Use it for advanced edits the typed tools \
-                          don't cover (notably reading/editing Video processor code), then write it \
-                          back with set_track_state_chunk (edit minimally — change only what you \
-                          intend)."
+            description: "Read a track's full REAPER state chunk (RPP-format text: FX chain incl. \
+                          the Video processor's EEL code, envelopes, items). Read-only, can be large. \
+                          For advanced edits the typed tools don't cover (notably Video processor \
+                          code); write back with set_track_state_chunk, changing only what you intend."
                 .into(),
             input_schema: obj(
                 json!({ "track_index": { "type": "integer" } }),
@@ -1118,12 +1103,10 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "set_track_state_chunk".into(),
-            description: "Replace a track's full state chunk (RPP-format text from \
-                          get_track_state_chunk). CHANGES the project (confirmed + undo-wrapped). \
-                          ADVANCED/powerful: REAPER rejects a malformed chunk and the edit is \
-                          undoable, but only pass a chunk derived from a FRESH, non-truncated \
-                          get_track_state_chunk with a minimal, intentional change (e.g. the Video \
-                          processor's code). Do not hand-craft chunks."
+            description: "Replace a track's full state chunk (RPP text from get_track_state_chunk). \
+                          ADVANCED: only pass a chunk derived from a FRESH, non-truncated \
+                          get_track_state_chunk with a minimal, intentional change (e.g. Video \
+                          processor code). Don't hand-craft chunks; REAPER rejects malformed ones."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1150,11 +1133,9 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "delete_midi_notes".into(),
-            description: "Delete MIDI notes from a media item's active take. CHANGES the project \
-                          (confirmed + undo-wrapped). With no filters it deletes ALL notes; \
-                          otherwise only notes matching the pitch range (pitch_min/pitch_max, \
-                          0-127) and/or time range (start_time/end_time in seconds, matched on the \
-                          note's start)."
+            description: "Delete MIDI notes from a media item's active take. With no filters, deletes \
+                          ALL notes; otherwise only those matching the pitch range and/or time range \
+                          (matched on the note's start)."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1169,14 +1150,10 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         },
         ToolDef {
             name: "set_fx_param_by_steps".into(),
-            description: "Nudge a track-FX parameter UP or DOWN by a relative amount, instead of \
-                          setting an absolute 0..1 value. Use this when you can SEE a knob/slider \
-                          (e.g. via capture_view) and want to move it 'a little' without computing \
-                          the exact normalized value — it reads the current value, steps it, and \
-                          reports the new display value so you can judge the effect and repeat. \
-                          CHANGES the project (confirmed + undo-wrapped). direction is 'up' or \
-                          'down'; step_count is how many steps (default 1); step_size is the \
-                          normalized amount per step in 0..1 (default 0.01)."
+            description: "Nudge a track-FX parameter up/down by a relative amount instead of an \
+                          absolute 0..1 value — for 'a little more' when you've SEEN a knob (e.g. via \
+                          capture_view) but can't compute the exact value. Reads the current value, \
+                          steps it, and reports the new display value so you can judge and repeat."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1194,19 +1171,12 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         // --- vision (Phase 7) ---
         ToolDef {
             name: "capture_view".into(),
-            description: "Screenshot visual-only UI the REAPER API can't express (custom plugin \
-                          GUIs, meters, waveforms), returned as an image to reason about. Needs \
-                          user consent each time (sent to the AI provider); call only when seeing \
-                          genuinely helps. Seeing is not acting — to CHANGE anything use the \
-                          parameter tools (set_fx_param), not this. Pass track_index + fx_index \
-                          (from get_track_fx) to open and capture a SPECIFIC unfocused track FX \
-                          (the reliable way to view a plugin you just added); these take precedence \
-                          over target. Otherwise target: 'focused_plugin' (default), 'reaper_main', \
-                          'full_screen', or 'video' (REAPER's Video window — the processed video \
-                          frame at the cursor, with all video FX applied; the Video window must be \
-                          open and floating). Capturing 'video' repeatedly during playback is a way \
-                          to watch video processing, but each frame is a separate consent-gated \
-                          still, not a live stream."
+            description: "Screenshot visual-only UI the REAPER API can't express (custom plugin GUIs, \
+                          meters, waveforms), returned as an image. Consent-gated each call; use only \
+                          when seeing helps. Seeing is not acting — to CHANGE something use the \
+                          parameter tools, not this. Pass track_index + fx_index (from get_track_fx) \
+                          to open and capture a specific unfocused track FX (precedence over target). \
+                          For a whole video clip over time, prefer capture_video_clip."
                 .into(),
             input_schema: obj(
                 json!({
@@ -1333,15 +1303,10 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     ];
     defs.push(ToolDef {
         name: "analyze_processed_audio".into(),
-        description: "Analyse PROCESSED (post-FX) audio by doing a short offline render and \
-                      measuring the result — the same metrics as analyze_track_audio (peak/RMS, \
-                      loudness LUFS, clipping, spectral profile) but WITH the FX applied. \
-                      target 'master' = full mix (all track FX + master FX); 'track' (with \
-                      track_index) = that track through its FX + master; 'item' (with \
-                      item_index) = that item through its take + track FX. Briefly renders \
-                      offline (REAPER may be momentarily unresponsive; not cancellable). Window \
-                      capped at 30 s. Use analyze_track_audio / analyze_item_audio for the raw \
-                      pre-FX source."
+        description: "Analyse PROCESSED (post-FX) audio via a short offline render: the same metrics \
+                      as analyze_track_audio (peak/RMS, LUFS, clipping, spectral profile) but WITH \
+                      the FX applied. Renders up to 30 s. Use analyze_track_audio / analyze_item_audio \
+                      for the raw pre-FX source instead."
             .into(),
         input_schema: obj(
             json!({
@@ -1356,15 +1321,11 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     });
     defs.push(ToolDef {
         name: "listen_to_audio".into(),
-        description: "LISTEN to the processed audio: briefly renders the master mix or a track's \
-                      post-FX output to a short clip and returns it as audio for you to HEAR, so you \
-                      can judge tone, balance, artifacts, noise, timing — things the numeric DSP \
-                      metrics don't convey. Only call this when actually hearing the sound helps; it \
-                      needs the user's consent (the clip is sent to the AI provider). target \
-                      'master' = full mix; 'track' (with track_index) = one track's processed \
-                      output. Optional start/length seconds (else the time selection, else the \
-                      start; capped at 20 s to keep the clip small). For numbers (loudness, peak, \
-                      spectrum) use analyze_processed_audio / measure_loudness instead."
+        description: "LISTEN to processed audio: briefly renders the master mix or a track's post-FX \
+                      output to a short clip you can HEAR — for tone, balance, artifacts, noise and \
+                      timing the numeric metrics don't convey. Consent-gated; call only when hearing \
+                      helps. Clip capped at 20 s. For NUMBERS (loudness, peak, spectrum) use \
+                      analyze_processed_audio / measure_loudness instead."
             .into(),
         input_schema: obj(
             json!({
@@ -1378,15 +1339,10 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     });
     defs.push(ToolDef {
         name: "measure_loudness".into(),
-        description: "Measure professional loudness of the PROCESSED output: briefly renders the mix \
-                      offline through the FX chain, then measures it with BS.1770 DSP. Returns \
-                      integrated loudness (LUFS-I), loudness range (LRA in LU), true-peak (dBTP), \
-                      momentary/short-term LUFS maxima, sample peak (dBFS), RMS and clipping — the \
-                      EBU R128 / streaming-target metrics. target 'master' measures the full mix \
-                      (incl. master FX); 'track' (with track_index) measures a track's post-FX \
-                      output. Optional start/length seconds (else the time selection, else up to \
-                      30 s of content). Nothing is left in the project and there is no undo point. \
-                      REAPER is briefly unresponsive during the render; not cancellable."
+        description: "Measure professional loudness of the PROCESSED output (renders offline through \
+                      the FX chain, BS.1770/EBU R128): integrated LUFS-I, loudness range (LRA), \
+                      true-peak (dBTP), momentary/short-term LUFS maxima, sample peak, RMS and \
+                      clipping — the streaming-target metrics. Renders up to 30 s; no undo point."
             .into(),
         input_schema: obj(
             json!({
@@ -1443,12 +1399,10 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     });
     defs.push(ToolDef {
         name: "set_time_selection".into(),
-        description: "Set the time selection (and the matching loop range) to [start, end] in \
-                      seconds; start/end are ordered and clamped to >= 0. seek (default false) also \
-                      moves the edit cursor to the start (and seeks playback there). Transient \
-                      view/selection state, like moving the cursor — not undo-wrapped. Useful to \
-                      mark a range for the analyze_*/render/measure_loudness tools, which default to \
-                      the time selection when no explicit range is given."
+        description: "Set the time selection (and loop range) to [start, end] seconds (ordered, \
+                      clamped >= 0). seek (default false) also moves the edit cursor to the start. \
+                      Transient, not undo-wrapped. Mark a range here for the analyze/render/measure \
+                      tools, which default to it."
             .into(),
         input_schema: obj(
             json!({
@@ -1541,8 +1495,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     });
     defs.push(ToolDef {
         name: "set_ruler_unit".into(),
-        description: "Set the timeline/ruler time unit. unit: minutes_seconds, measures_beats, \
-                      measures_beats_minutes, seconds, samples, or hmsf (hours:minutes:seconds:frames)."
+        description: "Set the timeline/ruler time unit (see the unit enum; hmsf = \
+                      hours:minutes:seconds:frames)."
             .into(),
         input_schema: obj(
             json!({ "unit": { "type": "string", "enum": ["minutes_seconds", "measures_beats", "measures_beats_minutes", "seconds", "samples", "hmsf"] } }),
@@ -1750,14 +1704,11 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     });
     defs.push(ToolDef {
         name: "create_send_envelope".into(),
-        description: "Create a send/receive automation envelope (volume, pan, or mute) so it can \
-                      be automated with the point tools. category: 'send' (default) reads \
-                      (track_index, send_index) as a send on the source track; 'receive' as a \
-                      receive on the destination — same routing either way. Returned unchanged if \
-                      it already exists. IMPORTANT: to add points afterwards use the RETURNED \
-                      envelope_track_index + envelope_index (the envelope is owned by the source \
-                      track, which may differ from the index you passed). Fails safe (no change) if \
-                      it can't confirm creation. CHANGES the project (confirmed + undo-wrapped)."
+        description: "Create a send/receive automation envelope (volume/pan/mute). category 'send' \
+                      (default) reads (track_index, send_index) on the source track; 'receive' on the \
+                      destination. Returned unchanged if it already exists. To add points, use the \
+                      RETURNED envelope_track_index + envelope_index (the envelope is owned by the \
+                      source track, which may differ from what you passed)."
             .into(),
         input_schema: obj(
             json!({
@@ -1775,11 +1726,54 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     if !supports_audio {
         defs.retain(|d| !is_audio_tool(&d.name));
     }
+    // Strip the mutation boilerplate that the system prompt now states ONCE ("every
+    // mutating tool CHANGES the project, is confirmed, and is undo-wrapped"). It was
+    // repeated verbatim in ~40 descriptions; deleting it here trims the per-request
+    // tool payload without touching every call site. Purely redundant phrasing —
+    // the confirmation/undo behaviour is unchanged (it's driven by `preview`, not text).
+    for d in &mut defs {
+        for pat in [
+            " CHANGES the project (confirmed + undo-wrapped).",
+            " CHANGES the project (confirmed + undo-wrapped)",
+            " (confirmed + undo-wrapped)",
+            " CHANGES the project.",
+            " CHANGES the project",
+        ] {
+            if d.description.contains(pat) {
+                d.description = d.description.replace(pat, "");
+            }
+        }
+        // Tidy any double space / dangling space a removal left behind.
+        while d.description.contains("  ") {
+            d.description = d.description.replace("  ", " ");
+        }
+        let trimmed = d.description.trim();
+        if trimmed.len() != d.description.len() {
+            d.description = trimmed.to_string();
+        }
+    }
     defs
 }
 
 #[cfg(test)]
 mod definition_tests {
+    #[test]
+    fn mutation_boilerplate_is_stripped_from_descriptions() {
+        // The build-time strip removes the "CHANGES the project (confirmed +
+        // undo-wrapped)" boilerplate (stated once in the system prompt) — verify a
+        // known mutating tool no longer carries it, and its meaning is intact.
+        let defs = super::definitions(true, true);
+        let set_param = defs.iter().find(|d| d.name == "set_fx_enabled").unwrap();
+        assert!(!set_param.description.contains("CHANGES the project"));
+        assert!(!set_param.description.contains("undo-wrapped"));
+        assert!(set_param.description.contains("bypass"), "kept the distinctive part");
+        // No description should be left with a dangling double space or edge space.
+        for d in &defs {
+            assert!(!d.description.contains("  "), "{}: double space", d.name);
+            assert_eq!(d.description.trim(), d.description, "{}: edge space", d.name);
+        }
+    }
+
     #[test]
     fn processed_render_tool_advertised() {
         // Guards against a regression where the post-FX render tool is silently
