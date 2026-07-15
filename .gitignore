@@ -46,3 +46,14 @@ Thumbs.db
 # SWELL dialog/menu tables generated from assistant.rc by swell_resgen.php (build.rs)
 /cpp/assistant.rc_mac_dlg
 /cpp/assistant.rc_mac_menu
+
+# macOS code-signing / notarization secret material — NEVER commit these.
+# Base64 them into GitHub Actions secrets (see docs/macos-notarization.md), then
+# delete the local copies. Committing a .p12/.p8/private key = a compromised
+# signing identity (revoke + reissue).
+*.p12
+*.p8
+*.cer
+*.csr
+*.pem
+*.b64
