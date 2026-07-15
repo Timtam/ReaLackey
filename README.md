@@ -100,6 +100,11 @@ ReaLackey is designed to be driven entirely by keyboard and screen reader:
    been validated in a live host yet)*. Or build it yourself (below).
 2. Copy it into REAPER's `UserPlugins` folder. *(Find it via Options → Show
    REAPER resource path.)* The filename **must** start with `reaper_`.
+   - **macOS:** the `.dylib` is a *universal* binary (Apple Silicon + Intel), so it
+     loads whether REAPER runs natively, on an Intel Mac, or under Rosetta. But
+     because it isn't Apple-notarized, macOS quarantines it after download and
+     REAPER won't load it. Clear the quarantine flag once, in Terminal:
+     `xattr -dr com.apple.quarantine "<REAPER resource path>/UserPlugins/reaper_realackey.dylib"`
 3. Restart REAPER — ReaLackey loads silently (no console window, and no
    screen-reader chatter over REAPER's own launch feedback).
 4. **Extensions → ReaLackey → Providers** → add a provider and paste your API

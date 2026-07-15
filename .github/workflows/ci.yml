@@ -44,11 +44,21 @@ jobs:
       # SWELL headers + the resource generator live in WDL.
       - name: Fetch WDL (SWELL)
         run: git clone --depth 1 https://github.com/justinfrankel/WDL.git vendor/WDL
-      - name: Build
+      - name: Build (host arch)
         env:
           # reaper-rs uses bindgen (needs libclang); Xcode's Command Line Tools ship it.
           LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
         run: cargo build
+      # The release ships a UNIVERSAL (arm64 + x86_64) dylib so it loads whether
+      # REAPER runs native Apple Silicon, on Intel, or under Rosetta. The runner is
+      # arm64, so cross-compile the x86_64 slice here to catch breakage before a
+      # release rather than during it.
+      - name: Cross-compile x86_64 slice (universal-build check)
+        env:
+          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo build --target x86_64-apple-darwin
       # Tests are host-independent (DSP, parsing, adapters); run them here too.
       - name: Test
         env:

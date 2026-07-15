@@ -49,6 +49,11 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
+- macOS: the release `.dylib` is now a **universal binary (Apple Silicon + Intel)**,
+  ad-hoc code-signed. It previously shipped arm64-only, so it silently failed to
+  load in REAPER on Intel Macs or under Rosetta. (Quarantine is separate: the
+  binary isn't Apple-notarized, so after downloading run
+  `xattr -dr com.apple.quarantine <path-to-dylib>` once — see the README.)
 - macOS: keyboard handling in the chat window. Keys typed in the composer could be
   swallowed by REAPER — arrow keys jumping focus to the arrange, and Cmd+C/V/X not
   reaching the text field (they hit REAPER's Edit menu). When the window is in

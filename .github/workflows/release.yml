@@ -34,8 +34,8 @@ jobs:
             asset: reaper_realackey.dll
           - name: macos
             os: macos-latest
-            # cargo prefixes the cdylib with `lib`; REAPER wants reaper_*.dylib.
-            src: target/release/libreaper_realackey.dylib
+            # Built as a universal binary below; cargo prefixes the cdylib with
+            # `lib`, REAPER wants reaper_*.dylib.
             asset: reaper_realackey.dylib
     runs-on: ${{ matrix.os }}
     steps:
@@ -55,13 +55,32 @@ jobs:
       - name: Build (Windows)
         if: matrix.name == 'windows'
         run: cargo build --release
-      - name: Build (macOS)
+
+      # Universal (arm64 + x86_64) so the extension loads whether REAPER runs as
+      # native Apple Silicon, on an Intel Mac, or under Rosetta. The runner is
+      # arm64; build both slices and `lipo` them together.
+      - name: Build universal dylib (macOS)
         if: matrix.name == 'macos'
         env:
           LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
-        run: cargo build --release
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output "dist/${{ matrix.asset }}" \
+            target/aarch64-apple-darwin/release/libreaper_realackey.dylib \
+            target/x86_64-apple-darwin/release/libreaper_realackey.dylib
+          # `lipo` drops the linker's ad-hoc code signature, and arm64 refuses to
+          # load an unsigned binary — so re-sign the fat dylib ad-hoc. This is NOT
+          # notarization: users still clear the download quarantine (see README).
+          codesign --force --sign - "dist/${{ matrix.asset }}"
+          echo "== architectures ==" && lipo -info "dist/${{ matrix.asset }}"
+          echo "== signature ==" && codesign -dvv "dist/${{ matrix.asset }}" 2>&1 || true
 
-      - name: Stage asset
+      - name: Stage asset (Windows)
+        if: matrix.name == 'windows'
         shell: bash
         run: |
           mkdir -p dist
