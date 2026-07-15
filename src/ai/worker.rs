@@ -120,6 +120,57 @@ struct TurnResult {
     cancelled: bool,
 }
 
+/// How many most-recent media-bearing tool results keep their inline base64 live.
+/// Older ones are evicted to a text placeholder. Tunable via `RAAI_MEDIA_KEEP`
+/// (0 = evict all past media immediately; capped at 20).
+fn media_keep_recent() -> usize {
+    std::env::var("RAAI_MEDIA_KEEP")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(2)
+        .min(20)
+}
+
+const IMG_EVICTED: &str =
+    "[image from an earlier step, dropped to save tokens — call capture_view again if you need it]";
+const AUDIO_EVICTED: &str =
+    "[audio clip from an earlier step, dropped to save tokens — call listen_to_audio again if needed]";
+
+/// Replace inline image/audio base64 in older history messages with a short text
+/// placeholder, keeping the `keep_recent` most recent media-bearing tool results
+/// intact. Mutates in place (permanent) and is idempotent — an already-evicted
+/// block is plain text and is skipped. A media-bearing result carrying several
+/// blocks (e.g. a video clip's frames) counts as ONE and is kept or evicted whole.
+fn evict_stale_media(history: &mut [ChatMessage], keep_recent: usize) {
+    let has_media = |m: &ChatMessage| {
+        m.content.iter().any(|c| {
+            matches!(c, Content::ToolResult { content, .. }
+                if content.iter().any(|b| matches!(b, ResultBlock::Image { .. } | ResultBlock::Audio { .. })))
+        })
+    };
+    let mut seen = 0usize;
+    for msg in history.iter_mut().rev() {
+        if !has_media(msg) {
+            continue;
+        }
+        seen += 1;
+        if seen <= keep_recent {
+            continue; // keep the most recent captures live
+        }
+        for c in &mut msg.content {
+            if let Content::ToolResult { content, .. } = c {
+                for b in content.iter_mut() {
+                    match b {
+                        ResultBlock::Image { .. } => *b = ResultBlock::Text(IMG_EVICTED.into()),
+                        ResultBlock::Audio { .. } => *b = ResultBlock::Text(AUDIO_EVICTED.into()),
+                        ResultBlock::Text(_) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn handle_prompt(
     history: &mut Vec<ChatMessage>,
     ui_tx: &CbSender<UiEvent>,
@@ -196,6 +247,11 @@ async fn handle_prompt(
 
     let max_turns = config::max_turns(cfg.max_turns);
     for turn in 0..max_turns {
+        // Media (screenshots / audio / video-clip frames) is inline base64 in the
+        // history and would otherwise be re-uploaded on every later turn forever.
+        // Keep only the most recent captures live; replace older ones with a text
+        // placeholder so they stop costing tokens. Permanent + idempotent.
+        evict_stale_media(&mut *history, media_keep_recent());
         let req = ChatRequest {
             model: cfg.model.clone(),
             system: Some(config::system_prompt(
@@ -892,5 +948,73 @@ async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> To
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => ToolOutcome::error("{\"error\":\"no reply from main thread\"}"),
         Err(_) => ToolOutcome::error("{\"error\":\"the tool timed out\"}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn img_result(tag: &str) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: tag.into(),
+                content: vec![
+                    ResultBlock::Text(format!("captured {tag}")),
+                    ResultBlock::Image {
+                        media_type: "image/png".into(),
+                        data_base64: "BIGBASE64".into(),
+                    },
+                ],
+                is_error: false,
+            }],
+        }
+    }
+
+    fn image_count(m: &ChatMessage) -> usize {
+        m.content
+            .iter()
+            .flat_map(|c| match c {
+                Content::ToolResult { content, .. } => content.clone(),
+                _ => vec![],
+            })
+            .filter(|b| matches!(b, ResultBlock::Image { .. }))
+            .count()
+    }
+
+    #[test]
+    fn evict_keeps_recent_media_and_drops_older() {
+        let mut history = vec![
+            img_result("old"),                     // 0: oldest media -> evicted
+            ChatMessage::user_text("some text"),   // 1: no media
+            img_result("recent"),                  // 2: newest media -> kept
+        ];
+        evict_stale_media(&mut history, 1);
+        assert_eq!(image_count(&history[0]), 0, "old media evicted");
+        assert_eq!(image_count(&history[2]), 1, "recent media kept");
+        // The evicted slot became a text placeholder pointing at re-capture.
+        if let Content::ToolResult { content, .. } = &history[0].content[0] {
+            assert!(content.iter().any(|b| matches!(b, ResultBlock::Text(t) if t.contains("capture_view"))));
+        } else {
+            panic!("expected a tool result");
+        }
+    }
+
+    #[test]
+    fn evict_is_idempotent() {
+        let mut history = vec![img_result("a"), img_result("b")];
+        evict_stale_media(&mut history, 1);
+        let after_first = image_count(&history[0]);
+        evict_stale_media(&mut history, 1);
+        assert_eq!(image_count(&history[0]), after_first, "second pass changes nothing");
+        assert_eq!(image_count(&history[1]), 1, "most recent still live");
+    }
+
+    #[test]
+    fn evict_keep_zero_drops_all() {
+        let mut history = vec![img_result("a"), img_result("b")];
+        evict_stale_media(&mut history, 0);
+        assert_eq!(image_count(&history[0]) + image_count(&history[1]), 0);
     }
 }
