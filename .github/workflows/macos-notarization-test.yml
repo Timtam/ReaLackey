@@ -1,0 +1,43 @@
+name: macOS notarization test
+
+# Manual smoke test of the macOS signing/notarization path WITHOUT cutting a
+# release (no version bump, tag, changelog roll, or published release). Runs the
+# exact same build+sign+notarize script the Release workflow uses, then uploads
+# the signed dylib as an artifact. Use it to verify the signing secrets before a
+# release, or after rotating the certificate.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build + sign + notarize (no release)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install PHP (SWELL resgen)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+      - name: Fetch WDL (SWELL)
+        run: git clone --depth 1 https://github.com/justinfrankel/WDL.git vendor/WDL
+
+      - name: Build, sign & notarize
+        env:
+          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
+          ASSET: reaper_realackey.dylib
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_NOTARY_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_KEY_P8_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: bash .github/scripts/build-macos-universal.sh
+
+      - name: Upload the signed dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper_realackey-macos-signed
+          path: dist/reaper_realackey.dylib
+          if-no-files-found: error
