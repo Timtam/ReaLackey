@@ -153,6 +153,11 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
      consent). To look at a SPECIFIC plugin the user hasn't focused (e.g. one you \
      just added), pass its track_index and fx_index to capture_view — it opens the \
      plugin's window for you, so you don't need the user to bring it to the front. \
+     To review REAPER's VIDEO output as a moving clip — motion, cuts, transitions, \
+     on-screen text/credits timing (and audio/video sync if you can hear) — use \
+     capture_video_clip: it samples several frames across a time range (plus the \
+     clip's audio when your model supports it) under a single consent, which beats \
+     repeated single screenshots. \
      Having seen a control, PREFER to act through the parameter API — \
      set_fx_param or set_fx_param_by_steps (relative nudges like 'a bit more') — \
      because those are undoable. Only for GUI-only controls that have NO host \

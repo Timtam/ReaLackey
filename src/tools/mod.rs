@@ -64,8 +64,9 @@ pub struct ToolOutcome {
     /// JSON (or plain text) summary fed back to the model as the tool result.
     pub content: String,
     pub is_error: bool,
-    /// An optional image attached to the tool result (vision tools only).
-    pub image: Option<CapturedImage>,
+    /// Images attached to the tool result (vision tools). Usually 0 or 1; a video
+    /// clip attaches several frames, in time order.
+    pub images: Vec<CapturedImage>,
     /// An optional audio clip attached to the tool result (audio tools only).
     pub audio: Option<CapturedAudio>,
 }
@@ -76,7 +77,7 @@ impl ToolOutcome {
         Self {
             content: content.into(),
             is_error,
-            image: None,
+            images: Vec::new(),
             audio: None,
         }
     }
@@ -96,7 +97,7 @@ impl ToolOutcome {
         Self {
             content: content.into(),
             is_error: false,
-            image: Some(image),
+            images: vec![image],
             audio: None,
         }
     }
@@ -106,7 +107,7 @@ impl ToolOutcome {
         Self {
             content: content.into(),
             is_error: false,
-            image: None,
+            images: Vec::new(),
             audio: Some(audio),
         }
     }
@@ -115,7 +116,10 @@ impl ToolOutcome {
 /// A tool that only makes sense when the model can see images (Phase 7). These
 /// are withheld from models without vision (`supports_images == false`).
 fn is_vision_tool(name: &str) -> bool {
-    name == "capture_view" || is_pixel_tool(name) || name == "disable_pixel_control"
+    name == "capture_view"
+        || name == "capture_video_clip"
+        || is_pixel_tool(name)
+        || name == "disable_pixel_control"
 }
 
 /// A tool that only makes sense when the model can hear audio. Withheld from
@@ -1223,6 +1227,29 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                 json!([]),
             ),
         },
+        ToolDef {
+            name: "capture_video_clip".into(),
+            description: "See REAPER's video output AS A SHORT CLIP, not a single still: captures \
+                          several evenly-spaced frames of the Video window across a time range (by \
+                          stepping the edit cursor, with playback stopped) and returns them as images \
+                          in time order, plus the clip's audio for audio-capable models. Use this \
+                          over repeated capture_view('video') to judge motion, cuts, transitions, \
+                          text/credits timing, or audio/video sync. One consent covers the whole clip. \
+                          The Video window must be open and floating (View -> Video). Range: pass \
+                          start + length (seconds), or leave both out to use the current time \
+                          selection. frames defaults to 6 (2-12). More frames = more detail but more \
+                          cost. Seeing is not acting."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "start": { "type": "number", "description": "clip start in seconds (omit to use the time selection)" },
+                    "length": { "type": "number", "description": "clip length in seconds (omit to use the time selection)" },
+                    "frames": { "type": "integer", "description": "how many frames to sample across the range (default 6, clamped 2-12)" },
+                    "include_audio": { "type": "boolean", "description": "also render+attach the clip's audio (default true; ignored for models without audio input)" }
+                }),
+                json!([]),
+            ),
+        },
         // --- Tier B: operate GUI-only plugin controls via synthesized input ---
         ToolDef {
             name: "plugin_click".into(),
@@ -2018,6 +2045,48 @@ fn capture_view(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome 
     }
 }
 
+/// Internal op backing `capture_video_clip` (not advertised to the model). Resolve
+/// the capture range and the current edit-cursor position (so it can be restored),
+/// and fail fast if the Video window isn't open/floating. Range = explicit
+/// `start`+`length`, else the current time selection.
+fn video_begin(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
+    if crate::ui::ffi::find_window_by_title("Video Window").is_none() {
+        return Err("The REAPER Video window isn't open (or is docked). Open it via View -> Video \
+                    and make it a floating window, then try again."
+            .to_string());
+    }
+    let low = reaper.low();
+    // The Video window follows the PLAY cursor while the transport runs, so seeking
+    // the EDIT cursor per frame would leave every frame identical. Require a stopped
+    // transport (bit 0 = playing, bit 2 = recording) and let the user/model stop it.
+    let play_state = low.GetPlayState();
+    if play_state & 1 != 0 || play_state & 4 != 0 {
+        return Err("Playback is running. Stop the transport first — while playing, REAPER's Video \
+                    window follows the play cursor, so the captured frames wouldn't match the \
+                    requested range."
+            .to_string());
+    }
+    let orig = low.GetCursorPosition();
+    let (t0, t1) = match (
+        input.get("start").and_then(|v| v.as_f64()),
+        input.get("length").and_then(|v| v.as_f64()),
+    ) {
+        (Some(s), Some(l)) if l > 0.0 => (s.max(0.0), (s + l).max(0.0)),
+        _ => {
+            let (mut a, mut b) = (0.0f64, 0.0f64);
+            unsafe { low.GetSet_LoopTimeRange(false, false, &mut a, &mut b, false) };
+            if b > a {
+                (a, b)
+            } else {
+                return Err("No time range given and no time selection is set. Pass start+length, \
+                            or set a time selection first."
+                    .to_string());
+            }
+        }
+    };
+    Ok(json!({ "t0": t0, "t1": t1, "orig_cursor": orig }))
+}
+
 /// Open (float) a specific track FX's window and return its `HWND` as an `isize`,
 /// so a plugin the user hasn't focused can still be screenshotted / driven.
 fn open_track_fx_window(
@@ -2423,6 +2492,10 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             opt_bool(input, "seek_playback").unwrap_or(false),
             opt_bool(input, "move_view").unwrap_or(false),
         ),
+        // Internal (not model-advertised) op for capture_video_clip: resolve the
+        // capture range + save the current cursor, failing fast if the Video window
+        // isn't available. Orchestrated from the worker (see run_tool).
+        "__video_begin" => video_begin(reaper, input),
         "get_time_selection" => Ok(get_time_selection(reaper)),
         "set_time_selection" => set_time_selection(
             reaper,
@@ -2796,6 +2869,15 @@ pub fn consent_prompt(name: &str, input: &Value) -> Option<String> {
             };
             Some(format!("The assistant wants to render and listen to {what}"))
         }
+        // A video clip = several frames of the Video window + the span's audio, all
+        // sent to the cloud. One consent covers the whole clip (the internal frame
+        // captures / audio render are orchestrated in the worker and are not each
+        // re-prompted).
+        "capture_video_clip" => Some(
+            "The assistant wants to capture a short video clip (several frames of the REAPER Video \
+             window, plus the clip's audio) and send it to the AI provider"
+                .to_string(),
+        ),
         _ => None,
     }
 }

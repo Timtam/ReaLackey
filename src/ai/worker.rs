@@ -317,7 +317,16 @@ async fn handle_prompt(
                     name: name.clone(),
                     input: input_pretty,
                 });
-                let outcome = run_tool(ui_tx, op_tx, &name, input, mutations_ok).await;
+                let outcome = run_tool(
+                    ui_tx,
+                    op_tx,
+                    task_rx,
+                    &name,
+                    input,
+                    mutations_ok,
+                    caps.supports_audio,
+                )
+                .await;
                 let _ = ui_tx.send(UiEvent::ToolFinished {
                     is_error: outcome.is_error,
                     summary: truncate_summary(&outcome.content),
@@ -325,17 +334,17 @@ async fn handle_prompt(
                 let ToolOutcome {
                     content,
                     is_error,
-                    image,
+                    images,
                     audio,
                 } = outcome;
-                let result = if image.is_none() && audio.is_none() {
+                let result = if images.is_empty() && audio.is_none() {
                     // Common case: a text-only result (byte-identical wire form).
                     Content::tool_result_text(id, content, is_error)
                 } else {
-                    // Media result: text + an image the model can see and/or an
-                    // audio clip it can hear.
+                    // Media result: text + one or more images the model can see
+                    // (a video clip is several frames) and/or an audio clip.
                     let mut blocks = vec![ResultBlock::Text(content)];
-                    if let Some(img) = image {
+                    for img in images {
                         blocks.push(ResultBlock::Image {
                             media_type: img.media_type,
                             data_base64: img.data_base64,
@@ -488,10 +497,19 @@ async fn run_turn(
 async fn run_tool(
     ui_tx: &CbSender<UiEvent>,
     op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
     name: &str,
     input: Value,
     mutations_ok: bool,
+    supports_audio: bool,
 ) -> ToolOutcome {
+    // A video clip is a multi-step capture (seek -> settle -> grab, per frame) that
+    // must yield the main thread between frames so the Video window re-renders — a
+    // single main-thread op can't. It's orchestrated here in the worker instead.
+    if name == "capture_video_clip" {
+        return capture_video_clip(ui_tx, op_tx, task_rx, input, supports_audio).await;
+    }
+
     // Tier-B pixel input: arm-per-task consent. The user approves once, then the
     // assistant may click/drag in plugin windows (announced each time) until it
     // is disarmed. GUI clicks bypass REAPER's undo, so this is a distinct gate,
@@ -555,6 +573,188 @@ async fn run_tool(
         );
     }
     exec_tool(op_tx, name.to_string(), input).await
+}
+
+/// Orchestrate a `capture_video_clip`: one consent, then per frame seek the edit
+/// cursor and — after a short `sleep` that frees REAPER's main thread so the Video
+/// window re-renders — capture that frame; finally render the span's audio and
+/// restore the cursor. Runs in the worker (async): the between-frame sleeps are the
+/// whole point, since a single main-thread op couldn't yield for the re-render. The
+/// internal sub-ops (`__video_begin`, `set_edit_cursor`, `capture_view`,
+/// `listen_to_audio`) are dispatched directly via `exec_tool`, which bypasses their
+/// own per-call consent — the one consent above already covers the whole clip.
+async fn capture_video_clip(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    input: Value,
+    supports_audio: bool,
+) -> ToolOutcome {
+    // One consent for the whole clip (frames + audio are sent to the cloud).
+    let consent = tools::consent_prompt("capture_video_clip", &input)
+        .unwrap_or_else(|| "The assistant wants to capture a short video clip".to_string());
+    let _ = ui_tx.send(UiEvent::Notice(format!("{consent}?")));
+    let _ = ui_tx.send(UiEvent::Announce(format!("{consent}. Allow?")));
+    if !confirm(
+        op_tx,
+        format!("{consent}?\n\nThis will be sent to the cloud AI provider."),
+    )
+    .await
+    {
+        let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
+        return ToolOutcome::ok(json!({ "declined": true, "reason": "user declined" }).to_string());
+    }
+
+    let frames = input
+        .get("frames")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(6)
+        .clamp(2, 12) as usize;
+    let want_audio = supports_audio
+        && input
+            .get("include_audio")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+    // Settle after each seek before capturing, so the Video window has re-rendered
+    // to the new cursor. Tunable on-device (a heavy video-FX chain may need longer).
+    let settle_ms = std::env::var("RAAI_VIDEO_SETTLE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(250)
+        .clamp(0, 5000);
+
+    // Resolve the range + original cursor and validate the Video window (one op).
+    let begin = exec_tool(op_tx, "__video_begin".to_string(), input.clone()).await;
+    if begin.is_error {
+        return begin; // e.g. Video window closed, or no range/time-selection
+    }
+    let b: Value = serde_json::from_str(&begin.content).unwrap_or_default();
+    let t0 = b["t0"].as_f64().unwrap_or(0.0);
+    let t1 = b["t1"].as_f64().unwrap_or(t0);
+    let orig = b["orig_cursor"].as_f64().unwrap_or(t0);
+    let span = (t1 - t0).max(0.0);
+    let times: Vec<f64> = if frames <= 1 || span <= 0.0 {
+        vec![t0]
+    } else {
+        (0..frames)
+            .map(|k| t0 + span * (k as f64) / ((frames - 1) as f64))
+            .collect()
+    };
+
+    // Restore the edit cursor to where the user had it (best-effort, on every exit).
+    let restore_cursor =
+        json!({ "position": orig, "seek_playback": false, "move_view": false });
+
+    // Per frame: seek -> settle (main thread free, video re-renders) -> capture.
+    // Each captured frame is paired with its ACTUAL timestamp, so a frame that
+    // fails to capture drops its time too and never mis-labels later frames.
+    let mut frames_out: Vec<(f64, tools::CapturedImage)> = Vec::new();
+    for &tk in &times {
+        // Honor a Stop pressed mid-clip: the tool loop doesn't otherwise drain
+        // task_rx, so a Cancel would sit unprocessed until the whole clip finished.
+        match task_rx.try_recv() {
+            Ok(MainTask::Cancel) => {
+                let _ =
+                    exec_tool(op_tx, "set_edit_cursor".to_string(), restore_cursor.clone()).await;
+                let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
+                return ToolOutcome::ok(
+                    json!({ "cancelled": true, "captured_frames": frames_out.len() }).to_string(),
+                );
+            }
+            Ok(MainTask::Prompt(_)) => {
+                let _ = ui_tx.send(UiEvent::Status(
+                    "Please wait until the current answer is finished…".into(),
+                ));
+            }
+            _ => {}
+        }
+        let _ = exec_tool(
+            op_tx,
+            "set_edit_cursor".to_string(),
+            json!({ "position": tk, "seek_playback": false, "move_view": false }),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
+        let frame = exec_tool(op_tx, "capture_view".to_string(), json!({ "target": "video" })).await;
+        if let Some(img) = frame.images.into_iter().next() {
+            frames_out.push((tk, img));
+        }
+    }
+
+    // The clip's audio (master mix over the span), for audio-capable models only.
+    // listen_to_audio caps the render (LISTEN_MAX_SECONDS), so surface whether the
+    // audio actually covers the whole clip — otherwise a >cap span invites bogus
+    // A/V-sync reasoning against audio that stops early.
+    let (audio, audio_seconds, audio_truncated) = if want_audio && span > 0.0 {
+        let a = exec_tool(
+            op_tx,
+            "listen_to_audio".to_string(),
+            json!({ "target": "master", "start": t0, "length": span }),
+        )
+        .await;
+        let meta: Value = serde_json::from_str(&a.content).unwrap_or_default();
+        let secs = meta.get("rendered_seconds").and_then(|v| v.as_f64());
+        let trunc = meta.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+        (a.audio, secs, trunc)
+    } else {
+        (None, None, false)
+    };
+
+    let _ = exec_tool(op_tx, "set_edit_cursor".to_string(), restore_cursor).await;
+
+    if frames_out.is_empty() {
+        return ToolOutcome::error(
+            json!({
+                "error": "captured no video frames — is the Video window open and floating (View -> Video)?"
+            })
+            .to_string(),
+        );
+    }
+    let r2 = |x: f64| (x * 100.0).round() / 100.0;
+    let dropped = times.len() - frames_out.len();
+    // frame_times is 1:1 with the attached images (dropped frames omitted from both).
+    let frame_times: Vec<f64> = frames_out.iter().map(|(t, _)| r2(*t)).collect();
+    let images: Vec<tools::CapturedImage> = frames_out.into_iter().map(|(_, img)| img).collect();
+
+    let mut note = String::from(
+        "A sequence of video frames is attached as images, in time order; the i-th image \
+         corresponds to frame_times[i]. ",
+    );
+    if dropped > 0 {
+        note.push_str(
+            "Some requested frames could not be captured and were omitted from BOTH the images \
+             and frame_times (so they stay aligned). ",
+        );
+    }
+    note.push_str(match (audio.is_some(), audio_truncated) {
+        (true, false) => "The clip's audio is attached; judge motion, cuts, transitions and \
+                          audio/video sync.",
+        (true, true) => "The clip's audio is attached but covers only the first part of the range \
+                         (see audio_seconds); judge motion, cuts and transitions, and limit \
+                         audio/video-sync judgments to that window.",
+        (false, _) => "No audio is attached; judge motion, cuts and transitions.",
+    });
+
+    let summary = json!({
+        "captured_frames": images.len(),
+        "requested_frames": frames,
+        "dropped_frames": dropped,
+        "start": r2(t0),
+        "end": r2(t1),
+        "span_seconds": r2(span),
+        "frame_times": frame_times,
+        "audio_attached": audio.is_some(),
+        "audio_seconds": audio_seconds,
+        "audio_truncated": audio_truncated,
+        "note": note,
+    })
+    .to_string();
+    ToolOutcome {
+        content: summary,
+        is_error: false,
+        images,
+        audio,
+    }
 }
 
 /// Ask the user ONCE per request whether the assistant may apply changes. Lists

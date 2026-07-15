@@ -12,6 +12,14 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Video-clip vision (`capture_video_clip`): instead of a single screenshot of
+  REAPER's Video window, the assistant can grab **several frames across a time
+  range** (stepping the edit cursor, playback stopped) and — for audio-capable
+  models — the **clip's audio**, so it can reason about motion, cuts, transitions,
+  on-screen text timing, and A/V sync. One consent covers the whole clip. Range
+  defaults to the time selection; frame count defaults to 6 (2–12). The
+  seek-to-frame settle delay is tunable via `RAAI_VIDEO_SETTLE_MS` (default 250 ms)
+  if a heavy video-FX chain needs longer to re-render.
 - Per-provider **"Supports audio (listening)"** checkbox in the provider settings
   dialog, next to "Supports images". Audio input was previously auto-detected from
   the model id only, so a locally-run multimodal model (e.g. Google **Gemma**
