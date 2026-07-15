@@ -83,6 +83,11 @@ async fn run(
     // Per-provider "which failover key are we on" cursor, remembered across
     // messages this session so an exhausted key isn't re-tried first every time.
     let mut key_cursor: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Progressive tool disclosure (opt-in): the tools loaded on demand this
+    // SESSION. Persisted across messages so a category loaded for one message
+    // stays available for the next — otherwise every message would re-pay a
+    // load_tools hop for tools it already discovered.
+    let mut active_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     while let Some(task) = task_rx.recv().await {
         match task {
@@ -94,6 +99,7 @@ async fn run(
                     &mut task_rx,
                     &op_tx,
                     &mut key_cursor,
+                    &mut active_tools,
                     prompt,
                 )
                 .await;
@@ -171,12 +177,64 @@ fn evict_stale_media(history: &mut [ChatMessage], keep_recent: usize) {
     }
 }
 
+/// Handle the `load_tools` meta-tool (progressive disclosure): activate the tools
+/// matching the query for the rest of the SESSION and report them to the model.
+/// Pure worker-side state — no REAPER access and no consent (it only widens the
+/// offered set; each tool keeps its own gates when actually called).
+fn handle_load_tools(
+    input: &Value,
+    active: &mut std::collections::HashSet<String>,
+    supports_images: bool,
+    supports_audio: bool,
+) -> ToolOutcome {
+    let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if query.is_empty() {
+        return ToolOutcome::error(
+            json!({ "error": "provide a 'query' describing the capability you need" }).to_string(),
+        );
+    }
+    let matches = tools::find_matching_tools(query, supports_images, supports_audio);
+    if matches.is_empty() {
+        return ToolOutcome::ok(
+            json!({
+                "loaded": [],
+                "note": format!("No tools matched \"{query}\". Try a broader capability query, or use run_action for a REAPER action."),
+            })
+            .to_string(),
+        );
+    }
+    let loaded: Vec<Value> = matches
+        .iter()
+        .map(|d| {
+            active.insert(d.name.clone());
+            json!({ "name": d.name, "summary": first_sentence(&d.description) })
+        })
+        .collect();
+    ToolOutcome::ok(
+        json!({
+            "loaded": loaded,
+            "note": "These tools are now available — call them on your NEXT turn (they were not in this turn's tool list).",
+        })
+        .to_string(),
+    )
+}
+
+/// First sentence (or ~160 bytes) of a description, for the load_tools listing.
+fn first_sentence(desc: &str) -> String {
+    let mut end = desc.find(". ").map(|i| i + 1).unwrap_or(desc.len()).min(160);
+    while end > 0 && !desc.is_char_boundary(end) {
+        end -= 1;
+    }
+    desc[..end].trim().to_string()
+}
+
 async fn handle_prompt(
     history: &mut Vec<ChatMessage>,
     ui_tx: &CbSender<UiEvent>,
     task_rx: &mut UnboundedReceiver<MainTask>,
     op_tx: &CbSender<ReaperOp>,
     key_cursor: &mut std::collections::HashMap<String, usize>,
+    active_tools: &mut std::collections::HashSet<String>,
     prompt: String,
 ) {
     // Resolve the active (default) provider account for this prompt, so switching
@@ -234,9 +292,19 @@ async fn handle_prompt(
     let _generating = GeneratingGuard;
     let _ = ui_tx.send(UiEvent::Announce("Working on it…".into()));
 
+    // Progressive tool disclosure (opt-in): pre-load likely tools from the prompt
+    // text with NO round-trip, so common tasks don't spend a load_tools hop.
+    let progressive = tools::progressive_enabled();
+    if progressive {
+        for name in tools::preseed_from_prompt(&prompt, caps.supports_images, caps.supports_audio) {
+            active_tools.insert(name);
+        }
+    }
     history.push(ChatMessage::user_text(prompt));
 
-    let tools = tools::definitions(caps.supports_images, caps.supports_audio);
+    // Non-progressive: the full tool set (identical every turn). Progressive: the
+    // tools array is rebuilt per turn from CORE + the session's loaded set.
+    let all_tools = tools::definitions(caps.supports_images, caps.supports_audio);
     let cancel = CancellationToken::new();
     let mut final_answer = String::new();
     let mut truncated = false;
@@ -252,6 +320,13 @@ async fn handle_prompt(
         // Keep only the most recent captures live; replace older ones with a text
         // placeholder so they stop costing tokens. Permanent + idempotent.
         evict_stale_media(&mut *history, media_keep_recent());
+        // In progressive mode the offered set can grow across turns (after a
+        // load_tools call), so rebuild it each turn from the session's active set.
+        let turn_tools = if progressive {
+            tools::core_and_active(active_tools, caps.supports_images, caps.supports_audio)
+        } else {
+            all_tools.clone()
+        };
         let req = ChatRequest {
             model: cfg.model.clone(),
             system: Some(config::system_prompt(
@@ -261,7 +336,7 @@ async fn handle_prompt(
             )),
             max_tokens: cfg.max_tokens,
             messages: history.clone(),
-            tools: tools.clone(),
+            tools: turn_tools,
         };
 
         // Per-turn attempt loop: on a per-key limit (rate/quota/auth), rotate to
@@ -373,16 +448,23 @@ async fn handle_prompt(
                     name: name.clone(),
                     input: input_pretty,
                 });
-                let outcome = run_tool(
-                    ui_tx,
-                    op_tx,
-                    task_rx,
-                    &name,
-                    input,
-                    mutations_ok,
-                    caps.supports_audio,
-                )
-                .await;
+                let outcome = if progressive && name == "load_tools" {
+                    // Worker-side: activate the matching tools for the rest of the
+                    // session (no REAPER op, no consent — it only widens the offered
+                    // set). They become callable on the NEXT request.
+                    handle_load_tools(&input, active_tools, caps.supports_images, caps.supports_audio)
+                } else {
+                    run_tool(
+                        ui_tx,
+                        op_tx,
+                        task_rx,
+                        &name,
+                        input,
+                        mutations_ok,
+                        caps.supports_audio,
+                    )
+                    .await
+                };
                 let _ = ui_tx.send(UiEvent::ToolFinished {
                     is_error: outcome.is_error,
                     summary: truncate_summary(&outcome.content),

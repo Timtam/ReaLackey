@@ -1755,6 +1755,198 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     defs
 }
 
+// ---- progressive tool disclosure (opt-in) -----------------------------------
+// The full 114-tool array is ~14k tokens re-sent every turn. When enabled, only a
+// CORE set + a `load_tools(query)` meta-tool are offered; the model loads the rest
+// by capability on demand, and the worker keeps the loaded set for the session.
+// Opt-in (default OFF) so it never breaks prompt caching (Tier ③) or the common
+// case: enabling it changes the tools prefix between turns, which is fine on a
+// non-caching free tier but would bust an automatic/Anthropic cache.
+
+/// Always-on tools: orientation reads + universal actions + the loader. Fat enough
+/// that inspecting the project and running any action need zero `load_tools` calls.
+const CORE_TOOLS: &[&str] = &[
+    "get_project_summary",
+    "get_tracks",
+    "get_selected_items",
+    "get_track_fx",
+    "get_fx_params",
+    "get_focused_fx",
+    "get_transport",
+    "get_time_selection",
+    "get_project_memory",
+    "get_item_properties",
+    "get_track_properties",
+    "undo",
+    "redo",
+    "run_action",
+    "search_actions",
+];
+
+/// Max tools one `load_tools` call activates (guards a too-broad query).
+const MAX_LOAD: usize = 15;
+
+/// Whether progressive disclosure is enabled (env opt-in, default OFF).
+pub fn progressive_enabled() -> bool {
+    matches!(
+        std::env::var("RAAI_PROGRESSIVE_TOOLS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("on" | "1" | "true" | "yes")
+    )
+}
+
+pub fn is_core_tool(name: &str) -> bool {
+    CORE_TOOLS.contains(&name)
+}
+
+/// The `load_tools` meta-tool definition (always offered in progressive mode).
+fn load_tools_def() -> ToolDef {
+    ToolDef {
+        name: "load_tools".into(),
+        description: "Only a CORE set of tools is loaded by default (to save tokens). Call this to \
+                      load MORE tools by capability, then call them on your NEXT turn (they aren't \
+                      available in the same turn you load them). Pass a short query for what you need \
+                      — e.g. 'midi notes', 'fx parameter', 'fx preset', 'automation envelope', \
+                      'markers and regions', 'tempo', 'render or measure loudness', 'listen to \
+                      audio', 'item or take properties', 'track sends/routing', 'stretch markers', \
+                      'video', 'track notes', 'group tracks'. Returns the tools it loaded (name + \
+                      summary). Call again for other capabilities."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": { "query": { "type": "string", "description": "what you need to do" } },
+            "required": ["query"]
+        }),
+    }
+}
+
+/// The tools offered in progressive mode: CORE + everything the session has loaded
+/// (`active`) + the loader. Capability gating (vision/audio) still applies via
+/// [`definitions`].
+pub fn core_and_active(
+    active: &std::collections::HashSet<String>,
+    supports_images: bool,
+    supports_audio: bool,
+) -> Vec<ToolDef> {
+    let mut defs = definitions(supports_images, supports_audio);
+    defs.retain(|d| is_core_tool(&d.name) || active.contains(&d.name));
+    defs.push(load_tools_def());
+    defs
+}
+
+/// Tools whose name/description match `query`, best first, excluding CORE and the
+/// loader — what `load_tools` activates. Capped at [`MAX_LOAD`].
+pub fn find_matching_tools(query: &str, supports_images: bool, supports_audio: bool) -> Vec<ToolDef> {
+    let mut words = tokenize(query);
+    words.sort();
+    words.dedup();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, ToolDef)> = definitions(supports_images, supports_audio)
+        .into_iter()
+        .filter(|d| !is_core_tool(&d.name) && d.name != "load_tools")
+        .filter_map(|d| {
+            let s = score_tool(&d, &words);
+            (s > 0).then_some((s, d))
+        })
+        .collect();
+    // Highest score first; stable tie-break by name.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    scored.truncate(MAX_LOAD);
+    scored.into_iter().map(|(_, d)| d).collect()
+}
+
+/// Cheap, no-round-trip pre-load: map distinctive words in the user's prompt to
+/// capability queries and activate their tools before turn 1, so common tasks
+/// don't spend a `load_tools` hop. A miss just means the model calls `load_tools`
+/// itself — pre-seeding only lowers the EXPECTED number of hops.
+pub fn preseed_from_prompt(
+    prompt: &str,
+    supports_images: bool,
+    supports_audio: bool,
+) -> std::collections::HashSet<String> {
+    const PRESEED: &[(&str, &str)] = &[
+        ("midi", "midi note"),
+        ("note", "midi note"),
+        ("chord", "midi note"),
+        ("melod", "midi note"),
+        ("envelop", "automation envelope point"),
+        ("automat", "automation envelope point"),
+        ("marker", "marker region"),
+        ("region", "marker region"),
+        ("tempo", "tempo"),
+        (" bpm", "tempo"),
+        ("render", "render"),
+        ("loud", "measure loudness"),
+        ("lufs", "measure loudness"),
+        ("analy", "analyze audio"),
+        ("listen", "listen audio"),
+        ("send", "send receive routing"),
+        ("receiv", "send receive routing"),
+        ("sidechain", "send receive routing"),
+        ("stretch", "stretch marker"),
+        ("video", "video"),
+        ("fade", "item property fade"),
+        (" fx", "fx parameter preset"),
+        ("plugin", "fx parameter preset"),
+        (" eq", "fx parameter"),
+        ("reverb", "fx parameter"),
+        ("compress", "fx parameter"),
+        ("preset", "fx preset"),
+        ("group", "group track item"),
+        ("ripple", "ripple"),
+        ("metronome", "global toggle metronome"),
+        ("notes", "project track notes"),
+        ("duplicate", "duplicate track"),
+        (" take", "take property"), // space-prefixed so it doesn't fire on "mistake"
+        // Common mixing + transport intents — frequent enough to pre-load rather
+        // than spend a load_tools hop on a low-RPM free tier.
+        ("mute", "track property mute solo volume pan"),
+        ("solo", "track property mute solo volume pan"),
+        ("volume", "track property mute solo volume pan"),
+        ("pan ", "track property mute solo volume pan"),
+        ("play", "transport play stop record"),
+        ("record", "transport play stop record"),
+        ("pause", "transport play stop record"),
+    ];
+    let p = format!(" {} ", prompt.to_lowercase());
+    let mut out = std::collections::HashSet::new();
+    for (kw, query) in PRESEED {
+        if p.contains(kw) {
+            for d in find_matching_tools(query, supports_images, supports_audio) {
+                out.insert(d.name);
+            }
+        }
+    }
+    out
+}
+
+/// Split a query into distinctive lowercase words (drops stopwords + structural
+/// tokens like get/set that would over-match every reader/setter).
+fn tokenize(s: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "the", "a", "an", "to", "of", "and", "or", "for", "with", "get", "set", "tool", "tools",
+        "load", "find", "need", "want", "please", "that", "this", "it", "in", "on", "my", "me",
+        "is", "are", "how", "do", "can", "you", "use", "using", "read", "add", "make", "change",
+    ];
+    s.to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| w.len() >= 2 && !STOP.contains(w))
+        .map(str::to_string)
+        .collect()
+}
+
+/// How many distinct query words appear in the tool's name + description.
+fn score_tool(d: &ToolDef, words: &[String]) -> usize {
+    let hay = format!("{} {}", d.name, d.description).to_lowercase();
+    words.iter().filter(|w| hay.contains(w.as_str())).count()
+}
+
 #[cfg(test)]
 mod definition_tests {
     #[test]
@@ -1772,6 +1964,53 @@ mod definition_tests {
             assert!(!d.description.contains("  "), "{}: double space", d.name);
             assert_eq!(d.description.trim(), d.description, "{}: edge space", d.name);
         }
+    }
+
+    #[test]
+    fn every_core_tool_exists() {
+        // Drift guard: a CORE tool name that isn't in definitions() would silently
+        // vanish from the progressive-mode offering.
+        let all: std::collections::HashSet<String> =
+            super::definitions(true, true).into_iter().map(|d| d.name).collect();
+        for name in super::CORE_TOOLS {
+            assert!(all.contains(*name), "CORE tool '{name}' is not in definitions()");
+        }
+    }
+
+    #[test]
+    fn progressive_offers_core_plus_active_plus_loader() {
+        let mut active = std::collections::HashSet::new();
+        active.insert("insert_midi_notes".to_string());
+        let defs = super::core_and_active(&active, true, true);
+        let names: std::collections::HashSet<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains("get_tracks"), "core present");
+        assert!(names.contains("insert_midi_notes"), "active present");
+        assert!(names.contains("load_tools"), "loader present");
+        assert!(!names.contains("add_marker"), "unloaded tool absent");
+        assert!(defs.len() < 30, "offered set stays small, got {}", defs.len());
+    }
+
+    #[test]
+    fn find_matching_tools_finds_midi_and_excludes_core() {
+        let m = super::find_matching_tools("midi note", true, true);
+        let names: Vec<&str> = m.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"insert_midi_notes"), "found midi tools: {names:?}");
+        assert!(names.contains(&"delete_midi_notes"));
+        assert!(
+            !names.iter().any(|&n| super::is_core_tool(n) || n == "load_tools"),
+            "never returns a core tool or the loader"
+        );
+        assert!(super::find_matching_tools("", true, true).is_empty(), "empty query -> nothing");
+        assert!(m.len() <= super::MAX_LOAD, "capped");
+    }
+
+    #[test]
+    fn preseed_activates_relevant_tools_only_on_keywords() {
+        let a = super::preseed_from_prompt("add some MIDI notes to the take", true, true);
+        assert!(a.contains("insert_midi_notes"), "preseed midi: {a:?}");
+        // No capability keyword -> pre-load nothing (the fat core covers it).
+        let none = super::preseed_from_prompt("hello, what can you do", true, true);
+        assert!(none.is_empty(), "no keyword -> no preseed: {none:?}");
     }
 
     #[test]

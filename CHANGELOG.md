@@ -12,6 +12,20 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Lower per-request token usage (helps free-tier keys, which meter tokens/minute
+  and re-charge the whole tool list + prompt every agentic turn):
+  - **Trimmed** the tool descriptions and system prompt (deduped boilerplate now
+    stated once) — ~12% off the static overhead, no behaviour change.
+  - **Media eviction**: past screenshots/audio/video-clip frames were re-uploaded
+    every later turn; now only the most recent captures stay live (older ones
+    become a placeholder). Tunable via `RAAI_MEDIA_KEEP` (default 2).
+  - **Prompt caching** on the Anthropic path (`cache_control` on the tools+system
+    prefix): repeated turns re-read it as a rate-limit-free cache read.
+    `RAAI_PROMPT_CACHE=off` to disable.
+  - **Progressive tool disclosure** (opt-in `RAAI_PROGRESSIVE_TOOLS=on`): only a
+    core set + a `load_tools(query)` loader are sent; the model pulls in the rest
+    by capability on demand (session-persisted, with keyword pre-loading). Cuts the
+    tool payload ~70–90% for the turn — aimed at free tiers like Gemini.
 - Video-clip vision (`capture_video_clip`): instead of a single screenshot of
   REAPER's Video window, the assistant can grab **several frames across a time
   range** (stepping the edit cursor, playback stopped) and — for audio-capable
