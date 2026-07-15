@@ -12,6 +12,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Per-provider **"Supports audio (listening)"** checkbox in the provider settings
+  dialog, next to "Supports images". Audio input was previously auto-detected from
+  the model id only, so a locally-run multimodal model (e.g. Google **Gemma**
+  3n/4 via Ollama or LM Studio) had no way to enable listening; now you can toggle
+  it explicitly. Gemma is also recognized as vision-capable by default. (Whether a
+  given local server accepts audio input is up to the server/model.)
 - Prompt presets: save reusable prompts and drop them into the chat composer
   instead of retyping. Manage them (add / edit / delete) from **Extensions →
   ReaLackey → "Prompt presets…"**; in the chat window the **Presets** button (or

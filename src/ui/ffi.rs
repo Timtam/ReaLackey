@@ -71,6 +71,7 @@ pub const PE_BASEURL_LBL: c_int = 1023;
 pub const PE_MODEL: c_int = 1024;
 pub const PE_MAXTOK: c_int = 1026;
 pub const PE_VISION: c_int = 1027;
+pub const PE_AUDIO: c_int = 1036;
 pub const PE_KEY: c_int = 1028;
 pub const PE_KEYHINT: c_int = 1029;
 pub const PE_MAXTURNS: c_int = 1030;

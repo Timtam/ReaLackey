@@ -39,6 +39,7 @@
 #define ID_PE_KEYDEL         1033   // remove the selected key
 #define ID_PE_KEYUP          1034   // move the selected key up (higher priority)
 #define ID_PE_KEYDOWN        1035   // move the selected key down
+#define ID_PE_AUDIO          1036   // "Supports audio (listening)" checkbox
 
 // Prompt presets: reusable prompt bodies inserted into the chat composer.
 // List dialog (add / edit / delete; no reorder).

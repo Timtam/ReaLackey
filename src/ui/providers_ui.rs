@@ -196,6 +196,9 @@ struct ProvSession {
     max_tokens: u32,
     max_turns: u32,
     vision: bool,
+    /// Whether the account's model accepts audio input ("Supports audio" checkbox).
+    /// Seeded from the id heuristic (see add/fetch); user-overridable.
+    audio: bool,
     /// The working list of API keys, in priority order (top tried first). Edited
     /// live via the Add / Delete / Move up / Move down buttons; saved on OK.
     keys: Vec<String>,
@@ -237,6 +240,7 @@ fn add_provider() -> bool {
         max_tokens: preset.max_tokens,
         max_turns: 25,
         vision: preset.vision,
+        audio: infer_audio(preset.model),
         keys: Vec::new(),
         keys_loaded: true, // a brand-new account genuinely has no stored keys yet
         keys_dirty: false,
@@ -271,6 +275,7 @@ fn edit_provider(index: i32) -> bool {
         max_tokens: cfg.max_tokens,
         max_turns: cfg.max_turns,
         vision: cfg.supports_images,
+        audio: cfg.supports_audio,
         keys,
         keys_loaded,
         keys_dirty: false,
@@ -356,15 +361,17 @@ pub fn edit_dialog_init() {
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTOK, &sess.max_tokens.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTURNS, &sess.max_turns.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_KEY, "");
-        // Anthropic uses a fixed endpoint and its models are always vision-capable,
-        // so hide the base-URL row and the vision checkbox for it.
+        // Anthropic uses a fixed endpoint, is always vision-capable, and doesn't
+        // take audio input — so hide the base-URL row and both capability checkboxes.
         if sess.kind == AdapterKind::Anthropic {
             ui::ffi::pe_show(ui::ffi::PE_BASEURL, false);
             ui::ffi::pe_show(ui::ffi::PE_BASEURL_LBL, false);
             ui::ffi::pe_show(ui::ffi::PE_VISION, false);
+            ui::ffi::pe_show(ui::ffi::PE_AUDIO, false);
         } else {
             ui::ffi::pe_set_text(ui::ffi::PE_BASEURL, &sess.base_url);
             ui::ffi::pe_set_check(ui::ffi::PE_VISION, sess.vision);
+            ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, sess.audio);
         }
         // Fill the key list (masked) + its summary hint.
         repopulate_keys(&sess.keys, None, sess.keys_loaded, sess.env_active);
@@ -563,11 +570,14 @@ pub fn edit_dialog_fetch() {
         return; // cancelled — user can still type a model by hand
     }
     let mi = &models[choice - 1];
-    // Trust the provider's reported vision flag; infer from the id otherwise.
+    // Trust the provider's reported vision flag; infer from the id otherwise. Audio
+    // isn't reported by the model list, so seed it from the id (the checkbox overrides).
     let vision = mi.vision.unwrap_or_else(|| infer_vision(&mi.id));
+    let audio = infer_audio(&mi.id);
     ui::ffi::pe_set_text(ui::ffi::PE_MODEL, &mi.id);
     if kind != AdapterKind::Anthropic {
         ui::ffi::pe_set_check(ui::ffi::PE_VISION, vision);
+        ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, audio);
     }
     osara::announce(&format!("Model set to {}.", mi.id));
 }
@@ -648,10 +658,12 @@ pub fn edit_dialog_ok() -> bool {
     let key = ui::ffi::pe_get_text(ui::ffi::PE_KEY).trim().to_string();
 
     let name = label.clone(); // for the announcement (cfg takes ownership of label)
-    // Audio input is niche and inferred from the model id (no separate control):
-    // OpenAI gpt-audio/*-audio-* and Gemini (all chat models) accept audio;
-    // Anthropic/Ollama/Groq/xAI do not.
-    let supports_audio = kind != AdapterKind::Anthropic && infer_audio(&model);
+    // Audio input (listening) is a per-model capability set with the "Supports
+    // audio" checkbox — the id heuristic only seeds its default (add/fetch). This
+    // lets locally-run multimodal models (e.g. Gemma) enable audio even though
+    // their id can't be reliably classified. Anthropic models don't take audio.
+    let supports_audio =
+        kind != AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_AUDIO);
     let cfg = ProviderConfig {
         id,
         label,
@@ -754,6 +766,7 @@ fn infer_vision(model: &str) -> bool {
         "gpt-4.1",
         "gpt-5",
         "gemini",
+        "gemma", // Google Gemma 3 / 3n / 4 — all vision-capable (run locally too)
         "claude",
         "grok-2-vision",
         "grok-3",
@@ -788,5 +801,31 @@ fn unique_id(base: &str) -> String {
             return cand;
         }
         n += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{infer_audio, infer_vision};
+
+    #[test]
+    fn gemma_is_recognised_as_vision_capable() {
+        // Gemma (3 / 3n / 4) is multimodal; recognized across common id spellings.
+        assert!(infer_vision("gemma-3-12b"));
+        assert!(infer_vision("gemma3n:e4b"));
+        assert!(infer_vision("gemma-4-12b"));
+        // A plain text model is still not treated as vision-capable.
+        assert!(!infer_vision("llama3.2"));
+    }
+
+    #[test]
+    fn audio_inference_seeds_known_audio_models_only() {
+        // The heuristic only seeds the checkbox default; the user can override it.
+        assert!(infer_audio("gpt-audio"));
+        assert!(infer_audio("gemini-2.0-flash"));
+        // Gemma's id can't be classified, so it defaults off and relies on the
+        // checkbox (gemma != gemini, so no accidental match).
+        assert!(!infer_audio("gemma-4-12b"));
+        assert!(!infer_audio("llama3.2"));
     }
 }
