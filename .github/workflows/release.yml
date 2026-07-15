@@ -72,12 +72,65 @@ jobs:
           lipo -create -output "dist/${{ matrix.asset }}" \
             target/aarch64-apple-darwin/release/libreaper_realackey.dylib \
             target/x86_64-apple-darwin/release/libreaper_realackey.dylib
-          # `lipo` drops the linker's ad-hoc code signature, and arm64 refuses to
-          # load an unsigned binary — so re-sign the fat dylib ad-hoc. This is NOT
-          # notarization: users still clear the download quarantine (see README).
-          codesign --force --sign - "dist/${{ matrix.asset }}"
-          echo "== architectures ==" && lipo -info "dist/${{ matrix.asset }}"
-          echo "== signature ==" && codesign -dvv "dist/${{ matrix.asset }}" 2>&1 || true
+          lipo -info "dist/${{ matrix.asset }}"
+
+      # Developer ID sign + notarize so macOS loads it without the user clearing
+      # quarantine. Runs only when the signing secrets are present; without them it
+      # falls back to an ad-hoc signature (the universal binary still works, but
+      # users must run `xattr -dr com.apple.quarantine`). See docs/macos-notarization.md.
+      - name: Sign & notarize (macOS)
+        if: matrix.name == 'macos'
+        env:
+          ASSET: ${{ matrix.asset }}
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12_BASE64:-}" ]; then
+            echo "::warning::No macOS signing secrets set — ad-hoc signing only. Users must run: xattr -dr com.apple.quarantine <dylib>. See docs/macos-notarization.md to set up notarization."
+            codesign --force --sign - "dist/$ASSET"
+            codesign -dvv "dist/$ASSET" 2>&1 || true
+            exit 0
+          fi
+
+          # --- import the Developer ID cert into a throwaway keychain ---
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -base64 24)"
+          printf '%s' "$CERT_P12_BASE64"   | base64 -D > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$NOTARY_KEY_BASE64" | base64 -D > "$RUNNER_TEMP/notary.p8"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+
+          # --- sign with the Developer ID identity (hardened runtime + timestamp) ---
+          SIGN_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$SIGN_ID" ]; then
+            echo "::error::No 'Developer ID Application' identity found in the imported certificate."
+            exit 1
+          fi
+          codesign --force --timestamp --options runtime --sign "$SIGN_ID" "dist/$ASSET"
+          codesign --verify --strict --verbose=2 "dist/$ASSET"
+
+          # --- notarize (a bare .dylib can't be stapled; submit a zip, Gatekeeper
+          #     verifies online on first load) ---
+          ditto -c -k "dist/$ASSET" "$RUNNER_TEMP/notarize.zip"
+          if ! xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+                 --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" \
+                 --issuer "$NOTARY_ISSUER_ID" --wait --timeout 30m 2>&1 | tee "$RUNNER_TEMP/notary.log"; then
+            SID="$(awk '/id:/ {print $2; exit}' "$RUNNER_TEMP/notary.log" || true)"
+            [ -n "$SID" ] && xcrun notarytool log "$SID" --key "$RUNNER_TEMP/notary.p8" \
+              --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" || true
+            echo "::error::Notarization failed."
+            exit 1
+          fi
+          echo "Signed + notarized. (A loose .dylib can't be stapled; Gatekeeper checks online on first load.)"
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary.p8"
 
       - name: Stage asset (Windows)
         if: matrix.name == 'windows'
