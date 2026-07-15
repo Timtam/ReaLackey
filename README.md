@@ -119,9 +119,20 @@ ReaLackey is designed to be driven entirely by keyboard and screen reader:
   (`…/ReaLackey/providers.json`), so a portable REAPER install carries it along.
 - **API keys** live in the OS credential store (Windows Credential Manager /
   macOS Keychain / Linux Secret Service) — never in plain text.
-- **Environment overrides** (all optional): `RAAI_CONFIRM=off` disables the
-  change-confirmation prompt; `RAAI_MAX_TURNS=N` overrides the per-provider
-  tool-step limit; `RAAI_MODEL` sets the default Claude model.
+- **Environment overrides** (all optional):
+  - `RAAI_CONFIRM=off` — disable the change-confirmation prompt.
+  - `RAAI_MAX_TURNS=N` — override the per-provider agentic tool-step limit.
+  - `RAAI_MODEL` — set the default Claude model.
+  - `RAAI_MEDIA_KEEP=N` — how many of the most recent screenshots / audio / video
+    captures stay live in the conversation before older ones are dropped to save
+    tokens (default 2).
+  - `RAAI_PROMPT_CACHE=off` — disable Anthropic prompt caching of the tools+prompt
+    prefix.
+  - `RAAI_PROGRESSIVE_TOOLS=on` — send only a small core tool set plus a
+    `load_tools` loader and let the model pull in the rest on demand; cuts
+    per-request tokens (good for rate-limited free-tier keys).
+  - `RAAI_VIDEO_SETTLE_MS=N` — delay in ms after seeking before grabbing each frame
+    in `capture_video_clip` (default 250; raise for heavy video-FX chains).
 
 ## Safety model
 
