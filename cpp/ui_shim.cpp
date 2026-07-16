@@ -151,16 +151,18 @@ static std::string get_ctrl_text(HWND hwnd, int id) {
   int len = GetWindowTextLengthW(c);  // UTF-16 units, excluding the NUL
   if (len <= 0) return std::string();
   std::wstring w((size_t)len + 1, L'\0');
-  int got = GetWindowTextW(c, &w[0], len + 1);
-  w.resize(got < 0 ? 0 : (size_t)got);
-  return to_utf8(w.c_str());
+  GetWindowTextW(c, &w[0], len + 1);  // writes the text + a terminating NUL
+  return to_utf8(w.c_str());          // read to the NUL (see note below)
 #else
-  int len = GetWindowTextLength(c);
+  int len = GetWindowTextLength(c);   // UTF-8 bytes (SWELL: strlen of the string)
   if (len <= 0) return std::string();
   std::string s((size_t)len + 1, '\0');
-  int got = GetWindowText(c, &s[0], len + 1);
-  s.resize(got < 0 ? 0 : (size_t)got);
-  return s;
+  // IMPORTANT: SWELL's GetWindowText is a macro for GetDlgItemText, which returns
+  // a BOOL, NOT the character count (unlike Win32). Sizing the result by that
+  // return value (1 on success) truncated every dialog field to a single
+  // character on macOS. Read to the NUL terminator instead.
+  GetWindowText(c, &s[0], (int)s.size());
+  return std::string(s.c_str());
 #endif
 }
 

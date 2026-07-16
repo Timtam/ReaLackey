@@ -63,6 +63,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
+- macOS: dialog text fields were read back as only their **first character**, so
+  adding/editing a provider saved a truncated name (`G` instead of `Gemini`) and a
+  mangled API key — which then broke "Fetch models" — and prompt-preset name/body
+  were cut to one character too. SWELL's `GetWindowText` returns a `BOOL`, not the
+  character count (unlike Win32), and the text reader had been sizing the result by
+  that return value; it now reads to the string terminator. Windows was unaffected.
 - macOS: the release `.dylib` is now a **universal binary (Apple Silicon + Intel)**.
   It previously shipped arm64-only, so it silently failed to load in REAPER on
   Intel Macs or under Rosetta.
