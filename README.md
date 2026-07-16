@@ -160,10 +160,36 @@ Tools (MSVC linker + the Windows SDK's `rc.exe`), and `libclang` (bundled with
 Visual Studio — `.cargo/config.toml` points bindgen at it; adjust if your VS
 install differs). `reaper-rs` is pulled from git and pinned to one rev.
 
-**macOS / Linux** (via SWELL): additionally needs a WDL checkout at `vendor/WDL`
-(`git clone https://github.com/justinfrankel/WDL vendor/WDL`) and **PHP** on
-`PATH` (for `swell_resgen.php`). The macOS build is compiled and linked in CI on
-every push.
+**macOS**:
+Additionally needs a WDL checkout at `vendor/WDL` (`git clone https://github.com/justinfrankel/WDL vendor/WDL`) and **PHP** on `PATH` (for `swell_resgen.php`).
+
+To build the universal library (`reaper_realackey.dylib` containing both Intel and Apple Silicon slices) with the correct name expected by REAPER, run the helper build script:
+
+```sh
+./build-macos.sh
+```
+
+Alternatively, you can build manually by running:
+
+```sh
+# Add the compile targets
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+# Build both architectures
+cargo build --release --target x86_64-apple-darwin
+cargo build --release --target aarch64-apple-darwin
+
+# Merge them into a single universal binary and rename it
+mkdir -p target/release
+lipo -create -output target/release/reaper_realackey.dylib \
+  target/x86_64-apple-darwin/release/libreaper_realackey.dylib \
+  target/aarch64-apple-darwin/release/libreaper_realackey.dylib
+
+# Apply an ad-hoc code signature so macOS doesn't reject it
+codesign --force --sign - target/release/reaper_realackey.dylib
+```
+
+**Linux** (via SWELL): additionally needs a WDL checkout at `vendor/WDL` and **PHP** on `PATH`. The project is compile-checked in CI on every push.
 
 ## Platform status
 
