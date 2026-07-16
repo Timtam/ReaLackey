@@ -160,10 +160,24 @@ Tools (MSVC linker + the Windows SDK's `rc.exe`), and `libclang` (bundled with
 Visual Studio — `.cargo/config.toml` points bindgen at it; adjust if your VS
 install differs). `reaper-rs` is pulled from git and pinned to one rev.
 
-**macOS / Linux** (via SWELL): additionally needs a WDL checkout at `vendor/WDL`
+**macOS** (via SWELL): additionally needs a WDL checkout at `vendor/WDL`
 (`git clone https://github.com/justinfrankel/WDL vendor/WDL`) and **PHP** on
-`PATH` (for `swell_resgen.php`). The macOS build is compiled and linked in CI on
-every push.
+`PATH` (for `swell_resgen.php`). A plain `cargo build` only makes a single-arch,
+`lib`-prefixed dylib for the host; to build the **universal** binary REAPER wants
+(`reaper_realackey.dylib` — Apple Silicon + Intel, ad-hoc signed so it loads), run
+the helper:
+
+```sh
+./build-macos.sh       # -> target/release/reaper_realackey.dylib
+```
+
+It just wraps two `cargo build --target …` runs, `lipo`, and an ad-hoc `codesign`
+(set `LIBCLANG_PATH` yourself if it isn't found). Copy the result into REAPER's
+`UserPlugins`. Releases are additionally Developer-ID signed + notarized — see
+[`docs/macos-notarization.md`](docs/macos-notarization.md).
+
+**Linux** (via SWELL): the same WDL checkout + PHP on `PATH`; compile-checked in
+CI on every push.
 
 ## Platform status
 
