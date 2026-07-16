@@ -60,6 +60,10 @@ pub struct ProviderConfig {
     /// Anthropic/Ollama/Groq/xAI. Gates the `listen_to_audio` tool.
     #[serde(default)]
     pub supports_audio: bool,
+    /// Whether to request Anthropic extended thinking (reasoning). Anthropic only —
+    /// OpenAI-compatible models expose reasoning inherently, with no request flag.
+    #[serde(default)]
+    pub thinking: bool,
 }
 
 impl ProviderConfig {
@@ -404,6 +408,7 @@ fn load_or_seed() -> Store {
             max_turns: default_max_turns(),
             supports_images: true,
             supports_audio: false,
+            thinking: false,
         }],
     };
     let _ = save(&store);

@@ -112,6 +112,9 @@ async fn run(
 struct TurnResult {
     text: String,
     tool_calls: Vec<(String, String, Value, Option<String>)>, // (id, name, input, thought_signature)
+    /// Completed Anthropic thinking blocks (verbatim JSON) to replay in history,
+    /// in order, before the text/tool_use they preceded.
+    thinking_blocks: Vec<Value>,
     stop_reason: StopReason,
     aborted: bool, // cancelled or errored
     /// The provider error message, if the turn errored (not set on a plain
@@ -405,6 +408,21 @@ async fn handle_prompt(
         // aborted turn, skip the tool_use blocks so history never contains a
         // tool_use without a following tool_result (which would 400 next time).
         let mut content = Vec::new();
+        // Anthropic thinking blocks must come FIRST, before the text/tool_use they
+        // reasoned about, and be replayed verbatim. Skipped on abort (like tool_use)
+        // so history never holds a dangling thinking block. Also skipped for a
+        // thinking-only turn (no text, no tool_use): they'd have nothing to anchor,
+        // and if thinking were later toggled off the block would be filtered out,
+        // leaving an empty assistant message the API rejects.
+        let has_body =
+            !result.text.is_empty() || (!result.aborted && !result.tool_calls.is_empty());
+        if !result.aborted && has_body {
+            for block in &result.thinking_blocks {
+                content.push(Content::Thinking {
+                    block: block.clone(),
+                });
+            }
+        }
         if !result.text.is_empty() {
             content.push(Content::Text(result.text.clone()));
             final_answer = result.text.clone();
@@ -592,6 +610,7 @@ async fn run_turn(
     let mut out = TurnResult {
         text: String::new(),
         tool_calls: Vec::new(),
+        thinking_blocks: Vec::new(),
         stop_reason: StopReason::EndTurn,
         aborted: false,
         error: None,
@@ -618,6 +637,9 @@ async fn run_turn(
                 }
                 Some(ChatEvent::ToolCall { id, name, input, thought_signature }) => {
                     out.tool_calls.push((id, name, input, thought_signature));
+                }
+                Some(ChatEvent::ThinkingBlock(block)) => {
+                    out.thinking_blocks.push(block);
                 }
                 Some(ChatEvent::Done { stop_reason, .. }) => {
                     out.stop_reason = stop_reason;

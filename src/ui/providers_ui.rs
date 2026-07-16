@@ -199,6 +199,9 @@ struct ProvSession {
     /// Whether the account's model accepts audio input ("Supports audio" checkbox).
     /// Seeded from the id heuristic (see add/fetch); user-overridable.
     audio: bool,
+    /// Whether Anthropic extended thinking is on ("Extended thinking" checkbox,
+    /// Anthropic accounts only).
+    thinking: bool,
     /// The working list of API keys, in priority order (top tried first). Edited
     /// live via the Add / Delete / Move up / Move down buttons; saved on OK.
     keys: Vec<String>,
@@ -241,6 +244,7 @@ fn add_provider() -> bool {
         max_turns: 25,
         vision: preset.vision,
         audio: infer_audio(preset.model),
+        thinking: false,
         keys: Vec::new(),
         keys_loaded: true, // a brand-new account genuinely has no stored keys yet
         keys_dirty: false,
@@ -276,6 +280,7 @@ fn edit_provider(index: i32) -> bool {
         max_turns: cfg.max_turns,
         vision: cfg.supports_images,
         audio: cfg.supports_audio,
+        thinking: cfg.thinking,
         keys,
         keys_loaded,
         keys_dirty: false,
@@ -361,17 +366,21 @@ pub fn edit_dialog_init() {
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTOK, &sess.max_tokens.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTURNS, &sess.max_turns.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_KEY, "");
-        // Anthropic uses a fixed endpoint, is always vision-capable, and doesn't
-        // take audio input — so hide the base-URL row and both capability checkboxes.
+        // Anthropic: fixed endpoint, always vision-capable, no audio input — hide the
+        // base-URL row and the vision/audio checkboxes, and show the Anthropic-only
+        // "Extended thinking" toggle (which shares the vision row; they never coexist).
+        // OpenAI-compatible: the reverse — show vision/audio, hide thinking.
         if sess.kind == AdapterKind::Anthropic {
             ui::ffi::pe_show(ui::ffi::PE_BASEURL, false);
             ui::ffi::pe_show(ui::ffi::PE_BASEURL_LBL, false);
             ui::ffi::pe_show(ui::ffi::PE_VISION, false);
             ui::ffi::pe_show(ui::ffi::PE_AUDIO, false);
+            ui::ffi::pe_set_check(ui::ffi::PE_THINKING, sess.thinking);
         } else {
             ui::ffi::pe_set_text(ui::ffi::PE_BASEURL, &sess.base_url);
             ui::ffi::pe_set_check(ui::ffi::PE_VISION, sess.vision);
             ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, sess.audio);
+            ui::ffi::pe_show(ui::ffi::PE_THINKING, false);
         }
         // Fill the key list (masked) + its summary hint.
         repopulate_keys(&sess.keys, None, sess.keys_loaded, sess.env_active);
@@ -664,6 +673,9 @@ pub fn edit_dialog_ok() -> bool {
     // their id can't be reliably classified. Anthropic models don't take audio.
     let supports_audio =
         kind != AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_AUDIO);
+    // Extended thinking (reasoning) is Anthropic-only — the checkbox is shown just
+    // for Anthropic accounts; OpenAI-compatible models expose reasoning inherently.
+    let thinking = kind == AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_THINKING);
     let cfg = ProviderConfig {
         id,
         label,
@@ -674,6 +686,7 @@ pub fn edit_dialog_ok() -> bool {
         max_turns,
         supports_images: vision,
         supports_audio,
+        thinking,
     };
 
     // The final key list is the working list plus a key typed into the field but

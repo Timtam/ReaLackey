@@ -26,22 +26,29 @@ pub struct AnthropicProvider {
     /// The API key this instance sends. The worker builds one provider per key in
     /// the account's failover list; `None` falls back to config/env at send time.
     key: Option<String>,
+    /// Whether to request extended thinking (per-provider setting).
+    thinking: bool,
 }
 
 impl AnthropicProvider {
     /// Build with a specific key (a `None` falls back to the active account's
-    /// resolved key / `ANTHROPIC_API_KEY` at send time).
-    pub fn with_key(key: Option<String>) -> Self {
+    /// resolved key / `ANTHROPIC_API_KEY` at send time) and the account's
+    /// extended-thinking setting.
+    pub fn with_key(key: Option<String>, thinking: bool) -> Self {
         let client = reqwest::Client::builder()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client, key }
+        Self {
+            client,
+            key,
+            thinking,
+        }
     }
 }
 
 impl Default for AnthropicProvider {
     fn default() -> Self {
-        Self::with_key(None)
+        Self::with_key(None, false)
     }
 }
 
@@ -52,6 +59,16 @@ enum Block {
         id: String,
         name: String,
         json: String,
+    },
+    /// An extended-thinking block: accumulates its text (for display + replay) and
+    /// its signature (required verbatim on replay).
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    /// A `redacted_thinking` block — opaque encrypted `data`, replayed verbatim.
+    Redacted {
+        data: String,
     },
     Ignore,
 }
@@ -80,7 +97,7 @@ impl LlmProvider for AnthropicProvider {
             .clone()
             .or_else(config::api_key)
             .ok_or_else(|| ProviderError::MissingKey("ANTHROPIC_API_KEY".into()))?;
-        let body = build_request(&req);
+        let body = build_request(&req, self.thinking);
 
         let send = self
             .client
@@ -138,6 +155,13 @@ impl LlmProvider for AnthropicProvider {
                                         json: String::new(),
                                     },
                                     ContentBlock::Text { .. } => Block::Text,
+                                    ContentBlock::Thinking { signature } => Block::Thinking {
+                                        text: String::new(),
+                                        signature,
+                                    },
+                                    ContentBlock::RedactedThinking { data } => {
+                                        Block::Redacted { data }
+                                    }
                                     ContentBlock::Other => Block::Ignore,
                                 };
                                 blocks.insert(index, block);
@@ -155,12 +179,28 @@ impl LlmProvider for AnthropicProvider {
                                         json.push_str(&partial_json);
                                     }
                                 }
+                                // Thinking text: show it live AND keep it for replay.
+                                Delta::ThinkingDelta { thinking } => {
+                                    if let Some(Block::Thinking { text, .. }) =
+                                        blocks.get_mut(&index)
+                                    {
+                                        text.push_str(&thinking);
+                                    }
+                                    if tx.send(ChatEvent::ReasoningDelta(thinking)).await.is_err() {
+                                        return Ok(());
+                                    }
+                                }
+                                Delta::SignatureDelta { signature: s } => {
+                                    if let Some(Block::Thinking { signature, .. }) =
+                                        blocks.get_mut(&index)
+                                    {
+                                        signature.push_str(&s);
+                                    }
+                                }
                                 _ => {}
                             },
-                            StreamEvent::ContentBlockStop { index } => {
-                                if let Some(Block::ToolUse { id, name, json }) =
-                                    blocks.remove(&index)
-                                {
+                            StreamEvent::ContentBlockStop { index } => match blocks.remove(&index) {
+                                Some(Block::ToolUse { id, name, json }) => {
                                     let input: Value =
                                         serde_json::from_str(&json).unwrap_or_else(|_| json!({}));
                                     if tx
@@ -176,7 +216,26 @@ impl LlmProvider for AnthropicProvider {
                                         return Ok(());
                                     }
                                 }
-                            }
+                                // Emit the completed thinking block for the worker to
+                                // store and replay VERBATIM (signature included).
+                                Some(Block::Thinking { text, signature }) => {
+                                    let block = json!({
+                                        "type": "thinking",
+                                        "thinking": text,
+                                        "signature": signature,
+                                    });
+                                    if tx.send(ChatEvent::ThinkingBlock(block)).await.is_err() {
+                                        return Ok(());
+                                    }
+                                }
+                                Some(Block::Redacted { data }) => {
+                                    let block = json!({ "type": "redacted_thinking", "data": data });
+                                    if tx.send(ChatEvent::ThinkingBlock(block)).await.is_err() {
+                                        return Ok(());
+                                    }
+                                }
+                                _ => {}
+                            },
                             StreamEvent::MessageDelta { delta, usage: u } => {
                                 if let Some(sr) = delta.stop_reason {
                                     stop_reason = StopReason::from_wire(&sr);

@@ -371,6 +371,9 @@ fn build_messages(req: &ChatRequest, vision: bool, audio: bool, gemini: bool) ->
                             }
                         }
                         Content::ToolUse { .. } => {}
+                        // Anthropic thinking blocks are never sent to OpenAI-compatible
+                        // providers (they can appear in history after a provider switch).
+                        Content::Thinking { .. } => {}
                     }
                 }
                 if !text.is_empty() {
@@ -419,6 +422,8 @@ fn build_messages(req: &ChatRequest, vision: bool, audio: bool, gemini: bool) ->
                             tool_calls.push(call);
                         }
                         Content::ToolResult { .. } => {}
+                        // Anthropic-only; never sent to an OpenAI-compatible provider.
+                        Content::Thinking { .. } => {}
                     }
                 }
                 let mut msg = json!({ "role": "assistant" });

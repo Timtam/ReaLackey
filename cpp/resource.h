@@ -40,6 +40,7 @@
 #define ID_PE_KEYUP          1034   // move the selected key up (higher priority)
 #define ID_PE_KEYDOWN        1035   // move the selected key down
 #define ID_PE_AUDIO          1036   // "Supports audio (listening)" checkbox
+#define ID_PE_THINKING       1037   // "Extended thinking (reasoning)" checkbox (Anthropic)
 
 // Prompt presets: reusable prompt bodies inserted into the chat composer.
 // List dialog (add / edit / delete; no reorder).

@@ -12,15 +12,24 @@ use crate::providers::{ChatRequest, Content, ResultBlock, Role};
 
 // ---- Request ----------------------------------------------------------------
 
-/// Build the JSON request body (content blocks + tools + streaming).
-pub fn build_request(req: &ChatRequest) -> Value {
+/// Build the JSON request body (content blocks + tools + streaming). `thinking`
+/// requests extended thinking (adaptive) on models that support it.
+pub fn build_request(req: &ChatRequest, thinking: bool) -> Value {
+    // When thinking is OFF, drop any thinking blocks that a prior (thinking-on)
+    // turn left in the history: the API rejects thinking blocks on a request that
+    // doesn't enable thinking, so a mid-conversation toggle-off would otherwise 400
+    // every subsequent turn. They only anchor a following tool_use *when thinking is
+    // on*, so removing them here is safe.
     let messages: Vec<Value> = req
         .messages
         .iter()
         .map(|m| {
             json!({
                 "role": match m.role { Role::User => "user", Role::Assistant => "assistant" },
-                "content": m.content.iter().map(content_to_json).collect::<Vec<_>>(),
+                "content": m.content.iter()
+                    .filter(|c| thinking || !matches!(c, Content::Thinking { .. }))
+                    .map(content_to_json)
+                    .collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -31,6 +40,14 @@ pub fn build_request(req: &ChatRequest) -> Value {
         "stream": true,
         "messages": messages,
     });
+    // Extended thinking (per-provider setting). Adaptive lets the model self-regulate
+    // depth — it thinks more on hard tasks, less on easy ones. GA on Claude 4.6+
+    // (Opus 4.8); older models don't support it and would 400. When on, the model
+    // emits thinking blocks (summarized on 4.x) that we must replay verbatim in the
+    // assistant turn — handled via Content::Thinking.
+    if thinking {
+        body["thinking"] = json!({ "type": "adaptive" });
+    }
     // Prompt caching: the tools + system prefix is byte-identical across the turns
     // of one agentic loop, so mark it cacheable. A cache_control breakpoint caches
     // the contiguous prefix up to that block in Anthropic's tools -> system ->
@@ -85,6 +102,9 @@ fn prompt_cache_enabled() -> bool {
 fn content_to_json(c: &Content) -> Value {
     match c {
         Content::Text(text) => json!({ "type": "text", "text": text }),
+        // Replayed verbatim (already the exact Anthropic block, with its signature).
+        // Anthropic requires the unmodified thinking block before the tool_use.
+        Content::Thinking { block } => block.clone(),
         Content::ToolUse {
             id, name, input, ..
         } => {
@@ -196,6 +216,16 @@ pub enum ContentBlock {
     ToolUse {
         id: String,
         name: String,
+    },
+    /// Extended-thinking block start (its text + signature arrive as deltas).
+    Thinking {
+        #[serde(default)]
+        signature: String,
+    },
+    /// A redacted (encrypted) thinking block — carries opaque `data`, no deltas.
+    RedactedThinking {
+        #[serde(default)]
+        data: String,
     },
     #[serde(other)]
     Other,
@@ -358,7 +388,7 @@ mod tests {
                 ToolDef { name: "b".into(), description: "second".into(), input_schema: json!({"type":"object"}) },
             ],
         };
-        let body = build_request(&req);
+        let body = build_request(&req, false);
         // System is the block-array form with a cache breakpoint (not a bare string).
         assert!(body["system"].is_array(), "system should be a block array when caching");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
@@ -366,5 +396,60 @@ mod tests {
         // Only the LAST tool carries the breakpoint (it caches the whole tools prefix).
         assert!(body["tools"][0].get("cache_control").is_none(), "first tool: no breakpoint");
         assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn thinking_flag_toggles_the_adaptive_thinking_param() {
+        use crate::providers::{ChatMessage, ToolDef};
+        let req = ChatRequest {
+            model: "claude-opus-4-8".into(),
+            system: Some("sys".into()),
+            max_tokens: 1024,
+            messages: vec![ChatMessage::user_text("hi")],
+            tools: vec![ToolDef {
+                name: "a".into(),
+                description: "d".into(),
+                input_schema: json!({"type":"object"}),
+            }],
+        };
+        // Off → no thinking key at all (older models 400 on an explicit block).
+        assert!(build_request(&req, false).get("thinking").is_none());
+        // On → adaptive form (GA on 4.6+/Opus 4.8; budget_tokens is deprecated).
+        assert_eq!(build_request(&req, true)["thinking"], json!({ "type": "adaptive" }));
+    }
+
+    #[test]
+    fn thinking_blocks_are_dropped_from_history_when_thinking_is_off() {
+        use crate::providers::{ChatMessage, Content, Role};
+        // An assistant turn that a thinking-on run left behind: a thinking block
+        // followed by its answer text.
+        let assistant = ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                Content::Thinking {
+                    block: json!({ "type": "thinking", "thinking": "hmm", "signature": "sig" }),
+                },
+                Content::Text("answer".into()),
+            ],
+        };
+        let req = ChatRequest {
+            model: "claude-opus-4-8".into(),
+            system: None,
+            max_tokens: 256,
+            messages: vec![ChatMessage::user_text("hi"), assistant],
+            tools: vec![],
+        };
+        // Thinking OFF: the block is stripped, only the text survives — otherwise the
+        // API 400s on a thinking block sent without thinking enabled.
+        let off = build_request(&req, false);
+        let content = off["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        // Thinking ON: the block is preserved verbatim (with its signature), first.
+        let on = build_request(&req, true);
+        let content = on["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["signature"], "sig");
     }
 }

@@ -49,6 +49,14 @@ pub enum ResultBlock {
 #[derive(Clone, Debug)]
 pub enum Content {
     Text(String),
+    /// An Anthropic extended-thinking block, kept as the ready-to-send Anthropic
+    /// JSON so it can be replayed VERBATIM in the assistant turn on the next request
+    /// (Anthropic requires the unmodified thinking block, with its signature, to
+    /// precede the tool_use it thought about, or the request 400s). Other adapters
+    /// ignore it. Only present when a provider has extended thinking enabled.
+    Thinking {
+        block: Value,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -148,6 +156,10 @@ pub enum ChatEvent {
     /// A streamed reasoning / "thinking" token (shown separately from the answer;
     /// not part of the final answer and not spoken via OSARA).
     ReasoningDelta(String),
+    /// A COMPLETED Anthropic thinking block (verbatim JSON), to store in history and
+    /// replay in the assistant turn. Anthropic-only; carries the signature the API
+    /// validates on replay.
+    ThinkingBlock(Value),
     ToolCall {
         id: String,
         name: String,
@@ -219,7 +231,9 @@ pub fn build_provider_with_key(
     key: Option<String>,
 ) -> Box<dyn LlmProvider> {
     match cfg.kind {
-        registry::AdapterKind::Anthropic => Box::new(anthropic::AnthropicProvider::with_key(key)),
+        registry::AdapterKind::Anthropic => {
+            Box::new(anthropic::AnthropicProvider::with_key(key, cfg.thinking))
+        }
         registry::AdapterKind::OpenAiCompatible => {
             Box::new(openai_compat::OpenAiCompatProvider::new(
                 cfg.base_url.clone().unwrap_or_default(),

@@ -16,7 +16,16 @@ into a versioned heading and attaches its entries to the GitHub release — see
   Qwen3, and Ollama "thinking" models over the OpenAI-compatible endpoint (via
   `reasoning_content`) — now stream it into a collapsible **Reasoning** block above
   the answer. It's shown separately from the reply and is not spoken as the final
-  answer. (Anthropic extended thinking is a separate, larger change.)
+  answer.
+- Anthropic **extended thinking**, as a per-provider toggle ("Extended thinking
+  (reasoning)" in the provider settings dialog, Anthropic only). When on, the
+  request asks for adaptive thinking — the model reasons more on hard tasks, less
+  on easy ones — and streams that reasoning into the same collapsible **Reasoning**
+  block as above. The thinking blocks are stored and replayed verbatim (with their
+  signatures) so multi-step tool-use conversations keep their reasoning continuity;
+  toggling thinking back off cleanly drops them from the ongoing conversation.
+  Requires a model that supports adaptive thinking (Claude Opus 4.8 / 4.7 / 4.6,
+  Sonnet 4.6+); older models reject it.
 - Lower per-request token usage (helps free-tier keys, which meter tokens/minute
   and re-charge the whole tool list + prompt every agentic turn):
   - **Trimmed** the tool descriptions and system prompt (deduped boilerplate now
