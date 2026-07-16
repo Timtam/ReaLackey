@@ -10,6 +10,8 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-16
+
 ### Added
 
 - Reasoning display: models that expose their chain-of-thought — DeepSeek-R1,
