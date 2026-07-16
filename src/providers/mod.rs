@@ -145,6 +145,9 @@ impl StopReason {
 #[derive(Debug)]
 pub enum ChatEvent {
     TextDelta(String),
+    /// A streamed reasoning / "thinking" token (shown separately from the answer;
+    /// not part of the final answer and not spoken via OSARA).
+    ReasoningDelta(String),
     ToolCall {
         id: String,
         name: String,

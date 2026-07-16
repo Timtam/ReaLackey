@@ -611,6 +611,11 @@ async fn run_turn(
                     out.text.push_str(&d);
                     let _ = ui_tx.send(UiEvent::AssistantDelta(d));
                 }
+                // Reasoning is shown in its own block; it is NOT part of the final
+                // answer (not stored in history, not spoken as the answer).
+                Some(ChatEvent::ReasoningDelta(d)) => {
+                    let _ = ui_tx.send(UiEvent::ReasoningDelta(d));
+                }
                 Some(ChatEvent::ToolCall { id, name, input, thought_signature }) => {
                     out.tool_calls.push((id, name, input, thought_signature));
                 }

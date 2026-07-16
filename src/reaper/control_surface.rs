@@ -113,6 +113,7 @@ impl PumpSurface {
             UiEvent::UserMessage(s) => output::user_message(&s),
             UiEvent::AssistantStart => output::assistant_start(),
             UiEvent::AssistantDelta(s) => output::assistant_delta(&s),
+            UiEvent::ReasoningDelta(s) => output::reasoning_delta(&s),
             UiEvent::ToolStarted { name, input } => output::tool_started(&name, &input),
             UiEvent::ToolFinished { is_error, summary } => {
                 output::tool_finished(is_error, &summary)

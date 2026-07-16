@@ -24,6 +24,9 @@ struct Output {
     webview: Option<wry::WebView>,
     /// Accumulated Markdown of the assistant message currently streaming.
     assistant_md: String,
+    /// Accumulated Markdown of the reasoning/"thinking" block for the current turn
+    /// (streamed into a collapsible section, separate from the answer).
+    reasoning_md: String,
 }
 
 impl Output {
@@ -32,6 +35,7 @@ impl Output {
             #[cfg(webview)]
             webview: None,
             assistant_md: String::new(),
+            reasoning_md: String::new(),
         }
     }
 
@@ -65,6 +69,7 @@ impl Output {
 
     fn user_message(&mut self, text: &str) {
         self.assistant_md.clear();
+        self.reasoning_md.clear();
         if self.active() {
             // A heading so a screen reader can jump straight to each question (h).
             let html = format!("<h2 class=\"turn user\">You: {}</h2>", html_escape(text));
@@ -76,11 +81,29 @@ impl Output {
 
     fn assistant_start(&mut self) {
         self.assistant_md.clear();
+        // The answer follows the reasoning; reset the reasoning buffer so the next
+        // turn's reasoning (if any) starts a fresh block.
+        self.reasoning_md.clear();
         if self.active() {
             self.eval("startAssistant();");
         } else {
             ffi::append_output("Assistant: ");
         }
+    }
+
+    /// Append a streamed reasoning/"thinking" token into a collapsible block,
+    /// separate from the answer. Not spoken via OSARA (only the answer is).
+    fn reasoning_delta(&mut self, token: &str) {
+        if !self.active() {
+            return; // reasoning is a webview-only enhancement; fallback shows the answer
+        }
+        let first = self.reasoning_md.is_empty();
+        self.reasoning_md.push_str(token);
+        if first {
+            self.eval("startReasoning();");
+        }
+        let html = markdown_to_html(&self.reasoning_md);
+        self.call_js("updateReasoning", &html);
     }
 
     fn assistant_delta(&mut self, token: &str) {
@@ -94,6 +117,8 @@ impl Output {
     }
 
     fn tool_started(&mut self, name: &str, input: &str) {
+        // The reasoning phase (if any) ended when the model started calling tools.
+        self.reasoning_md.clear();
         if self.active() {
             let html = format!(
                 "<details class=\"tool\"><summary>{}</summary>\
@@ -277,6 +302,11 @@ pub fn assistant_start() {
 pub fn assistant_delta(token: &str) {
     STATE.with(|c| c.borrow_mut().assistant_delta(token));
 }
+
+/// Stream a reasoning/"thinking" token into a collapsible block (main thread).
+pub fn reasoning_delta(token: &str) {
+    STATE.with(|c| c.borrow_mut().reasoning_delta(token));
+}
 pub fn tool_started(name: &str, input: &str) {
     STATE.with(|c| c.borrow_mut().tool_started(name, input));
 }
@@ -417,6 +447,14 @@ details.toolgroup>summary.tgsum::before{content:"\25b8  ";}
 details.toolgroup[open]>summary.tgsum::before{content:"\25be  ";}
 .tgbody{padding:0 8px 4px;}
 .tgbody details.tool{margin:6px 0;background:#1b1b1b;}
+/* Reasoning / "thinking": a muted collapsible block, collapsed by default. */
+details.reasoning{border:1px solid #333;border-radius:6px;margin:8px 0;background:#1b1b1b;}
+details.reasoning>summary{cursor:pointer;padding:5px 9px;list-style:none;color:#8a8a8a;font-style:italic;}
+details.reasoning>summary::-webkit-details-marker{display:none;}
+details.reasoning>summary::before{content:"\25b8  ";}
+details.reasoning[open]>summary::before{content:"\25be  ";}
+details.reasoning .rbody{padding:0 9px 6px;color:#9a9a9a;font-size:12px;}
+details.reasoning .rbody pre{background:#111;padding:8px;border-radius:5px;overflow:auto;}
 .sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;}
 #status{flex:0 0 auto;padding:2px 10px;color:#9a9a9a;font-size:12px;min-height:15px;}
 #composer{flex:0 0 auto;display:flex;gap:6px;padding:8px 10px 10px;border-top:1px solid #3a3a3a;background:#252526;}
@@ -453,6 +491,10 @@ function addTool(h){
 }
 function startAssistant(){var o=document.getElementById('cur');if(o)o.removeAttribute('id');addBlock('<h2 class="turn assistant">Assistant</h2><div class="body" id="cur"></div>');}
 function updateAssistant(h){var c=document.getElementById('cur');if(c){c.innerHTML=h;sd();}}
+// Reasoning/"thinking": a collapsible block streamed before the answer, collapsed
+// by default (secondary to the answer, and never spoken as the final answer).
+function startReasoning(){var o=document.getElementById('rcur');if(o)o.removeAttribute('id');addBlock('<details class="reasoning"><summary>Reasoning</summary><div class="rbody" id="rcur"></div></details>');}
+function updateReasoning(h){var c=document.getElementById('rcur');if(c){c.innerHTML=h;sd();}}
 function setToolResult(h){var l=document.querySelectorAll('#log details.tool');if(l.length){var t=l[l.length-1].querySelector('.tres');if(t){t.innerHTML=h;sd();}}}
 function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.textContent='';setTimeout(function(){l.textContent=t;setTimeout(function(){l.textContent='';},2500);},60);}
 function setStatus(t){var s=document.getElementById('status');if(s)s.textContent=t;}

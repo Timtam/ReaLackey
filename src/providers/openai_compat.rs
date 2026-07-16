@@ -162,6 +162,18 @@ impl LlmProvider for OpenAiCompatProvider {
                             continue; // ignore keep-alives / unknown shapes
                         };
                         for choice in chunk.choices {
+                            // Reasoning tokens arrive before the answer on thinking
+                            // models — DeepSeek-R1 / Qwen3 / Ollama use
+                            // `reasoning_content`; some gateways use `reasoning`.
+                            if let Some(r) =
+                                choice.delta.reasoning_content.or(choice.delta.reasoning)
+                            {
+                                if !r.is_empty()
+                                    && tx.send(ChatEvent::ReasoningDelta(r)).await.is_err()
+                                {
+                                    return Ok(());
+                                }
+                            }
                             if let Some(text) = choice.delta.content {
                                 if !text.is_empty()
                                     && tx.send(ChatEvent::TextDelta(text)).await.is_err()
@@ -507,6 +519,12 @@ struct ChunkChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning/"thinking" tokens on models that expose them (DeepSeek-R1, Qwen3,
+    /// Ollama thinking models). `reasoning` is an alternate key some gateways use.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }

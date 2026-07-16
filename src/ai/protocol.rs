@@ -24,6 +24,9 @@ pub enum UiEvent {
     AssistantStart,
     /// Append a streamed token to the current assistant message.
     AssistantDelta(String),
+    /// Append a streamed reasoning/"thinking" token — rendered in a collapsible
+    /// block, separate from the answer, and NOT spoken as the final answer.
+    ReasoningDelta(String),
     /// A tool call was started (name + pretty-printed input).
     ToolStarted { name: String, input: String },
     /// A tool call finished (its result/outcome summary).

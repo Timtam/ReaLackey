@@ -12,6 +12,11 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- Reasoning display: models that expose their chain-of-thought — DeepSeek-R1,
+  Qwen3, and Ollama "thinking" models over the OpenAI-compatible endpoint (via
+  `reasoning_content`) — now stream it into a collapsible **Reasoning** block above
+  the answer. It's shown separately from the reply and is not spoken as the final
+  answer. (Anthropic extended thinking is a separate, larger change.)
 - Lower per-request token usage (helps free-tier keys, which meter tokens/minute
   and re-charge the whole tool list + prompt every agentic turn):
   - **Trimmed** the tool descriptions and system prompt (deduped boilerplate now
