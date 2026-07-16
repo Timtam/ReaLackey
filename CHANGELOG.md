@@ -63,6 +63,11 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
+- The assistant no longer finishes **silently** when the model returns an empty
+  response (no answer and no tool call). Previously the status just went to
+  "Ready." with nothing shown — which reads as a crash — most visibly with local
+  models (Ollama) that don't reliably do tool use. It now says the response was
+  empty and hints at likely causes.
 - macOS: the release `.dylib` is now a **universal binary (Apple Silicon + Intel)**.
   It previously shipped arm64-only, so it silently failed to load in REAPER on
   Intel Macs or under Rosetta.

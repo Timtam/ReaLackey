@@ -308,6 +308,12 @@ async fn handle_prompt(
     let cancel = CancellationToken::new();
     let mut final_answer = String::new();
     let mut truncated = false;
+    // Whether the model ran any tool this request, and whether the loop ended with
+    // a clean (non-aborted, non-tool) final turn — used to avoid finishing SILENTLY
+    // when the model returns nothing (common with local Ollama models that don't
+    // reliably do tool use: the request succeeds but yields no text and no tools).
+    let mut did_tool_work = false;
+    let mut clean_finish = false;
     // Approve applying changes ONCE per user request (not once per change): the
     // model reveals changes across turns, so a per-turn prompt still asks many
     // times. None = not yet asked; Some(v) = the user's decision for this request.
@@ -426,6 +432,7 @@ async fn handle_prompt(
 
         // Continue the loop only if the model asked for tools.
         if result.stop_reason == StopReason::ToolUse && !result.tool_calls.is_empty() {
+            did_tool_work = true;
             // Ask for permission to apply changes ONCE per request — the first
             // turn that proposes a change — then remember the decision for the
             // rest of the request (further changes just proceed, each announced).
@@ -523,7 +530,28 @@ async fn handle_prompt(
         // A non-tool turn is the final answer. If the model ran into the output
         // limit, the text ends mid-thought — flag it so we don't stop silently.
         truncated = result.stop_reason == StopReason::MaxTokens;
+        clean_finish = true;
         break;
+    }
+
+    // The model finished cleanly but said nothing (no text, no tools) — don't go
+    // silent to "Ready.", which reads as a crash. Tell the user what happened.
+    // (Aborts/errors/cancels already showed a message; the max-turns case showed a
+    // "paused" notice; both leave clean_finish false, so this only fires on a
+    // genuinely empty answer.)
+    if clean_finish && final_answer.trim().is_empty() {
+        let msg = if did_tool_work {
+            "The model ran the actions above but ended without a final message — they may have \
+             completed; check the result, or ask me to summarise."
+                .to_string()
+        } else {
+            "The model returned an empty response — no answer and no action taken. Local models \
+             sometimes do this when they don't support tool use for a request, or the prompt is \
+             too large. Try rephrasing, or a model with function-calling support."
+                .to_string()
+        };
+        let _ = ui_tx.send(UiEvent::Notice(msg.clone()));
+        let _ = ui_tx.send(UiEvent::Announce(msg));
     }
 
     if !final_answer.is_empty() {
