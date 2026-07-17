@@ -10,6 +10,8 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-17
+
 ### Fixed
 
 - The **Gemini** provider preset now defaults to `gemini-3.5-flash`. The previous
