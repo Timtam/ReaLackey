@@ -106,7 +106,7 @@ const PRESETS: &[Preset] = &[
         label: "Gemini",
         kind: AdapterKind::OpenAiCompatible,
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-        model: "gemini-2.0-flash",
+        model: "gemini-3.5-flash",
         max_tokens: 4096,
         vision: true,
     },
@@ -835,7 +835,7 @@ mod tests {
     fn audio_inference_seeds_known_audio_models_only() {
         // The heuristic only seeds the checkbox default; the user can override it.
         assert!(infer_audio("gpt-audio"));
-        assert!(infer_audio("gemini-2.0-flash"));
+        assert!(infer_audio("gemini-3.5-flash"));
         // Gemma's id can't be classified, so it defaults off and relies on the
         // checkbox (gemma != gemini, so no accidental match).
         assert!(!infer_audio("gemma-4-12b"));

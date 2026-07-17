@@ -12,6 +12,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
+- The **Gemini** provider preset now defaults to `gemini-3.5-flash`. The previous
+  default, `gemini-2.0-flash`, has been retired by Google, so adding a Gemini
+  provider seeded a model that no longer exists. `gemini-3.5-flash` is the current
+  latest stable Flash model (multimodal, free-tier accessible). You can still pick
+  another model with **Fetch models…** — e.g. `gemini-2.5-flash` or
+  `gemini-2.5-flash-lite` for higher free-tier throughput.
 - OpenAI-compatible providers: newer OpenAI models (**GPT-5**, the **o-series**)
   no longer fail with `Unsupported parameter: 'max_tokens'`. Those models require
   `max_completion_tokens` instead of `max_tokens`; the adapter now sends the right
