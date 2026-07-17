@@ -13,7 +13,8 @@
 //! `supports_images` is per-account (vision is per-model) and gates both this
 //! bridge and whether `capture_view` is offered at all.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -92,32 +93,57 @@ impl LlmProvider for OpenAiCompatProvider {
         tx: Sender<ChatEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ProviderError> {
-        let body = build_body(&req, self.supports_images, self.supports_audio, self.is_gemini());
+        // Newer OpenAI models (gpt-5, the o-series) reject `max_tokens` and require
+        // `max_completion_tokens`; most other OpenAI-compatible servers (Ollama, LM
+        // Studio, DeepSeek, Groq, …) only understand `max_tokens`. So we default to
+        // `max_tokens`, switch to `max_completion_tokens` up front for the endpoints
+        // known to need it, and — for anything else that turns out to need it —
+        // transparently retry once on the specific 400 and remember it for the session.
+        let mut use_completion_tokens = completion_tokens_preferred(&self.base_url, &req.model);
+        let resp = loop {
+            let mut body =
+                build_body(&req, self.supports_images, self.supports_audio, self.is_gemini());
+            if use_completion_tokens {
+                swap_to_completion_tokens(&mut body);
+            }
 
-        let mut builder = self
-            .client
-            .post(self.endpoint())
-            .header("content-type", "application/json");
-        if let Some(key) = &self.api_key {
-            builder = builder.header("authorization", format!("Bearer {key}"));
-        }
-        let send = builder.json(&body).send();
+            let mut builder = self
+                .client
+                .post(self.endpoint())
+                .header("content-type", "application/json");
+            if let Some(key) = &self.api_key {
+                builder = builder.header("authorization", format!("Bearer {key}"));
+            }
+            let send = builder.json(&body).send();
 
-        let resp = tokio::select! {
-            _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
-            r = send => r.map_err(|e| ProviderError::Http { status: None, message: e.to_string() })?,
-        };
+            let resp = tokio::select! {
+                _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
+                r = send => r.map_err(|e| ProviderError::Http { status: None, message: e.to_string() })?,
+            };
 
-        if !resp.status().is_success() {
+            if resp.status().is_success() {
+                break resp;
+            }
+
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            // The endpoint wants `max_completion_tokens` instead of `max_tokens`:
+            // remember it (so the rest of this agentic loop skips straight to it) and
+            // retry this same request once. Guarded by `!use_completion_tokens` so it
+            // can only fire once — no infinite loop.
+            if status.as_u16() == 400 && !use_completion_tokens && rejects_max_tokens(&text) {
+                use_completion_tokens = true;
+                remember_completion_tokens(&self.base_url, &req.model);
+                continue;
+            }
+
             let msg = format!("API {status}: {text}");
             let _ = tx.send(ChatEvent::Error(msg.clone())).await;
             return Err(ProviderError::Http {
                 status: Some(status.as_u16()),
                 message: msg,
             });
-        }
+        };
 
         let mut byte_stream = resp.bytes_stream();
         let mut sse = SseData::default();
@@ -300,6 +326,66 @@ fn build_body(req: &ChatRequest, vision: bool, audio: bool, gemini: bool) -> Val
             .collect::<Vec<_>>());
     }
     body
+}
+
+// ---- max_tokens vs max_completion_tokens -------------------------------------
+
+/// Rename `max_tokens` -> `max_completion_tokens` in an already-built body. Newer
+/// OpenAI models (gpt-5, o-series) reject the former and require the latter; the
+/// value is identical, only the field name differs.
+fn swap_to_completion_tokens(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        if let Some(v) = obj.remove("max_tokens") {
+            obj.insert("max_completion_tokens".to_string(), v);
+        }
+    }
+}
+
+/// Does this 400 body say the endpoint rejected `max_tokens` and wants
+/// `max_completion_tokens`? Matched loosely (both field names present) so it
+/// survives wording tweaks, but strict enough not to fire on unrelated 400s —
+/// we only retry when the server itself names the replacement parameter.
+fn rejects_max_tokens(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    b.contains("max_completion_tokens") && b.contains("max_tokens")
+}
+
+/// Whether to send `max_completion_tokens` from the first request for this
+/// endpoint+model: OpenAI's own API (all its current chat models accept it, and
+/// the newest *require* it), plus any (base_url, model) the session-cache learned
+/// about after a [`rejects_max_tokens`] 400. Everything else defaults to
+/// `max_tokens`. The learned entry is keyed per-model, not per-endpoint: a
+/// passthrough gateway can front a `max_completion_tokens` model and a plain
+/// `max_tokens` model under one base URL, so learning it for the whole endpoint
+/// would break the other model.
+fn completion_tokens_preferred(base_url: &str, model: &str) -> bool {
+    if base_url.to_ascii_lowercase().contains("api.openai.com") {
+        return true;
+    }
+    completion_tokens_cache()
+        .lock()
+        .map(|s| s.contains(&cache_key(base_url, model)))
+        .unwrap_or(false)
+}
+
+/// Remember (for the rest of this process' lifetime) that this endpoint+model
+/// needs `max_completion_tokens`, so later turns of the same conversation don't
+/// re-pay the failed round-trip.
+fn remember_completion_tokens(base_url: &str, model: &str) {
+    if let Ok(mut s) = completion_tokens_cache().lock() {
+        s.insert(cache_key(base_url, model));
+    }
+}
+
+/// A per-endpoint, per-model cache key. The NUL separator can't appear in a URL
+/// or a model id, so distinct pairs never collide.
+fn cache_key(base_url: &str, model: &str) -> String {
+    format!("{base_url}\u{0}{model}")
+}
+
+fn completion_tokens_cache() -> &'static Mutex<HashSet<String>> {
+    static CACHE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// Flatten our messages into OpenAI's role model. A single neutral message can
@@ -895,6 +981,76 @@ mod tests {
         let m = off["messages"].as_array().unwrap();
         assert_eq!(m.len(), 2);
         assert!(m[1]["content"].as_str().unwrap().contains("omitted"));
+    }
+
+    #[test]
+    fn build_body_defaults_to_max_tokens() {
+        let req = ChatRequest {
+            model: "llama3".into(),
+            system: None,
+            max_tokens: 512,
+            messages: vec![ChatMessage::user_text("hi")],
+            tools: vec![],
+        };
+        let body = build_body(&req, false, false, false);
+        // Ollama/LM Studio/DeepSeek/etc. only understand max_tokens.
+        assert_eq!(body["max_tokens"], 512);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn swap_renames_max_tokens_preserving_the_value() {
+        let mut body = json!({ "model": "gpt-5", "max_tokens": 4096, "stream": true });
+        swap_to_completion_tokens(&mut body);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 4096);
+        // Untouched fields remain.
+        assert_eq!(body["model"], "gpt-5");
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn rejects_max_tokens_matches_only_the_completion_tokens_error() {
+        // The exact error newer OpenAI models return.
+        let real = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#;
+        assert!(rejects_max_tokens(real));
+        // Unrelated 400s must NOT trigger the retry.
+        assert!(!rejects_max_tokens(
+            r#"{"error":{"message":"invalid 'model' field","type":"invalid_request_error"}}"#
+        ));
+        assert!(!rejects_max_tokens(
+            r#"{"error":{"message":"context length exceeded; reduce max_tokens","code":"context_length_exceeded"}}"#
+        ));
+    }
+
+    #[test]
+    fn openai_host_prefers_completion_tokens_others_default_to_max_tokens() {
+        // Every current OpenAI chat model accepts max_completion_tokens (model-independent).
+        assert!(completion_tokens_preferred("https://api.openai.com/v1", "gpt-5"));
+        assert!(completion_tokens_preferred("https://api.openai.com/v1", "gpt-4o-mini"));
+        // Local + third-party compat servers keep max_tokens until proven otherwise.
+        assert!(!completion_tokens_preferred("http://localhost:11434/v1", "llama3"));
+        assert!(!completion_tokens_preferred("https://api.deepseek.com", "deepseek-chat"));
+    }
+
+    #[test]
+    fn learned_endpoints_switch_to_completion_tokens_for_the_session() {
+        // A unique URL so the process-global cache can't collide with other tests.
+        let url = "https://proxy.example.test/unit-learned/v1";
+        assert!(!completion_tokens_preferred(url, "gpt-5"));
+        remember_completion_tokens(url, "gpt-5");
+        assert!(completion_tokens_preferred(url, "gpt-5"));
+    }
+
+    #[test]
+    fn learned_dialect_is_per_model_not_per_endpoint() {
+        // The passthrough-gateway case: one base URL fronting a max_completion_tokens
+        // model and a plain max_tokens model. Learning the former must NOT change the
+        // latter (regression guard for the cross-model cache-poisoning defect).
+        let url = "https://gateway.example.test/unit-permodel/v1";
+        remember_completion_tokens(url, "gpt-5");
+        assert!(completion_tokens_preferred(url, "gpt-5"));
+        assert!(!completion_tokens_preferred(url, "llama3"));
     }
 
     #[test]

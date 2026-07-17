@@ -10,6 +10,16 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+### Fixed
+
+- OpenAI-compatible providers: newer OpenAI models (**GPT-5**, the **o-series**)
+  no longer fail with `Unsupported parameter: 'max_tokens'`. Those models require
+  `max_completion_tokens` instead of `max_tokens`; the adapter now sends the right
+  field for `api.openai.com`, and for any other endpoint that needs it, it retries
+  once transparently and remembers the choice for the rest of the session. Servers
+  that only understand `max_tokens` (Ollama, LM Studio, DeepSeek, Groq, …) are
+  unaffected.
+
 ## [0.3.0] - 2026-07-16
 
 ### Added
