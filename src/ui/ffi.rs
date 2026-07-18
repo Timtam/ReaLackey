@@ -38,6 +38,10 @@ extern "C" {
     fn ui_show_providers();
     fn ui_popup_menu(items_newline: *const c_char) -> c_int;
     fn ui_message_box(title: *const c_char, text: *const c_char, flags: c_int) -> c_int;
+    fn ui_set_progress_cancel_cb(on_cancel: extern "C" fn());
+    fn ui_progress_open(message: *const c_char);
+    fn ui_progress_set(percent: c_int, message: *const c_char);
+    fn ui_progress_close();
     fn ui_set_provider_edit_cbs(
         on_init: extern "C" fn(),
         on_fetch: extern "C" fn(),
@@ -107,6 +111,30 @@ pub fn set_status(text: &str) {
     if let Some(c) = to_cstring(text) {
         unsafe { ui_set_status(c.as_ptr()) }
     }
+}
+
+/// Register the transcription progress dialog's Cancel callback. Call once at init.
+pub fn install_progress_cb() {
+    unsafe { ui_set_progress_cancel_cb(progress_cancel) }
+}
+
+/// Open (or re-show) the modeless transcription progress dialog with a status line.
+pub fn progress_open(message: &str) {
+    if let Some(c) = to_cstring(message) {
+        unsafe { ui_progress_open(c.as_ptr()) }
+    }
+}
+
+/// Update the progress bar (percent 0..=100) + status line. No-op if not open.
+pub fn progress_update(percent: u8, message: &str) {
+    if let Some(c) = to_cstring(message) {
+        unsafe { ui_progress_set(percent as c_int, c.as_ptr()) }
+    }
+}
+
+/// Close + destroy the progress dialog (no-op if not open).
+pub fn progress_close() {
+    unsafe { ui_progress_close() }
 }
 
 /// Destroy the dialog window. Currently unused (the window persists for the
@@ -351,6 +379,12 @@ unsafe fn write_cstr(buf: *mut c_char, buf_sz: c_int, s: &str) {
     let bytes = &s.as_bytes()[..end];
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
     *buf.add(bytes.len()) = 0;
+}
+
+/// The progress dialog's Cancel / [x]: stop the in-flight transcription (same
+/// path as the chat window's stop).
+extern "C" fn progress_cancel() {
+    let _ = std::panic::catch_unwind(crate::ui::bridge::cancel);
 }
 
 extern "C" fn prov_tabs(buf: *mut c_char, buf_sz: c_int) {

@@ -51,6 +51,7 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     ui::ffi::install_provider_edit_cbs();
     ui::ffi::install_preset_cbs();
     ui::ffi::install_preset_edit_cbs();
+    ui::ffi::install_progress_cb();
 
     // Channels: worker -> main (crossbeam) for UI events and tool ops;
     // main/UI -> worker (tokio mpsc) for user intents.

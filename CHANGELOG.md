@@ -26,6 +26,8 @@ into a versioned heading and attaches its entries to the GitHub release — see
   notes**, a **plain-text file**, or an **SRT subtitle file** — no chat needed. File
   outputs are written next to the source media and never overwrite an existing file
   (a numbered variant is used instead); the result is spoken and its path announced.
+  A **progress dialog** (progress bar + Cancel) shows while a transcription action
+  runs, so sighted users get visible progress and can cancel part-way through.
 - **Advanced mode (auto-approve edits)**: a toggle that lets the assistant apply
   changes **without asking for confirmation each time**. Flip it from **Extensions
   → ReaLackey → "Advanced mode (auto-approve edits)"** (the menu item shows the

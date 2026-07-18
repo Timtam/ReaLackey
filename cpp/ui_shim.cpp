@@ -46,6 +46,8 @@ static prov_list_cb   g_prov_list   = NULL;
 static prov_action_cb g_prov_action = NULL;
 static HWND        g_prov_dlg = NULL;  // provider LIST dialog, while open
 static HWND        g_pe_dlg   = NULL;  // provider settings dialog, while open
+static HWND               g_progress_dlg    = NULL;  // transcription progress, while open
+static progress_cancel_cb g_progress_cancel = NULL;
 static pe_init_cb  g_pe_init  = NULL;
 static pe_fetch_cb g_pe_fetch = NULL;
 static pe_ok_cb    g_pe_ok    = NULL;
@@ -852,6 +854,64 @@ extern "C" void ui_set_provider_cbs(prov_tabs_cb on_tabs, prov_list_cb on_list, 
   g_prov_tabs   = on_tabs;
   g_prov_list   = on_list;
   g_prov_action = on_action;
+}
+
+// ---- transcription progress dialog (modeless) -------------------------------
+// Cancel and the window's [x] both fire the cancel callback (which sends the
+// worker a stop) and tear the dialog down; the worker also closes it on finish.
+static RAAI_DLGRET ProgressProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  (void)lParam;
+  switch (msg) {
+    case WM_INITDIALOG:
+      SendDlgItemMessage(hwnd, ID_PROG_BAR, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+      SendDlgItemMessage(hwnd, ID_PROG_BAR, PBM_SETPOS, 0, 0);
+      return TRUE;
+    case WM_COMMAND:
+      if (LOWORD(wParam) == IDCANCEL) {
+        if (g_progress_cancel) g_progress_cancel();
+        DestroyWindow(hwnd);
+        return TRUE;
+      }
+      return FALSE;
+    case WM_CLOSE:
+      if (g_progress_cancel) g_progress_cancel();
+      DestroyWindow(hwnd);
+      return TRUE;
+    case WM_DESTROY:
+      g_progress_dlg = NULL;
+      return FALSE;
+  }
+  return FALSE;
+}
+
+extern "C" void ui_set_progress_cancel_cb(progress_cancel_cb on_cancel) {
+  g_progress_cancel = on_cancel;
+}
+
+extern "C" void ui_progress_open(const char* message) {
+  if (!g_progress_dlg) {
+    // NULL owner: a modeless top-level dialog REAPER pumps on our thread (same as
+    // the assistant window). CreateDialogParam returns immediately.
+    g_progress_dlg = CreateDialogParam(g_hinst, MAKEINTRESOURCE(ID_PROGRESS_DLG),
+                                       NULL, ProgressProc, 0);
+  }
+  if (g_progress_dlg) {
+    if (message) set_ctrl_text(g_progress_dlg, ID_PROG_TEXT, message);
+    ShowWindow(g_progress_dlg, SW_SHOW);
+    SetForegroundWindow(g_progress_dlg);
+  }
+}
+
+extern "C" void ui_progress_set(int percent, const char* message) {
+  if (!g_progress_dlg) return;
+  if (percent < 0) percent = 0;
+  else if (percent > 100) percent = 100;
+  SendDlgItemMessage(g_progress_dlg, ID_PROG_BAR, PBM_SETPOS, (WPARAM)percent, 0);
+  if (message) set_ctrl_text(g_progress_dlg, ID_PROG_TEXT, message);
+}
+
+extern "C" void ui_progress_close(void) {
+  if (g_progress_dlg) DestroyWindow(g_progress_dlg);  // WM_DESTROY clears g_progress_dlg
 }
 
 extern "C" void ui_show_providers(void) {

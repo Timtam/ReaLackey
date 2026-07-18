@@ -111,6 +111,20 @@ int ui_popup_menu(const char* items_newline);
 // 1 for OK/Yes, 0 for No/Cancel. Main thread only.
 int ui_message_box(const char* title, const char* text, int flags);
 
+// --- transcription progress dialog -------------------------------------------
+// A MODELESS dialog (progress bar + Cancel) shown while a transcription action
+// runs, so sighted users see progress. The worker drives it from the main thread
+// via these calls. Cancel / window-close fire the registered callback (which sends
+// the worker a cancel), matching the chat window's stop behaviour.
+typedef void (*progress_cancel_cb)(void);
+void ui_set_progress_cancel_cb(progress_cancel_cb on_cancel);
+// Open (or re-show) the progress dialog with an initial status line.
+void ui_progress_open(const char* message);
+// Update the bar (percent 0..100) and the status line. No-op if not open.
+void ui_progress_set(int percent, const char* message);
+// Close + destroy the dialog. No-op if not open.
+void ui_progress_close(void);
+
 // --- provider settings dialog (Phase 5, M5) ----------------------------------
 // A real dialog (add / edit one account) with a Model field next to a "Fetch
 // models" button. Rust drives it through these callbacks + control accessors.

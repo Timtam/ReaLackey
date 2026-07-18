@@ -133,6 +133,11 @@ impl PumpSurface {
                 ui::ffi::set_status("Error.");
                 output::speak(&format!("Error: {e}"));
             }
+            UiEvent::ProgressOpen(msg) => ui::ffi::progress_open(&msg),
+            UiEvent::ProgressUpdate { percent, message } => {
+                ui::ffi::progress_update(percent, &message)
+            }
+            UiEvent::ProgressClose => ui::ffi::progress_close(),
         }
     }
 

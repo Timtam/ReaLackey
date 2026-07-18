@@ -56,4 +56,11 @@ pub enum UiEvent {
     Done,
     /// Surface an error in the log + status + OSARA.
     Error(String),
+    /// Open the modeless transcription progress dialog (a transcription action, for
+    /// sighted feedback). Carries the initial status line.
+    ProgressOpen(String),
+    /// Update the progress dialog: bar percent (0..=100) + status line.
+    ProgressUpdate { percent: u8, message: String },
+    /// Close the progress dialog.
+    ProgressClose,
 }

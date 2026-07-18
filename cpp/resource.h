@@ -56,4 +56,10 @@
 #define ID_PRE_NAME          1051   // preset name (single line)
 #define ID_PRE_BODY          1052   // preset body (multiline)
 
+// Transcription progress: a modeless dialog with a progress bar + Cancel, shown
+// while a transcription ACTION runs (visible feedback for sighted users).
+#define ID_PROGRESS_DLG      1060
+#define ID_PROG_TEXT         1061   // status line ("Transcribing part 2 of 3…")
+#define ID_PROG_BAR          1062   // msctls_progress32
+
 #endif // RAAI_RESOURCE_H

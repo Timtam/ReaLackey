@@ -1063,6 +1063,12 @@ async fn run_transcription(
         }
     }
 
+    // A user-run action gets a visible progress dialog (sighted feedback + Cancel);
+    // the chat tool doesn't (the chat window shows status). Idempotent to close.
+    if user_initiated {
+        let _ = ui_tx.send(UiEvent::ProgressOpen("Preparing to transcribe\u{2026}".into()));
+    }
+
     // 3. Probe the target item: transcribable length, resolved index, source path.
     let probe = exec_tool(op_tx, "__transcribe_probe".to_string(), input.clone()).await;
     if probe.is_error {
@@ -1108,11 +1114,18 @@ async fn run_transcription(
         if *length < transcription::MIN_CHUNK_SECONDS {
             continue;
         }
-        let _ = ui_tx.send(UiEvent::Status(if n > 1 {
+        let msg = if n > 1 {
             format!("Transcribing\u{2026} (part {}/{})", i + 1, n)
         } else {
             "Transcribing\u{2026}".to_string()
-        }));
+        };
+        let _ = ui_tx.send(UiEvent::Status(msg.clone()));
+        // Progress bar: fraction of chunks DONE so far (the bar advances as each
+        // chunk's transcription completes, below).
+        if user_initiated {
+            let percent = ((i as u32 * 100) / n as u32) as u8;
+            let _ = ui_tx.send(UiEvent::ProgressUpdate { percent, message: msg.clone() });
+        }
 
         let rendered = exec_tool(
             op_tx,
@@ -1175,7 +1188,14 @@ async fn run_transcription(
             }
         };
         match result {
-            Ok(t) => parts.push((*start, t)),
+            Ok(t) => {
+                parts.push((*start, t));
+                // Advance the bar to the fraction of chunks now complete.
+                if user_initiated {
+                    let percent = (((i as u32 + 1) * 100) / n as u32) as u8;
+                    let _ = ui_tx.send(UiEvent::ProgressUpdate { percent, message: msg.clone() });
+                }
+            }
             Err(e) => {
                 return TranscribeOutcomeKind::Failed(format!("transcription failed: {e}"))
             }
@@ -1261,7 +1281,10 @@ async fn handle_transcribe_action(
     )));
 
     // User-initiated (they ran the action): running it is their consent — no prompt.
-    let t = match run_transcription(ui_tx, op_tx, task_rx, json!({}), true).await {
+    let outcome = run_transcription(ui_tx, op_tx, task_rx, json!({}), true).await;
+    // Close the progress dialog on every outcome (idempotent if it never opened).
+    let _ = ui_tx.send(UiEvent::ProgressClose);
+    let t = match outcome {
         TranscribeOutcomeKind::Done(t) => t,
         TranscribeOutcomeKind::NoProvider => {
             let _ = ui_tx.send(UiEvent::Error(
