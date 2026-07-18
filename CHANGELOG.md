@@ -10,6 +10,16 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS: **Alt+number message reading** is now reliable. Jumping to a message
+  (Alt+1 … Alt+0) read it only intermittently on the Mac because it relied on
+  moving focus to the message heading, and VoiceOver only sometimes announces a
+  programmatic focus change on the WebKit view. The read now goes through the
+  same aria-live channel the copy confirmation uses — reliable on VoiceOver and
+  NVDA alike — and it announces the message's actual text, so navigating to an
+  assistant message now reads the response rather than just "Assistant".
+
 ### Added
 
 - **Perplexity (Agent API)** provider (Add → "Perplexity (Agent API, web-grounded)").

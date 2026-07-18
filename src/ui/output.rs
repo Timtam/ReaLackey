@@ -471,7 +471,7 @@ details.reasoning .rbody pre{background:#111;padding:8px;border-radius:5px;overf
 <div id="log"></div>
 <div id="status" role="status" aria-atomic="true" aria-label="Assistant status">Ready.</div>
 <form id="composer">
-<textarea id="msg" rows="1" aria-label="Message the assistant. Alt plus a number jumps to that message; press it again quickly to copy the message. Alt plus P inserts a saved prompt preset." placeholder="Ask the assistant…  (Enter = send · Shift+Enter = new line · Alt+number = jump to a message, again to copy · Alt+P = insert a preset)"></textarea>
+<textarea id="msg" rows="1" aria-label="Message the assistant. Alt plus a number reads that message aloud; press it again quickly to copy the message. Alt plus P inserts a saved prompt preset." placeholder="Ask the assistant…  (Enter = send · Shift+Enter = new line · Alt+number = read a message, again to copy · Alt+P = insert a preset)"></textarea>
 <button id="preset" type="button" aria-label="Insert a saved prompt preset. Keyboard shortcut Alt plus P. Opens a menu.">Presets</button>
 <button id="send" type="submit">Send</button>
 </form><script>
@@ -512,8 +512,15 @@ function copyText(t){var ok=false;try{var p=document.activeElement,ta=document.c
 function msgHeadings(){return Array.prototype.slice.call(document.querySelectorAll('#log h2.turn'));}
 function msgText(h){if(!h)return '';if(h.classList.contains('assistant')){var b=h.nextElementSibling;return (b&&b.classList&&b.classList.contains('body'))?b.textContent.trim():'';}return h.textContent.trim().replace(/^You:\s*/,'');}
 var lastMsgNav={n:0,t:0};
-// Alt+N focuses message N (the screen reader reads it); a quick second Alt+N copies it.
-function gotoMessage(n){var hs=msgHeadings();if(n<1||n>hs.length){liveAnnounce(hs.length?('Only '+hs.length+' message'+(hs.length===1?'':'s')+'.'):'No messages yet.');return;}var h=hs[n-1],now=(new Date()).getTime();if(lastMsgNav.n===n&&now-lastMsgNav.t<600){lastMsgNav={n:0,t:0};liveAnnounce(copyText(msgText(h))?'Message copied.':'Copy failed.');return;}lastMsgNav={n:n,t:now};h.setAttribute('tabindex','-1');h.scrollIntoView({block:'center'});h.focus();}
+// Alt+N reads message N; a quick second Alt+N copies it. The read goes through the
+// aria-live region (the same path the copy confirmation uses) rather than moving DOM
+// focus to the heading: VoiceOver on the macOS WKWebView only intermittently announces
+// a programmatic focus() on a non-interactive (tabindex=-1) element, which made the
+// read fire "sometimes". aria-live is reliable on both NVDA and VoiceOver. We announce
+// the message's actual text (a user turn's prompt, or the assistant turn's answer), so
+// navigating to an assistant message now reads the response, not just the "Assistant"
+// heading. Focus stays in the composer; scroll still brings the message into view.
+function gotoMessage(n){var hs=msgHeadings();if(n<1||n>hs.length){liveAnnounce(hs.length?('Only '+hs.length+' message'+(hs.length===1?'':'s')+'.'):'No messages yet.');return;}var h=hs[n-1],now=(new Date()).getTime();if(lastMsgNav.n===n&&now-lastMsgNav.t<600){lastMsgNav={n:0,t:0};liveAnnounce(copyText(msgText(h))?'Message copied.':'Copy failed.');return;}lastMsgNav={n:n,t:now};h.scrollIntoView({block:'center'});liveAnnounce(msgText(h)||h.textContent.trim());}
 var generating=false;
 function setGenerating(b){generating=!!b;}
 function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height='auto';var max=Math.round(window.innerHeight*0.4);m.style.height=Math.min(m.scrollHeight,max)+'px';}
