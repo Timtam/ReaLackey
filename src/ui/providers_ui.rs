@@ -27,6 +27,8 @@ struct Preset {
     id: &'static str,
     /// Default provider label.
     label: &'static str,
+    /// What the account is for (chat vs transcription).
+    role: ProviderRole,
     kind: AdapterKind,
     /// OpenAI-compatible endpoint (empty for Anthropic / a blank custom slot).
     base_url: &'static str,
@@ -44,6 +46,7 @@ const PRESETS: &[Preset] = &[
         menu: "Claude (Anthropic)",
         id: "anthropic",
         label: "Claude (Anthropic)",
+        role: ProviderRole::Chat,
         kind: AdapterKind::Anthropic,
         base_url: "",
         model: "claude-opus-4-8",
@@ -54,6 +57,7 @@ const PRESETS: &[Preset] = &[
         menu: "OpenAI",
         id: "openai",
         label: "OpenAI",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "https://api.openai.com/v1",
         model: "gpt-4o",
@@ -64,6 +68,7 @@ const PRESETS: &[Preset] = &[
         menu: "Groq",
         id: "groq",
         label: "Groq",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "https://api.groq.com/openai/v1",
         model: "llama-3.3-70b-versatile",
@@ -74,6 +79,7 @@ const PRESETS: &[Preset] = &[
         menu: "OpenRouter",
         id: "openrouter",
         label: "OpenRouter",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "https://openrouter.ai/api/v1",
         model: "openai/gpt-4o",
@@ -84,6 +90,7 @@ const PRESETS: &[Preset] = &[
         menu: "DeepSeek",
         id: "deepseek",
         label: "DeepSeek",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "https://api.deepseek.com",
         model: "deepseek-chat",
@@ -94,6 +101,7 @@ const PRESETS: &[Preset] = &[
         menu: "xAI (Grok)",
         id: "xai",
         label: "xAI (Grok)",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "https://api.x.ai/v1",
         model: "grok-2-latest",
@@ -104,6 +112,7 @@ const PRESETS: &[Preset] = &[
         menu: "Gemini (OpenAI-compatible)",
         id: "gemini",
         label: "Gemini",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
         model: "gemini-3.5-flash",
@@ -118,6 +127,7 @@ const PRESETS: &[Preset] = &[
         menu: "Perplexity (Agent API, web-grounded)",
         id: "perplexity",
         label: "Perplexity",
+        role: ProviderRole::Chat,
         kind: AdapterKind::PerplexityAgent,
         base_url: "",
         model: "openai/gpt-5.1",
@@ -128,6 +138,7 @@ const PRESETS: &[Preset] = &[
         menu: "Ollama (local)",
         id: "ollama",
         label: "Ollama (local)",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "http://localhost:11434/v1",
         model: "llama3.2",
@@ -138,6 +149,7 @@ const PRESETS: &[Preset] = &[
         menu: "LM Studio (local)",
         id: "lmstudio",
         label: "LM Studio (local)",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "http://localhost:1234/v1",
         model: "local-model",
@@ -152,9 +164,36 @@ const PRESETS: &[Preset] = &[
         menu: "oMLX (local, Apple Silicon)",
         id: "omlx",
         label: "oMLX (local)",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "http://localhost:8000/v1",
         model: "qwen3-8b",
+        max_tokens: 4096,
+        vision: false,
+    },
+    // Transcription (speech-to-text) accounts — a different ProviderRole. Both use
+    // the OpenAI-compatible /audio/transcriptions endpoint (one adapter, cloud or
+    // local). whisper-1 gives timestamped segments; a local whisper server (e.g.
+    // whisper.cpp, faster-whisper, LocalAI) exposes the same shape.
+    Preset {
+        menu: "OpenAI Whisper (transcription)",
+        id: "whisper",
+        label: "OpenAI Whisper",
+        role: ProviderRole::Transcription,
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "https://api.openai.com/v1",
+        model: "whisper-1",
+        max_tokens: 4096,
+        vision: false,
+    },
+    Preset {
+        menu: "Local Whisper server (transcription)",
+        id: "whisper-local",
+        label: "Local Whisper",
+        role: ProviderRole::Transcription,
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "http://localhost:8080/v1",
+        model: "whisper-1",
         max_tokens: 4096,
         vision: false,
     },
@@ -162,6 +201,7 @@ const PRESETS: &[Preset] = &[
         menu: "Custom endpoint\u{2026}",
         id: "custom",
         label: "Custom",
+        role: ProviderRole::Chat,
         kind: AdapterKind::OpenAiCompatible,
         base_url: "",
         model: "",
@@ -171,14 +211,13 @@ const PRESETS: &[Preset] = &[
 ];
 
 /// Newline-separated labels for the listbox, in registry order. The default
-/// account is marked with a leading `*`; accounts that can't yet send show why.
+/// account FOR ITS ROLE is marked with a leading `*` (so both the chat default and
+/// the transcription default are marked); accounts that can't yet send show why.
 pub fn list_text() -> String {
-    let default = registry::default_id();
     registry::list()
         .iter()
         .map(|p| {
-            let is_default = default.as_deref() == Some(p.id.as_str());
-            let mark = if is_default { "* " } else { "   " };
+            let mark = if registry::is_default(&p.id) { "* " } else { "   " };
             let status = if p.can_send() {
                 ""
             } else if p.kind.requires_key() {
@@ -188,7 +227,12 @@ pub fn list_text() -> String {
             } else {
                 ""
             };
-            format!("{mark}{}  ({}){}", p.label, p.model, status)
+            // Tag non-chat accounts so the list distinguishes them (spoken).
+            let role_tag = match p.role {
+                ProviderRole::Chat => "",
+                ProviderRole::Transcription => "  [transcription]",
+            };
+            format!("{mark}{}  ({}){}{}", p.label, p.model, role_tag, status)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -216,6 +260,9 @@ struct ProvSession {
     is_new: bool,
     /// Existing id (edit) or a pre-generated unique id (add).
     id: String,
+    /// What the account is for (chat vs transcription) — from the preset (add) or
+    /// the existing config (edit). Drives which fields the dialog shows.
+    role: ProviderRole,
     kind: AdapterKind,
     // Prefill values for the fields (used by `edit_dialog_init`).
     label: String,
@@ -264,6 +311,7 @@ fn add_provider() -> bool {
     run_settings_dialog(ProvSession {
         is_new: true,
         id: unique_id(preset.id),
+        role: preset.role,
         kind: preset.kind,
         label: preset.label.to_string(),
         base_url: preset.base_url.to_string(),
@@ -300,6 +348,7 @@ fn edit_provider(index: i32) -> bool {
     run_settings_dialog(ProvSession {
         is_new: false,
         id: cfg.id.clone(),
+        role: cfg.role,
         kind: cfg.kind,
         label: cfg.label.clone(),
         base_url: cfg.base_url.clone().unwrap_or_default(),
@@ -364,13 +413,19 @@ fn set_default(index: i32) -> bool {
     let Some(cfg) = provider_at(index) else {
         return false;
     };
-    if registry::default_id().as_deref() == Some(cfg.id.as_str()) {
+    if registry::is_default(&cfg.id) {
         osara::announce(&format!("{} is already the default.", cfg.label));
         return false; // no change
     }
     match registry::set_default(&cfg.id) {
         Ok(()) => {
-            osara::announce(&format!("{} is now the default provider.", cfg.label));
+            // set_default is role-aware: a transcription account becomes the
+            // transcription default, not the chat default.
+            let what = match cfg.role {
+                ProviderRole::Transcription => "default transcription provider",
+                ProviderRole::Chat => "default provider",
+            };
+            osara::announce(&format!("{} is now the {what}.", cfg.label));
             true
         }
         Err(e) => {
@@ -395,9 +450,11 @@ pub fn edit_dialog_init() {
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTURNS, &sess.max_turns.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_KEY, "");
         // Fixed-endpoint providers (Anthropic, Perplexity) hide the base-URL row and
-        // the vision/audio checkboxes. OpenAI-compatible shows all three. The
-        // Anthropic-only "Extended thinking" toggle shares the vision row (they never
-        // coexist); it's hidden for every other kind.
+        // the vision/audio checkboxes. OpenAI-compatible chat accounts show all three.
+        // A transcription account shows the base URL but hides vision/audio — those
+        // are chat capabilities; it only turns audio into text. The Anthropic-only
+        // "Extended thinking" toggle shares the vision row and is hidden elsewhere.
+        let transcription = sess.role == ProviderRole::Transcription;
         if sess.kind.has_fixed_endpoint() {
             ui::ffi::pe_show(ui::ffi::PE_BASEURL, false);
             ui::ffi::pe_show(ui::ffi::PE_BASEURL_LBL, false);
@@ -405,8 +462,13 @@ pub fn edit_dialog_init() {
             ui::ffi::pe_show(ui::ffi::PE_AUDIO, false);
         } else {
             ui::ffi::pe_set_text(ui::ffi::PE_BASEURL, &sess.base_url);
-            ui::ffi::pe_set_check(ui::ffi::PE_VISION, sess.vision);
-            ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, sess.audio);
+            if transcription {
+                ui::ffi::pe_show(ui::ffi::PE_VISION, false);
+                ui::ffi::pe_show(ui::ffi::PE_AUDIO, false);
+            } else {
+                ui::ffi::pe_set_check(ui::ffi::PE_VISION, sess.vision);
+                ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, sess.audio);
+            }
         }
         if sess.kind == AdapterKind::Anthropic {
             ui::ffi::pe_set_check(ui::ffi::PE_THINKING, sess.thinking);
@@ -629,12 +691,13 @@ pub fn edit_dialog_fetch() {
 /// dialog should close (true = close; false = keep open so the user can fix an
 /// error).
 pub fn edit_dialog_ok() -> bool {
-    let Some((is_new, id, kind, def_label, def_model, def_max, def_turns, keys, keys_dirty)) =
+    let Some((is_new, id, role, kind, def_label, def_model, def_max, def_turns, keys, keys_dirty)) =
         SESSION.with(|s| {
             s.borrow().as_ref().map(|x| {
                 (
                     x.is_new,
                     x.id.clone(),
+                    x.role,
                     x.kind,
                     x.label.clone(),
                     x.model.clone(),
@@ -689,16 +752,17 @@ pub fn edit_dialog_ok() -> bool {
             }
         }
     };
+    let transcription = role == ProviderRole::Transcription;
     let (base_url, vision) = if kind.has_fixed_endpoint() {
         // No user base URL. Anthropic is always vision-capable; Perplexity's Agent
         // adapter doesn't bridge images (v1), so it's not.
         (None, kind == AdapterKind::Anthropic)
     } else {
         let b = ui::ffi::pe_get_text(ui::ffi::PE_BASEURL).trim().to_string();
-        (
-            (!b.is_empty()).then_some(b),
-            ui::ffi::pe_get_check(ui::ffi::PE_VISION),
-        )
+        // Transcription accounts have the vision checkbox hidden — never read its
+        // (possibly stale) state; they are not vision accounts.
+        let v = !transcription && ui::ffi::pe_get_check(ui::ffi::PE_VISION);
+        ((!b.is_empty()).then_some(b), v)
     };
     let key = ui::ffi::pe_get_text(ui::ffi::PE_KEY).trim().to_string();
 
@@ -707,17 +771,16 @@ pub fn edit_dialog_ok() -> bool {
     // audio" checkbox — the id heuristic only seeds its default (add/fetch). This
     // lets locally-run multimodal models (e.g. Gemma) enable audio even though
     // their id can't be reliably classified. Anthropic models don't take audio.
-    let supports_audio =
-        kind == AdapterKind::OpenAiCompatible && ui::ffi::pe_get_check(ui::ffi::PE_AUDIO);
+    let supports_audio = kind == AdapterKind::OpenAiCompatible
+        && !transcription
+        && ui::ffi::pe_get_check(ui::ffi::PE_AUDIO);
     // Extended thinking (reasoning) is Anthropic-only — the checkbox is shown just
     // for Anthropic accounts; OpenAI-compatible models expose reasoning inherently.
     let thinking = kind == AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_THINKING);
     let cfg = ProviderConfig {
         id,
         label,
-        // Every provider added through this dialog today is a chat account; the
-        // role-aware UI (transcription tab) will thread the real role through here.
-        role: ProviderRole::Chat,
+        role,
         kind,
         base_url,
         model,

@@ -169,10 +169,14 @@ pub fn list() -> Vec<ProviderConfig> {
     STORE.read().unwrap().providers.clone()
 }
 
-/// The CHAT default account id, if any. (Back-compat name; the role-aware UI will
-/// add per-role variants.)
-pub fn default_id() -> Option<String> {
-    STORE.read().unwrap().default.clone()
+/// Whether `id` is the default account FOR ITS OWN ROLE (drives the list marker,
+/// so a transcription default is marked even though it isn't the chat default).
+pub fn is_default(id: &str) -> bool {
+    let s = STORE.read().unwrap();
+    match s.providers.iter().find(|p| p.id == id) {
+        Some(p) => s.role_default(p.role).as_deref() == Some(id),
+        None => false,
+    }
 }
 
 /// The default account's config (the one that drives the conversation — chat).
