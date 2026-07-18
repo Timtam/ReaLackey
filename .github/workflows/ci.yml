@@ -1,8 +1,11 @@
 name: CI
 
-# Windows is the primary target; the macOS job compile-checks the SWELL/mac
-# backends. The mac build now compiles + links, so it is a hard gate again
-# (runtime behaviour on macOS is still unvalidated — no mac tester yet).
+# Windows is the primary target; the macOS job builds + links the SWELL/mac
+# backends as a hard gate (runtime behaviour on macOS is still unvalidated).
+# Both jobs also publish a downloadable build artifact on every run — a release
+# .dll and a universal .dylib — so testers can grab the latest build without
+# waiting for a tagged release. Artifacts are on each run's summary page under
+# "Artifacts"; they upload only from a green run (built after the test/build gates).
 
 on:
   push:
@@ -28,6 +31,18 @@ jobs:
         run: cargo test
       - name: Clippy
         run: cargo clippy --all-targets
+      # A release .dll testers can drop straight into REAPER's UserPlugins, without
+      # waiting for a tagged release. Built after the gates so artifacts only come
+      # from a green run. Unsigned (as Windows REAPER extensions normally are).
+      - name: Build release artifact
+        run: cargo build --release
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper_realackey-windows
+          path: target/release/reaper_realackey.dll
+          if-no-files-found: error
+          retention-days: 30
 
   macos:
     name: macOS — build (validates the mac backends)
@@ -44,23 +59,28 @@ jobs:
       # SWELL headers + the resource generator live in WDL.
       - name: Fetch WDL (SWELL)
         run: git clone --depth 1 https://github.com/justinfrankel/WDL.git vendor/WDL
-      - name: Build (host arch)
+      # Tests are host-independent (DSP, parsing, adapters); run them here for fast
+      # feedback before the slower universal build.
+      - name: Test
         env:
           # reaper-rs uses bindgen (needs libclang); Xcode's Command Line Tools ship it.
           LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
-        run: cargo build
-      # The release ships a UNIVERSAL (arm64 + x86_64) dylib so it loads whether
-      # REAPER runs native Apple Silicon, on Intel, or under Rosetta. The runner is
-      # arm64, so cross-compile the x86_64 slice here to catch breakage before a
-      # release rather than during it.
-      - name: Cross-compile x86_64 slice (universal-build check)
-        env:
-          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
-        run: |
-          rustup target add x86_64-apple-darwin
-          cargo build --target x86_64-apple-darwin
-      # Tests are host-independent (DSP, parsing, adapters); run them here too.
-      - name: Test
-        env:
-          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
         run: cargo test
+      # Build the UNIVERSAL (arm64 + x86_64) release dylib testers can load whether
+      # REAPER runs native Apple Silicon, on Intel, or under Rosetta. This is the
+      # exact script the Release workflow uses, so it also validates both arches
+      # compile + link in release (replacing the old per-arch debug checks). No
+      # signing secrets are passed here, so the script ad-hoc-signs it: testers
+      # clear quarantine once with `xattr -dr com.apple.quarantine <dylib>`.
+      - name: Build universal dylib (release, ad-hoc signed)
+        env:
+          LIBCLANG_PATH: /Library/Developer/CommandLineTools/usr/lib
+          ASSET: reaper_realackey.dylib
+        run: bash .github/scripts/build-macos-universal.sh
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reaper_realackey-macos-universal
+          path: dist/reaper_realackey.dylib
+          if-no-files-found: error
+          retention-days: 30
