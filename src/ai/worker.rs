@@ -345,6 +345,9 @@ async fn handle_prompt(
             system: Some(config::system_prompt(
                 caps.supports_images,
                 caps.supports_audio,
+                // Mirror the transcribe_item tool gating: a transcription provider
+                // is configured iff there's an active one for that role.
+                registry::active_for(registry::ProviderRole::Transcription).is_some(),
                 crate::reaper::osara::is_running(),
             )),
             max_tokens: cfg.max_tokens,

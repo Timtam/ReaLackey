@@ -67,7 +67,16 @@ pub fn confirmation_required() -> bool {
 /// a paragraph tells the model the user is blind, so it stops giving visual
 /// directions ("look for the cog icon") and instead sees GUIs itself / prefers
 /// keyboard- and action-based paths.
-pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader: bool) -> String {
+///
+/// `transcription` mirrors the `transcribe_item` tool gating: when it is FALSE
+/// (no transcription provider configured) the tool is absent, so a paragraph tells
+/// the model to have the user configure one rather than claim it can transcribe.
+pub fn system_prompt(
+    supports_images: bool,
+    supports_audio: bool,
+    transcription: bool,
+    screen_reader: bool,
+) -> String {
     let mut prompt = String::from(
     "You are an AI assistant embedded in the REAPER digital audio workstation. You have a \
      large set of tools — consult the tool list, which is authoritative for what you can \
@@ -137,6 +146,20 @@ pub fn system_prompt(supports_images: bool, supports_audio: bool, screen_reader:
         );
     }
 
+    // Transcription: the transcribe_item tool is only in the toolset when a
+    // transcription provider is configured. When it isn't, tell the model to have
+    // the user set one up rather than claim it can transcribe (it can't yet).
+    if !transcription {
+        prompt.push_str(
+    "There is NO transcription (speech-to-text) provider configured, so you have no way to \
+     transcribe audio yet (the transcribe_item tool is not in your toolset). If the user asks you \
+     to transcribe, caption, subtitle, or pull the spoken words out of an audio or media item, do \
+     NOT attempt a workaround — tell them they must first add a transcription provider: in the \
+     Providers dialog, on the Transcription tab, add one (e.g. OpenAI Whisper, or a local Whisper \
+     server). Once they have, the transcription tool becomes available. ",
+        );
+    }
+
     // Screen-reader user (OSARA detected): stop the model from giving sighted
     // directions and steer it toward accessible paths.
     if screen_reader {
@@ -184,28 +207,28 @@ mod tests {
     // text-only account, the user accepts, and the tool isn't there.
     #[test]
     fn prompt_hides_audio_without_support() {
-        let p = system_prompt(true, false, false);
+        let p = system_prompt(true, false, true, false);
         assert!(!p.contains("listen_to_audio"), "must not mention audio tool");
         assert!(!p.contains("LISTEN"), "must not offer listening");
     }
 
     #[test]
     fn prompt_hides_vision_without_support() {
-        let p = system_prompt(false, true, false);
+        let p = system_prompt(false, true, true, false);
         assert!(!p.contains("capture_view"), "must not mention vision tool");
         assert!(!p.contains("plugin_click"), "must not mention pixel control");
     }
 
     #[test]
     fn prompt_shows_capabilities_when_supported() {
-        let p = system_prompt(true, true, false);
+        let p = system_prompt(true, true, true, false);
         assert!(p.contains("listen_to_audio"), "audio-capable: offer it");
         assert!(p.contains("capture_view"), "vision-capable: offer it");
     }
 
     #[test]
     fn prompt_text_only_offers_neither() {
-        let p = system_prompt(false, false, false);
+        let p = system_prompt(false, false, true, false);
         assert!(!p.contains("listen_to_audio"));
         assert!(!p.contains("capture_view"));
         assert!(p.ends_with("Answer concisely."));
@@ -214,13 +237,13 @@ mod tests {
     // Screen-reader (OSARA) framing is opt-in and must not leak to sighted users.
     #[test]
     fn prompt_omits_screen_reader_framing_by_default() {
-        let p = system_prompt(true, true, false);
+        let p = system_prompt(true, true, true, false);
         assert!(!p.contains("BLIND"), "no blind-user framing when OSARA absent");
     }
 
     #[test]
     fn prompt_adds_screen_reader_framing_when_flagged() {
-        let p = system_prompt(true, true, true);
+        let p = system_prompt(true, true, true, true);
         assert!(p.contains("BLIND"), "must state the user is blind");
         assert!(p.contains("cog icon"), "must forbid visual directions");
         // Vision-capable: tell it to be the user's eyes with capture_view.
@@ -230,8 +253,20 @@ mod tests {
     #[test]
     fn prompt_screen_reader_without_vision_omits_capture_view() {
         // No vision: keep the blind-user framing but don't offer capture_view.
-        let p = system_prompt(false, false, true);
+        let p = system_prompt(false, false, true, true);
         assert!(p.contains("BLIND"));
         assert!(!p.contains("capture_view"), "no vision tool without images");
+    }
+
+    #[test]
+    fn prompt_guides_to_configure_transcription_when_absent() {
+        // No transcription provider: guide the user to add one, and NEVER claim it
+        // can transcribe (mirrors the gated-out transcribe_item tool).
+        let p = system_prompt(false, false, false, false);
+        assert!(p.contains("Transcription tab"), "must guide the user to add a provider");
+        assert!(p.contains("no way to transcribe"), "must state it cannot transcribe yet");
+        // With a provider configured, no guidance (the transcribe_item tool self-advertises).
+        let q = system_prompt(false, false, true, false);
+        assert!(!q.contains("Transcription tab"), "no guidance when a provider exists");
     }
 }
