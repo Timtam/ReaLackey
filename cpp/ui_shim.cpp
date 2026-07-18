@@ -234,9 +234,11 @@ static void add_list_item(HWND lb, const char* utf8) {
 
 // Repopulate the listbox from Rust, preserving the selection index if possible.
 // The active role tab (0 if the control is missing or nothing is selected).
+// TabCtrl_GetCurSel is a commctrl macro on Windows and a SWELL function on mac —
+// the raw TCM_GETCURSEL message isn't defined by SWELL.
 static int prov_current_tab(HWND hwnd) {
   HWND tabs = GetDlgItem(hwnd, ID_PROV_TABS);
-  int t = tabs ? (int)SendMessage(tabs, TCM_GETCURSEL, 0, 0) : 0;
+  int t = tabs ? TabCtrl_GetCurSel(tabs) : 0;
   return t < 0 ? 0 : t;
 }
 
@@ -279,7 +281,7 @@ static void populate_prov_tabs(HWND hwnd) {
     if (nl == std::string::npos) break;
     start = nl + 1;
   }
-  if (idx > 0) SendMessage(tabs, TCM_SETCURSEL, 0, 0);
+  if (idx > 0) TabCtrl_SetCurSel(tabs, 0);
 }
 
 static void populate_prov_list(HWND hwnd) {
