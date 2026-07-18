@@ -463,6 +463,13 @@ details.reasoning .rbody pre{background:#111;padding:8px;border-radius:5px;overf
 #send:hover{background:#1177bb;}
 #preset{flex:0 0 auto;padding:6px 12px;cursor:pointer;color:#e6e6e6;background:#333;border:1px solid #3a3a3a;border-radius:4px;font:inherit;}
 #preset:hover{background:#3d3d3d;}
+/* Optional, collapsed keyboard-shortcut help under the composer. Deliberately
+   NOT tied to the message field (no aria-describedby): a screen reader must not
+   re-read it on every focus of the field. */
+details.help{flex:0 0 auto;padding:0 10px 8px;color:#9a9a9a;font-size:12px;}
+details.help summary{cursor:pointer;padding:2px 0;}
+details.help ul{margin:4px 0 0;padding-left:18px;}
+details.help li{margin:2px 0;}
 </style></head><body>
 <div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
 <!-- NOT a live region: streaming re-renders it token-by-token; role="log"/
@@ -471,10 +478,12 @@ details.reasoning .rbody pre{background:#111;padding:8px;border-radius:5px;overf
 <div id="log"></div>
 <div id="status" role="status" aria-atomic="true" aria-label="Assistant status">Ready.</div>
 <form id="composer">
-<textarea id="msg" rows="1" aria-label="Message the assistant. Alt plus a number reads that message aloud; press it again quickly to copy the message. Alt plus P inserts a saved prompt preset." placeholder="Ask the assistant…  (Enter = send · Shift+Enter = new line · Alt+number = read a message, again to copy · Alt+P = insert a preset)"></textarea>
-<button id="preset" type="button" aria-label="Insert a saved prompt preset. Keyboard shortcut Alt plus P. Opens a menu.">Presets</button>
+<textarea id="msg" rows="1" aria-label="Message the assistant" placeholder="Ask the assistant…"></textarea>
+<button id="preset" type="button" aria-label="Insert a saved prompt preset">Presets</button>
 <button id="send" type="submit">Send</button>
-</form><script>
+</form>
+<details class="help"><summary>Keyboard shortcuts</summary><ul><li>Enter sends; Shift+Enter starts a new line.</li><li>Alt+1 through Alt+0 read that message; press the same combo again quickly to copy it.</li><li>Alt+P inserts a saved prompt preset.</li><li>Escape stops the assistant while it is working.</li></ul></details>
+<script>
 function sd(){var l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight;}
 function addBlock(h){var l=document.getElementById('log');if(l){l.insertAdjacentHTML('beforeend',h);sd();}}
 function tgCount(g){var b=g.querySelector('.tgbody');var n=b.querySelectorAll('details.tool').length;g.querySelector('.tgsum').textContent='Used '+n+' tool'+(n===1?'':'s');}

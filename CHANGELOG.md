@@ -12,6 +12,13 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
+- The message field no longer makes a screen reader recite a long instruction
+  string **every time it gets focus**. Its accessible name is now just "Message
+  the assistant" and the placeholder is a short prompt; the Enter / Alt+number /
+  Alt+P shortcuts moved into an **optional, collapsed "Keyboard shortcuts"**
+  section under the composer. Nothing is announced when you focus the field —
+  previously the full instructions lived in the field's accessible name and
+  placeholder, so VoiceOver (and NVDA) re-read them on every focus.
 - macOS: **Alt+number message reading** is now reliable. Jumping to a message
   (Alt+1 … Alt+0) read it only intermittently on the Mac because it relied on
   moving focus to the message heading, and VoiceOver only sometimes announces a
