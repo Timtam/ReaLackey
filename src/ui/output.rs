@@ -322,6 +322,18 @@ pub fn error(text: &str) {
 pub fn announce(text: &str) {
     STATE.with(|c| c.borrow().announce(text));
 }
+/// Speak `text` to the screen reader exactly ONCE. Prefer OSARA (focus-independent
+/// and cross-platform — it reaches the reader whether or not the chat pane is
+/// focused); fall back to the webview aria-live region only when OSARA isn't
+/// present. Announcing through BOTH — as the old code did — made a reader that
+/// observes each channel (OSARA installed AND focus in the chat pane, the common
+/// case) speak everything twice. Main thread only, like both underlying calls.
+pub fn speak(text: &str) {
+    crate::reaper::osara::announce(text);
+    if !crate::reaper::osara::is_running() {
+        announce(text);
+    }
+}
 /// Update the webview status line. No-op in the plain-text fallback (the native
 /// status field is driven separately via `ffi::set_status`).
 pub fn status(text: &str) {

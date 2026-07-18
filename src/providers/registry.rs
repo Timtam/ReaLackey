@@ -107,6 +107,11 @@ struct Store {
     default: Option<String>,
     #[serde(default)]
     providers: Vec<ProviderConfig>,
+    /// "Advanced mode": apply mutating tools WITHOUT asking for confirmation.
+    /// Off by default; toggled from the Extensions menu / an action. The
+    /// `RAAI_CONFIRM` env var overrides it (see `config::confirmation_required`).
+    #[serde(default)]
+    auto_approve: bool,
 }
 
 static STORE: LazyLock<RwLock<Store>> = LazyLock::new(|| RwLock::new(load_or_seed()));
@@ -139,6 +144,21 @@ pub fn active() -> Option<ProviderConfig> {
 /// Look up one account by id.
 pub fn get(id: &str) -> Option<ProviderConfig> {
     STORE.read().unwrap().providers.iter().find(|p| p.id == id).cloned()
+}
+
+/// "Advanced mode": whether the assistant applies mutating tools without asking.
+/// Persisted; `RAAI_CONFIRM` overrides it (see `config::confirmation_required`).
+pub fn auto_approve() -> bool {
+    STORE.read().unwrap().auto_approve
+}
+
+/// Flip advanced mode and persist. Returns the new state.
+pub fn toggle_auto_approve() -> bool {
+    let mut s = STORE.write().unwrap();
+    s.auto_approve = !s.auto_approve;
+    let now = s.auto_approve;
+    let _ = save(&s);
+    now
 }
 
 /// Set the default account. Errors if the id is unknown.
@@ -432,6 +452,7 @@ fn load_or_seed() -> Store {
             supports_audio: false,
             thinking: false,
         }],
+        auto_approve: false,
     };
     let _ = save(&store);
     migrate_keyring(&store.providers);

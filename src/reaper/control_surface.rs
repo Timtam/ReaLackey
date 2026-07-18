@@ -101,8 +101,7 @@ impl PumpSurface {
             .map_or(elapsed, |t| now.duration_since(t).as_secs());
         if elapsed >= WORKING_ANNOUNCE_SECS && since_last >= WORKING_ANNOUNCE_SECS {
             let msg = format!("Still working… {elapsed} seconds");
-            osara::announce(&msg);
-            crate::ui::output::announce(&msg);
+            crate::ui::output::speak(&msg);
             self.last_working_announce = Some(now);
         }
     }
@@ -124,19 +123,15 @@ impl PumpSurface {
                 output::status(&s); // webview status line (no-op if inactive)
             }
             UiEvent::Announce(s) => {
-                // Two accessible channels: OSARA (speaks directly, focus-
-                // independent) and the webview's aria-live region (read by the
-                // screen reader when the pane is observed).
-                osara::announce(&s);
-                output::announce(&s);
+                // One spoken channel (OSARA when present, else the aria-live
+                // region) so a reader observing both doesn't hear it twice.
+                output::speak(&s);
             }
             UiEvent::Done => {}
             UiEvent::Error(e) => {
                 output::error(&e);
                 ui::ffi::set_status("Error.");
-                let msg = format!("Error: {e}");
-                osara::announce(&msg);
-                output::announce(&msg);
+                output::speak(&format!("Error: {e}"));
             }
         }
     }

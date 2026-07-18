@@ -10,8 +10,24 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+### Added
+
+- **Advanced mode (auto-approve edits)**: a toggle that lets the assistant apply
+  changes **without asking for confirmation each time**. Flip it from **Extensions
+  → ReaLackey → "Advanced mode (auto-approve edits)"** (the menu item shows the
+  current on/off state) or bind the **"ReaLackey: Toggle advanced mode"** action to
+  a key. Off by default; the state persists. The `RAAI_CONFIRM` environment
+  variable still overrides it. (Edits remain undoable in REAPER, and each tool the
+  assistant runs is still announced — you're just not prompted per change.)
+
 ### Fixed
 
+- Screen-reader announcements were spoken **twice** (most noticeably under
+  VoiceOver): the assistant announced through **both** OSARA and the webview's
+  aria-live region, so a reader observing both channels heard everything doubled.
+  It now speaks through **one** channel — OSARA when it's present (focus-independent,
+  both platforms), and the aria-live region only as the fallback when OSARA isn't —
+  so each announcement is spoken once.
 - The message field no longer makes a screen reader recite a long instruction
   string **every time it gets focus**. Its accessible name is now just "Message
   the assistant" and the placeholder is a short prompt; the Enter / Alt+number /

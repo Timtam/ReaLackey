@@ -40,16 +40,18 @@ fn resolve_max_turns(env: Option<&str>, provider_value: u32) -> usize {
     pv.clamp(1, 200)
 }
 
-/// Whether mutating tools require user confirmation (design: configurable,
-/// default on). Set `RAAI_CONFIRM=off` (or 0/false/no) to disable.
+/// Whether mutating tools require user confirmation (default on). Turned off by
+/// "advanced mode" — the persisted [`registry::auto_approve`] toggle (Extensions
+/// menu / the "Toggle advanced mode" action). The `RAAI_CONFIRM` env var is an
+/// explicit override (e.g. headless), winning over the toggle either way.
 pub fn confirmation_required() -> bool {
-    match std::env::var("RAAI_CONFIRM") {
-        Ok(v) => !matches!(
+    if let Ok(v) = std::env::var("RAAI_CONFIRM") {
+        return !matches!(
             v.trim().to_lowercase().as_str(),
             "0" | "off" | "false" | "no"
-        ),
-        Err(_) => true,
+        );
     }
+    !crate::providers::registry::auto_approve()
 }
 
 /// System prompt. Establishes the role and how to use the read tools

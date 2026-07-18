@@ -18,6 +18,7 @@ use crate::ui;
 static CMD_OPEN: OnceLock<u32> = OnceLock::new();
 static CMD_PROVIDERS: OnceLock<u32> = OnceLock::new();
 static CMD_PRESETS: OnceLock<u32> = OnceLock::new();
+static CMD_AUTOAPPROVE: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<usize> = OnceLock::new();
 
 struct Commands;
@@ -38,6 +39,16 @@ impl HookCommand for Commands {
             true
         } else if Some(id) == CMD_PRESETS.get().copied() {
             ui::ffi::show_presets();
+            true
+        } else if Some(id) == CMD_AUTOAPPROVE.get().copied() {
+            // Advanced mode: apply the model's edits without a per-request
+            // confirmation. Speak the new state so it's clear what changed.
+            let on = crate::providers::registry::toggle_auto_approve();
+            ui::output::speak(if on {
+                "Advanced mode on. The assistant applies edits without asking."
+            } else {
+                "Advanced mode off. The assistant asks before applying edits."
+            });
             true
         } else {
             false
@@ -95,6 +106,16 @@ impl HookCustomMenu for ExtMenu {
         if let Some(id) = CMD_PRESETS.get().copied() {
             ui::ffi::add_menu_item(submenu, "Prompt presets\u{2026}", id as i32);
         }
+        if let Some(id) = CMD_AUTOAPPROVE.get().copied() {
+            // Label carries the current state (read by the screen reader on menu
+            // open) — the menu-item API here has no separate checkmark flag.
+            let label = if crate::providers::registry::auto_approve() {
+                "Advanced mode (auto-approve edits): on"
+            } else {
+                "Advanced mode (auto-approve edits): off"
+            };
+            ui::ffi::add_menu_item(submenu, label, id as i32);
+        }
         ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
     }
 }
@@ -128,6 +149,15 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
         cmd_presets,
         "ReaLackey: Prompt presets",
+    ))?;
+
+    // Action: toggle "advanced mode" — apply the model's edits without asking for
+    // confirmation each time. Bindable to a key from REAPER's Actions list.
+    let cmd_autoapprove = session.plugin_register_add_command_id("RAAI_ToggleAutoApprove")?;
+    let _ = CMD_AUTOAPPROVE.set(cmd_autoapprove.get());
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        cmd_autoapprove,
+        "ReaLackey: Toggle advanced mode (auto-approve edits)",
     ))?;
 
     // One handler dispatches all command ids.

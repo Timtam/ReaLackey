@@ -62,7 +62,7 @@ fn pick_preset() {
     use crate::ui::presets_ui::display_name;
     let presets = crate::prompts::registry::list();
     if presets.is_empty() {
-        crate::ui::output::announce(
+        crate::ui::output::speak(
             "No presets saved yet. Add one from the Extensions menu, ReaLackey, Prompt presets.",
         );
         return;
@@ -77,12 +77,9 @@ fn pick_preset() {
     }
     let preset = &presets[choice - 1];
     crate::ui::output::insert_preset(&preset.body);
-    // Announce the name through both accessible channels (matching the project's
-    // dual-channel convention): OSARA speaks directly (focus-independent, Windows)
-    // and the webview aria-live region carries it for VoiceOver on macOS.
+    // Speak the name once (OSARA when present, else the webview aria-live region).
     let msg = format!("Preset inserted: {}.", display_name(&preset.name));
-    crate::reaper::osara::announce(&msg);
-    crate::ui::output::announce(&msg);
+    crate::ui::output::speak(&msg);
 }
 
 /// Open an http(s)/mailto URL (a link the user clicked in the chat) in the
