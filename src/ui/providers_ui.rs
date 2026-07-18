@@ -130,6 +130,20 @@ const PRESETS: &[Preset] = &[
         max_tokens: 4096,
         vision: false,
     },
+    // oMLX: a native MLX inference server for Apple Silicon (continuous batching,
+    // SSD KV cache) — faster than Ollama on a Mac. Exposes an OpenAI-compatible
+    // endpoint on :8000, so it rides the same adapter. Model ids come from the
+    // user's local model directory ("Fetch models…" lists them via /v1/models).
+    Preset {
+        menu: "oMLX (local, Apple Silicon)",
+        id: "omlx",
+        label: "oMLX (local)",
+        kind: AdapterKind::OpenAiCompatible,
+        base_url: "http://localhost:8000/v1",
+        model: "qwen3-8b",
+        max_tokens: 4096,
+        vision: false,
+    },
     Preset {
         menu: "Custom endpoint\u{2026}",
         id: "custom",

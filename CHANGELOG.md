@@ -10,6 +10,15 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+### Added
+
+- **oMLX** provider preset (Add → "oMLX (local, Apple Silicon)"). oMLX is a native
+  MLX inference server for Apple Silicon (continuous batching, SSD KV cache) that's
+  faster than Ollama on a Mac. It exposes an OpenAI-compatible endpoint, so it uses
+  the existing adapter — the preset just points at `http://localhost:8000/v1`; pick
+  your model with **Fetch models…**. (Any oMLX instance already worked via the
+  generic "OpenAI-compatible" provider; this is just one-click setup.)
+
 ## [0.3.1] - 2026-07-17
 
 ### Fixed
