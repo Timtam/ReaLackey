@@ -36,6 +36,16 @@ into a versioned heading and attaches its entries to the GitHub release — see
   variable still overrides it. (Edits remain undoable in REAPER, and each tool the
   assistant runs is still announced — you're just not prompted per change.)
 
+### Changed
+
+- The "still working" feedback now says **what the assistant is doing** instead of
+  how many seconds have passed. The status line shows the live activity — "Reasoning…",
+  "Transcribing the audio", "Reading the project", "Running: set fx param", "Writing
+  the reply…" — and the periodic spoken reminder announces that activity rather than
+  "Still working… N seconds". (The activity is derived from the tool being run and the
+  reasoning/answer phase; the model's exact internal reasoning isn't exposed, so
+  during thinking it shows "Reasoning…".)
+
 ### Fixed
 
 - **Fetch models** now authenticates with the **top (highest-priority) key from the

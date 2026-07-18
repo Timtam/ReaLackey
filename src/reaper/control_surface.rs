@@ -18,8 +18,31 @@ use crate::ui;
 /// Poll the undo label every N ticks (~30 ticks/sec, so ~2x/second).
 const UNDO_POLL_TICKS: u32 = 15;
 
-/// How often to announce "still working" while the worker is generating.
+/// How often to announce the current activity while the worker is generating.
 const WORKING_ANNOUNCE_SECS: u64 = 10;
+
+/// A short, present-continuous phrase for what a tool is doing — shown in the status
+/// line and spoken by the heartbeat while the tool runs. Falls back to the
+/// humanised tool name so any tool still gets a sensible label.
+fn tool_activity(name: &str) -> String {
+    let phrase = match name {
+        "transcribe_item" => "Transcribing the audio",
+        "listen_to_audio" => "Listening to the audio",
+        "capture_view" => "Looking at the screen",
+        "capture_video_clip" => "Watching the video",
+        "measure_loudness"
+        | "analyze_processed_audio"
+        | "analyze_track_audio"
+        | "analyze_item_audio"
+        | "analyze_audio_timeline" => "Analysing the audio",
+        "load_tools" => "Loading more tools",
+        "run_action" => "Running a REAPER action",
+        n if n.starts_with("get_") || n.starts_with("search_") => "Reading the project",
+        // Anything else (mostly the mutating tools): humanise the name.
+        _ => return format!("Running: {}", name.replace('_', " ")),
+    };
+    phrase.to_string()
+}
 
 thread_local! {
     /// Set while `run()` is on the stack. A tool invoked from `run()` — the
@@ -53,6 +76,11 @@ pub struct PumpSurface {
     work_gen: Option<u64>,
     /// The generating state last pushed to the webview (gates its Esc = stop).
     webview_generating: bool,
+    /// What the assistant is currently doing (drives the status line + what the
+    /// periodic heartbeat speaks) — derived from the event stream: a tool's activity,
+    /// reasoning, writing the reply, or a worker-supplied status. Not an elapsed
+    /// timer.
+    activity: String,
 }
 
 impl PumpSurface {
@@ -65,6 +93,7 @@ impl PumpSurface {
             last_working_announce: None,
             work_gen: None,
             webview_generating: false,
+            activity: "Working\u{2026}".to_string(),
         }
     }
 
@@ -100,37 +129,57 @@ impl PumpSurface {
             .last_working_announce
             .map_or(elapsed, |t| now.duration_since(t).as_secs());
         if elapsed >= WORKING_ANNOUNCE_SECS && since_last >= WORKING_ANNOUNCE_SECS {
-            let msg = format!("Still working… {elapsed} seconds");
+            // Speak WHAT it's doing (the current activity), not how long it's been —
+            // "Transcribing the audio", "Reasoning…", "Reading the project", etc.
+            let msg = if self.activity.trim().is_empty() {
+                "Still working\u{2026}".to_string()
+            } else {
+                self.activity.clone()
+            };
             crate::ui::output::speak(&msg);
             self.last_working_announce = Some(now);
         }
     }
 
-    fn handle_ui(&self, ev: UiEvent) {
+    fn handle_ui(&mut self, ev: UiEvent) {
         use crate::ui::output;
         match ev {
-            UiEvent::UserMessage(s) => output::user_message(&s),
-            UiEvent::AssistantStart => output::assistant_start(),
+            UiEvent::UserMessage(s) => {
+                output::user_message(&s);
+                self.set_activity("Thinking\u{2026}");
+            }
+            UiEvent::AssistantStart => {
+                output::assistant_start();
+                self.set_activity("Writing the reply\u{2026}");
+            }
             UiEvent::AssistantDelta(s) => output::assistant_delta(&s),
-            UiEvent::ReasoningDelta(s) => output::reasoning_delta(&s),
-            UiEvent::ToolStarted { name, input } => output::tool_started(&name, &input),
+            UiEvent::ReasoningDelta(s) => {
+                output::reasoning_delta(&s);
+                self.set_activity("Reasoning\u{2026}");
+            }
+            UiEvent::ToolStarted { name, input } => {
+                output::tool_started(&name, &input);
+                let a = tool_activity(&name);
+                self.set_activity(&a);
+            }
             UiEvent::ToolFinished { is_error, summary } => {
-                output::tool_finished(is_error, &summary)
+                output::tool_finished(is_error, &summary);
+                // Result is in; the model will reason about it next.
+                self.set_activity("Thinking\u{2026}");
             }
             UiEvent::Notice(s) => output::notice(&s),
-            UiEvent::Status(s) => {
-                ui::ffi::set_status(&s); // native fallback status field
-                output::status(&s); // webview status line (no-op if inactive)
-            }
+            // A worker-supplied status (e.g. "Transcribing… part 2/3") IS the current
+            // activity — show it and let the heartbeat speak it.
+            UiEvent::Status(s) => self.set_activity(&s),
             UiEvent::Announce(s) => {
                 // One spoken channel (OSARA when present, else the aria-live
                 // region) so a reader observing both doesn't hear it twice.
                 output::speak(&s);
             }
-            UiEvent::Done => {}
+            UiEvent::Done => self.set_activity("Ready."),
             UiEvent::Error(e) => {
                 output::error(&e);
-                ui::ffi::set_status("Error.");
+                self.set_activity("Error.");
                 output::speak(&format!("Error: {e}"));
             }
             UiEvent::ProgressOpen(msg) => ui::ffi::progress_open(&msg),
@@ -139,6 +188,18 @@ impl PumpSurface {
             }
             UiEvent::ProgressClose => ui::ffi::progress_close(),
         }
+    }
+
+    /// Set the current activity + push it to the status line (webview + native
+    /// fallback). Only pushes on a change, so a stream of same-value updates (e.g.
+    /// reasoning deltas) doesn't spam the status.
+    fn set_activity(&mut self, s: &str) {
+        if self.activity == s {
+            return;
+        }
+        self.activity = s.to_string();
+        ui::ffi::set_status(s);
+        crate::ui::output::status(s);
     }
 
     fn handle_op(&self, op: ReaperOp) {
