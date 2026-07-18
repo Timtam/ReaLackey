@@ -5,7 +5,9 @@
 pub mod anthropic;
 pub mod models_api;
 pub mod openai_compat;
+pub mod perplexity_agent;
 pub mod registry;
+pub mod sse;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -242,5 +244,11 @@ pub fn build_provider_with_key(
                 cfg.supports_audio,
             ))
         }
+        // Web grounding (Perplexity's built-in web_search tool) is always on for
+        // this provider in v1 — it's the whole reason to pick it. A per-provider
+        // toggle can come later.
+        registry::AdapterKind::PerplexityAgent => Box::new(
+            perplexity_agent::PerplexityAgentProvider::with_key(key, true),
+        ),
     }
 }

@@ -12,6 +12,14 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- **Perplexity (Agent API)** provider (Add → "Perplexity (Agent API, web-grounded)").
+  Unlike Perplexity's plain Sonar endpoint — which can't call tools and so can't
+  drive REAPER — the Agent API speaks the OpenAI **Responses** protocol with
+  client-side function calling, so the assistant can control REAPER *and* ground
+  its answers on live web results (`web_search`) in one loop. It's multi-provider:
+  pick a strong agentic model by id (`openai/gpt-5.1`, `anthropic/claude-…`, or
+  `sonar-…`) — the Model field is free-text (the Agent API has no model list to
+  fetch). Fixed endpoint, needs a Perplexity API key; web grounding is always on.
 - **oMLX** provider preset (Add → "oMLX (local, Apple Silicon)"). oMLX is a native
   MLX inference server for Apple Silicon (continuous batching, SSD KV cache) that's
   faster than Ollama on a Mac. It exposes an OpenAI-compatible endpoint, so it uses

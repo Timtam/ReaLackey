@@ -79,6 +79,15 @@ async fn fetch_async(
             }
             r
         }
+        // The Agent API doesn't expose a plain OpenAI-style model list, and its
+        // model namespace spans providers, so guide the user to type one instead
+        // of hitting an endpoint that would just 404.
+        AdapterKind::PerplexityAgent => {
+            return Err("Perplexity Agent models aren't listed via the API. Type a model id \
+                        such as \"openai/gpt-5.1\", \"anthropic/claude-opus-4-8\", or \
+                        \"sonar-pro\" in the Model field."
+                .into());
+        }
     };
 
     let resp = req.send().await.map_err(|e| e.to_string())?;

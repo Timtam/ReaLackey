@@ -259,6 +259,10 @@ async fn handle_prompt(
                  (or the ANTHROPIC_API_KEY environment variable).",
                 cfg.label
             ),
+            AdapterKind::PerplexityAgent => format!(
+                "No API key for \"{}\". Set it via Extensions -> ReaLackey.",
+                cfg.label
+            ),
             AdapterKind::OpenAiCompatible => format!(
                 "Provider \"{}\" needs an endpoint URL (and usually an API key).",
                 cfg.label

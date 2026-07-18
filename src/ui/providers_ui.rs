@@ -110,6 +110,20 @@ const PRESETS: &[Preset] = &[
         max_tokens: 4096,
         vision: true,
     },
+    // Perplexity's Agent API (OpenAI Responses protocol): multi-provider models
+    // with client-side function tools + built-in web grounding. Fixed endpoint,
+    // needs a key. Model ids span providers (openai/…, anthropic/…, sonar-…);
+    // pick a strong agentic model — the seed is just a starting point.
+    Preset {
+        menu: "Perplexity (Agent API, web-grounded)",
+        id: "perplexity",
+        label: "Perplexity",
+        kind: AdapterKind::PerplexityAgent,
+        base_url: "",
+        model: "openai/gpt-5.1",
+        max_tokens: 4096,
+        vision: false,
+    },
     Preset {
         menu: "Ollama (local)",
         id: "ollama",
@@ -167,7 +181,7 @@ pub fn list_text() -> String {
             let mark = if is_default { "* " } else { "   " };
             let status = if p.can_send() {
                 ""
-            } else if p.kind == AdapterKind::Anthropic {
+            } else if p.kind.requires_key() {
                 "  \u{2014} needs API key"
             } else if p.base_url.is_none() {
                 "  \u{2014} needs endpoint URL"
@@ -380,20 +394,23 @@ pub fn edit_dialog_init() {
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTOK, &sess.max_tokens.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_MAXTURNS, &sess.max_turns.to_string());
         ui::ffi::pe_set_text(ui::ffi::PE_KEY, "");
-        // Anthropic: fixed endpoint, always vision-capable, no audio input — hide the
-        // base-URL row and the vision/audio checkboxes, and show the Anthropic-only
-        // "Extended thinking" toggle (which shares the vision row; they never coexist).
-        // OpenAI-compatible: the reverse — show vision/audio, hide thinking.
-        if sess.kind == AdapterKind::Anthropic {
+        // Fixed-endpoint providers (Anthropic, Perplexity) hide the base-URL row and
+        // the vision/audio checkboxes. OpenAI-compatible shows all three. The
+        // Anthropic-only "Extended thinking" toggle shares the vision row (they never
+        // coexist); it's hidden for every other kind.
+        if sess.kind.has_fixed_endpoint() {
             ui::ffi::pe_show(ui::ffi::PE_BASEURL, false);
             ui::ffi::pe_show(ui::ffi::PE_BASEURL_LBL, false);
             ui::ffi::pe_show(ui::ffi::PE_VISION, false);
             ui::ffi::pe_show(ui::ffi::PE_AUDIO, false);
-            ui::ffi::pe_set_check(ui::ffi::PE_THINKING, sess.thinking);
         } else {
             ui::ffi::pe_set_text(ui::ffi::PE_BASEURL, &sess.base_url);
             ui::ffi::pe_set_check(ui::ffi::PE_VISION, sess.vision);
             ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, sess.audio);
+        }
+        if sess.kind == AdapterKind::Anthropic {
+            ui::ffi::pe_set_check(ui::ffi::PE_THINKING, sess.thinking);
+        } else {
             ui::ffi::pe_show(ui::ffi::PE_THINKING, false);
         }
         // Fill the key list (masked) + its summary hint.
@@ -567,7 +584,9 @@ pub fn edit_dialog_fetch() {
         Err(e) => {
             // A missing key is the most common cause of an auth/404 failure; call it
             // out explicitly since the raw provider error rarely makes it obvious.
-            let hint = if key_missing {
+            // Not for Perplexity Agent, whose fetch never hits the network (it just
+            // returns type-a-model-id guidance), so a key hint would be misleading.
+            let hint = if key_missing && kind != AdapterKind::PerplexityAgent {
                 "\n\nNo API key was entered. Most cloud providers require one: type your key in \
                  the \u{201c}API key\u{201d} field, then try Fetch models again. (Local providers \
                  such as Ollama or LM Studio don\u{2019}t need a key.)"
@@ -598,7 +617,8 @@ pub fn edit_dialog_fetch() {
     let vision = mi.vision.unwrap_or_else(|| infer_vision(&mi.id));
     let audio = infer_audio(&mi.id);
     ui::ffi::pe_set_text(ui::ffi::PE_MODEL, &mi.id);
-    if kind != AdapterKind::Anthropic {
+    // Only OpenAI-compatible accounts show the vision/audio checkboxes to sync.
+    if kind == AdapterKind::OpenAiCompatible {
         ui::ffi::pe_set_check(ui::ffi::PE_VISION, vision);
         ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, audio);
     }
@@ -669,8 +689,10 @@ pub fn edit_dialog_ok() -> bool {
             }
         }
     };
-    let (base_url, vision) = if kind == AdapterKind::Anthropic {
-        (None, true)
+    let (base_url, vision) = if kind.has_fixed_endpoint() {
+        // No user base URL. Anthropic is always vision-capable; Perplexity's Agent
+        // adapter doesn't bridge images (v1), so it's not.
+        (None, kind == AdapterKind::Anthropic)
     } else {
         let b = ui::ffi::pe_get_text(ui::ffi::PE_BASEURL).trim().to_string();
         (
@@ -686,7 +708,7 @@ pub fn edit_dialog_ok() -> bool {
     // lets locally-run multimodal models (e.g. Gemma) enable audio even though
     // their id can't be reliably classified. Anthropic models don't take audio.
     let supports_audio =
-        kind != AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_AUDIO);
+        kind == AdapterKind::OpenAiCompatible && ui::ffi::pe_get_check(ui::ffi::PE_AUDIO);
     // Extended thinking (reasoning) is Anthropic-only — the checkbox is shown just
     // for Anthropic accounts; OpenAI-compatible models expose reasoning inherently.
     let thinking = kind == AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_THINKING);

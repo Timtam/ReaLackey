@@ -28,6 +28,27 @@ pub enum AdapterKind {
     /// Shared OpenAI-compatible `/chat/completions` endpoint (OpenAI, Groq,
     /// Gemini-compat, DeepSeek, xAI, OpenRouter, Ollama/LM Studio, custom).
     OpenAiCompatible,
+    /// Perplexity Agent API (OpenAI **Responses** protocol) — multi-provider
+    /// models with client-side function tools and built-in web grounding.
+    PerplexityAgent,
+}
+
+impl AdapterKind {
+    /// Whether the endpoint is built into the adapter (no user-supplied base URL):
+    /// Anthropic and Perplexity have fixed endpoints; OpenAI-compatible does not.
+    pub fn has_fixed_endpoint(self) -> bool {
+        !matches!(self, AdapterKind::OpenAiCompatible)
+    }
+
+    /// Whether the adapter cannot send without an API key (no keyless/local mode).
+    /// OpenAI-compatible allows keyless local servers (Ollama/LM Studio); the
+    /// cloud adapters always need a key.
+    pub fn requires_key(self) -> bool {
+        matches!(
+            self,
+            AdapterKind::Anthropic | AdapterKind::PerplexityAgent
+        )
+    }
 }
 
 /// One configured provider account. The API key is NOT stored here — it lives in
@@ -71,9 +92,10 @@ impl ProviderConfig {
     /// an OpenAI-compatible account needs an endpoint (key optional — local
     /// servers are keyless).
     pub fn can_send(&self) -> bool {
-        match self.kind {
-            AdapterKind::Anthropic => resolve_key(self).is_some(),
-            AdapterKind::OpenAiCompatible => self.base_url.is_some(),
+        if self.kind.requires_key() {
+            resolve_key(self).is_some()
+        } else {
+            self.base_url.is_some()
         }
     }
 }

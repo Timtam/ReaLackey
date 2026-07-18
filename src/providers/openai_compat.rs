@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
+use crate::providers::sse::SseFramer;
 use crate::providers::{
     Capabilities, ChatEvent, ChatRequest, Content, LlmProvider, ProviderError, ResultBlock, Role,
     StopReason,
@@ -146,7 +147,7 @@ impl LlmProvider for OpenAiCompatProvider {
         };
 
         let mut byte_stream = resp.bytes_stream();
-        let mut sse = SseData::default();
+        let mut sse = SseFramer::default();
         // Tool-call fragments accumulate by their streamed index until the turn ends.
         let mut tools: BTreeMap<u32, ToolAcc> = BTreeMap::new();
         let mut stop_reason = StopReason::EndTurn;
@@ -557,40 +558,8 @@ fn result_blocks_to_text(blocks: &[ResultBlock], vision: bool, audio: bool) -> S
 }
 
 // ---- streaming (SSE) response ------------------------------------------------
-
-/// Minimal SSE framer that yields each event's `data:` payload. Buffers raw
-/// bytes and only splits complete lines, so a multibyte codepoint split across
-/// network chunks is never corrupted.
-#[derive(Default)]
-struct SseData {
-    buf: Vec<u8>,
-    data: String,
-}
-
-impl SseData {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
-        self.buf.extend_from_slice(bytes);
-        let mut out = Vec::new();
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line_bytes);
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                if !self.data.is_empty() {
-                    out.push(std::mem::take(&mut self.data));
-                }
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                let rest = rest.strip_prefix(' ').unwrap_or(rest);
-                if !self.data.is_empty() {
-                    self.data.push('\n');
-                }
-                self.data.push_str(rest);
-            }
-            // `:` comments / keep-alives and other field lines are ignored.
-        }
-        out
-    }
-}
+// The SSE byte framer lives in `super::sse::SseFramer` (shared with the Responses
+// adapter). This section parses the framed JSON payloads into chat chunks.
 
 #[derive(Deserialize)]
 struct ChatChunk {
@@ -1054,16 +1023,9 @@ mod tests {
     }
 
     #[test]
-    fn sse_framer_splits_data_payloads() {
-        let mut s = SseData::default();
-        let out = s.feed(b"data: {\"a\":1}\n\ndata: [DONE]\n\n");
-        assert_eq!(out, vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]);
-    }
-
-    #[test]
     fn parses_a_streamed_text_then_tool_call() {
         // Two content deltas, then a tool call split across two argument chunks.
-        let mut s = SseData::default();
+        let mut s = SseFramer::default();
         let stream = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
