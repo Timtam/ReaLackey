@@ -169,6 +169,18 @@ pub fn list() -> Vec<ProviderConfig> {
     STORE.read().unwrap().providers.clone()
 }
 
+/// The configured accounts of one role, in list order (drives a role's tab).
+pub fn list_by_role(role: ProviderRole) -> Vec<ProviderConfig> {
+    STORE
+        .read()
+        .unwrap()
+        .providers
+        .iter()
+        .filter(|p| p.role == role)
+        .cloned()
+        .collect()
+}
+
 /// Whether `id` is the default account FOR ITS OWN ROLE (drives the list marker,
 /// so a transcription default is marked even though it isn't the chat default).
 pub fn is_default(id: &str) -> bool {

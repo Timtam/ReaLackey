@@ -210,11 +210,11 @@ const PRESETS: &[Preset] = &[
     },
 ];
 
-/// Newline-separated labels for the listbox, in registry order. The default
-/// account FOR ITS ROLE is marked with a leading `*` (so both the chat default and
-/// the transcription default are marked); accounts that can't yet send show why.
-pub fn list_text() -> String {
-    registry::list()
+/// Newline-separated listbox lines for the active tab's role, in registry order.
+/// The default account FOR THAT ROLE is marked with a leading `*`; accounts that
+/// can't yet send show why. The tab already names the role, so no per-row role tag.
+pub fn list_text(tab: i32) -> String {
+    registry::list_by_role(role_from_tab(tab))
         .iter()
         .map(|p| {
             let mark = if registry::is_default(&p.id) { "* " } else { "   " };
@@ -227,25 +227,36 @@ pub fn list_text() -> String {
             } else {
                 ""
             };
-            // Tag non-chat accounts so the list distinguishes them (spoken).
-            let role_tag = match p.role {
-                ProviderRole::Chat => "",
-                ProviderRole::Transcription => "  [transcription]",
-            };
-            format!("{mark}{}  ({}){}{}", p.label, p.model, role_tag, status)
+            format!("{mark}{}  ({}){}", p.label, p.model, status)
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Run a row action (0=add, 1=edit, 2=delete, 3=set-default). Returns true if
-/// the provider list changed (the dialog then repopulates its listbox).
-pub fn on_action(action: i32, index: i32) -> bool {
+/// Tab labels for the Providers dialog, newline-separated, in tab order. Each tab
+/// INDEX maps to a [`ProviderRole`] via [`role_from_tab`]. (Stems adds a tab here.)
+pub fn tab_labels() -> String {
+    "Chat\nTranscription".to_string()
+}
+
+/// The role a Providers-dialog tab index selects (out-of-range falls back to Chat).
+fn role_from_tab(tab: i32) -> ProviderRole {
+    match tab {
+        1 => ProviderRole::Transcription,
+        _ => ProviderRole::Chat,
+    }
+}
+
+/// Run a row action (0=add, 1=edit, 2=delete, 3=set-default) on the account at
+/// `index` WITHIN the active tab's role. Returns true if the list changed (the
+/// dialog then repopulates its listbox).
+pub fn on_action(action: i32, index: i32, tab: i32) -> bool {
+    let role = role_from_tab(tab);
     match action {
-        0 => add_provider(),
-        1 => edit_provider(index),
-        2 => delete_provider(index),
-        3 => set_default(index),
+        0 => add_provider(role),
+        1 => edit_provider(index, role),
+        2 => delete_provider(index, role),
+        3 => set_default(index, role),
         _ => false,
     }
 }
@@ -301,13 +312,15 @@ thread_local! {
 
 // ---- actions ----------------------------------------------------------------
 
-fn add_provider() -> bool {
-    let labels: Vec<&str> = PRESETS.iter().map(|p| p.menu).collect();
+fn add_provider(role: ProviderRole) -> bool {
+    // Offer only the presets for the active tab's role.
+    let presets: Vec<&Preset> = PRESETS.iter().filter(|p| p.role == role).collect();
+    let labels: Vec<&str> = presets.iter().map(|p| p.menu).collect();
     let choice = ui::ffi::popup_menu(&labels);
-    if choice == 0 || choice > PRESETS.len() {
+    if choice == 0 || choice > presets.len() {
         return false; // cancelled
     }
-    let preset = &PRESETS[choice - 1];
+    let preset = presets[choice - 1];
     run_settings_dialog(ProvSession {
         is_new: true,
         id: unique_id(preset.id),
@@ -329,8 +342,8 @@ fn add_provider() -> bool {
     })
 }
 
-fn edit_provider(index: i32) -> bool {
-    let Some(cfg) = provider_at(index) else {
+fn edit_provider(index: i32, role: ProviderRole) -> bool {
+    let Some(cfg) = provider_at(index, role) else {
         return false;
     };
     // A read failure (locked store) must be distinguished from "no keys", or an
@@ -374,14 +387,16 @@ fn run_settings_dialog(session: ProvSession) -> bool {
     SESSION.with(|s| s.borrow_mut().take().map(|x| x.changed).unwrap_or(false))
 }
 
-fn delete_provider(index: i32) -> bool {
-    let Some(cfg) = provider_at(index) else {
+fn delete_provider(index: i32, role: ProviderRole) -> bool {
+    let Some(cfg) = provider_at(index, role) else {
         return false;
     };
-    if registry::list().len() <= 1 {
+    // Keep at least one CHAT provider — the conversation needs one. Optional roles
+    // (transcription, later stems) can be emptied entirely.
+    if role == ProviderRole::Chat && registry::list_by_role(ProviderRole::Chat).len() <= 1 {
         ui::ffi::message_box(
             "Delete provider",
-            "This is the only provider. Add another before deleting it.",
+            "This is the only chat provider. Add another before deleting it.",
             false,
         );
         return false;
@@ -409,8 +424,8 @@ fn delete_provider(index: i32) -> bool {
     }
 }
 
-fn set_default(index: i32) -> bool {
-    let Some(cfg) = provider_at(index) else {
+fn set_default(index: i32, role: ProviderRole) -> bool {
+    let Some(cfg) = provider_at(index, role) else {
         return false;
     };
     if registry::is_default(&cfg.id) {
@@ -851,9 +866,11 @@ pub fn edit_dialog_ok() -> bool {
 // ---- helpers ----------------------------------------------------------------
 
 /// The provider at a listbox row (registry order), if the index is valid.
-fn provider_at(index: i32) -> Option<ProviderConfig> {
+/// The account at `index` within a role (the listbox shows one role per tab, so the
+/// listbox index is an index into that role's accounts, not the whole registry).
+fn provider_at(index: i32, role: ProviderRole) -> Option<ProviderConfig> {
     let i = usize::try_from(index).ok()?;
-    registry::list().into_iter().nth(i)
+    registry::list_by_role(role).into_iter().nth(i)
 }
 
 /// A trimmed value, or `fallback` if it was left empty.

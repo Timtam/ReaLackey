@@ -30,8 +30,8 @@ STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "AI Providers"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT           "Configured providers. The default (*) drives the conversation.", -1, 6, 6, 328, 9, SS_LEFTNOWORDWRAP
-    LISTBOX         ID_PROV_LIST, 6, 18, 328, 116,
+    CONTROL         "", ID_PROV_TABS, "SysTabControl32", WS_TABSTOP, 6, 6, 328, 18
+    LISTBOX         ID_PROV_LIST, 6, 28, 328, 106,
                     LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP | WS_BORDER
     PUSHBUTTON      "&Add...", ID_PROV_ADD, 6, 140, 54, 16
     PUSHBUTTON      "&Edit...", ID_PROV_EDIT, 64, 140, 54, 16

@@ -88,15 +88,19 @@ void* ui_create_submenu(void);
 void ui_attach_submenu(void* parent_hmenu, void* submenu, const char* title);
 
 // --- provider management dialog (Phase 5, M4) --------------------------------
-// Rust fills `buf` (UTF-8, NUL-terminated, capacity `buf_sz`) with the provider
-// labels, one per line, in list order; the default provider is marked ("* ").
-typedef void (*prov_list_cb)(char* buf, int buf_sz);
-// Rust performs an action on the selected row: action 0=add, 1=edit, 2=delete,
-// 3=set-default; `index` is the selected row (or -1 if none). Returns 1 if the
-// list changed (the dialog then repopulates the listbox), 0 otherwise. Rust may
-// open nested modal dialogs (e.g. ui_popup_menu) inside this call.
-typedef int (*prov_action_cb)(int action, int index);
-void ui_set_provider_cbs(prov_list_cb on_list, prov_action_cb on_action);
+// The dialog has a tab strip, one tab per provider ROLE. Rust fills `buf` (UTF-8,
+// NUL-terminated, capacity `buf_sz`) with the tab labels, one per line, in tab order.
+typedef void (*prov_tabs_cb)(char* buf, int buf_sz);
+// Rust fills `buf` with the provider labels for the ACTIVE TAB's role, one per line,
+// in list order; the default account for that role is marked ("* ").
+typedef void (*prov_list_cb)(int tab, char* buf, int buf_sz);
+// Rust performs an action on the selected row of the active tab: action 0=add,
+// 1=edit, 2=delete, 3=set-default; `index` is the selected row within that tab's
+// role (or -1 if none); `tab` is the active tab index. Returns 1 if the list
+// changed (the dialog then repopulates the listbox), 0 otherwise. Rust may open
+// nested modal dialogs (e.g. ui_popup_menu) inside this call.
+typedef int (*prov_action_cb)(int action, int index, int tab);
+void ui_set_provider_cbs(prov_tabs_cb on_tabs, prov_list_cb on_list, prov_action_cb on_action);
 // Show the modal provider-management dialog. Main thread only.
 void ui_show_providers(void);
 // Show a modal popup menu of newline-separated items at the cursor and return

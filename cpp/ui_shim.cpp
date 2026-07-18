@@ -12,10 +12,11 @@
 
 #ifdef _WIN32
   #include <windows.h>
+  #include <commctrl.h>   // SysTabControl32 messages/macros (provider role tabs)
   #include <string>
   #define RAAI_DLGRET INT_PTR CALLBACK
 #else
-  #include "swell.h"
+  #include "swell.h"       // provides the tab-control messages/macros too
   #include <string>
   #define RAAI_DLGRET INT_PTR
 #endif
@@ -40,6 +41,7 @@ static on_cancel_cb  g_on_cancel  = NULL;
 static on_resize_cb  g_on_resize  = NULL;
 static on_destroy_cb g_on_destroy = NULL;
 static on_webview_focus_cb g_on_webview_focus = NULL;
+static prov_tabs_cb   g_prov_tabs   = NULL;
 static prov_list_cb   g_prov_list   = NULL;
 static prov_action_cb g_prov_action = NULL;
 static HWND        g_prov_dlg = NULL;  // provider LIST dialog, while open
@@ -231,6 +233,55 @@ static void add_list_item(HWND lb, const char* utf8) {
 }
 
 // Repopulate the listbox from Rust, preserving the selection index if possible.
+// The active role tab (0 if the control is missing or nothing is selected).
+static int prov_current_tab(HWND hwnd) {
+  HWND tabs = GetDlgItem(hwnd, ID_PROV_TABS);
+  int t = tabs ? (int)SendMessage(tabs, TCM_GETCURSEL, 0, 0) : 0;
+  return t < 0 ? 0 : t;
+}
+
+// Insert one tab with UTF-8 text (platform-correct: wide on Windows, UTF-8 on SWELL).
+static void insert_prov_tab(HWND tabs, int idx, const char* utf8) {
+#ifdef _WIN32
+  TCITEMW it;
+  memset(&it, 0, sizeof(it));
+  it.mask = TCIF_TEXT;
+  std::wstring w = to_wide(utf8);
+  it.pszText = (LPWSTR)w.c_str();
+  SendMessageW(tabs, TCM_INSERTITEMW, (WPARAM)idx, (LPARAM)&it);
+#else
+  TCITEM it;
+  memset(&it, 0, sizeof(it));
+  it.mask = TCIF_TEXT;
+  it.pszText = (char*)utf8;
+  TabCtrl_InsertItem(tabs, idx, &it);
+#endif
+}
+
+// Fill the role tab strip from Rust (one label per line), selecting the first tab.
+static void populate_prov_tabs(HWND hwnd) {
+  HWND tabs = GetDlgItem(hwnd, ID_PROV_TABS);
+  if (!tabs || !g_prov_tabs) return;
+  char buf[1024];
+  buf[0] = 0;
+  g_prov_tabs(buf, (int)sizeof(buf));
+  std::string s(buf);
+  int idx = 0;
+  size_t start = 0;
+  while (start <= s.size()) {
+    size_t nl = s.find('\n', start);
+    std::string line =
+        (nl == std::string::npos) ? s.substr(start) : s.substr(start, nl - start);
+    if (!line.empty()) {
+      insert_prov_tab(tabs, idx, line.c_str());
+      idx++;
+    }
+    if (nl == std::string::npos) break;
+    start = nl + 1;
+  }
+  if (idx > 0) SendMessage(tabs, TCM_SETCURSEL, 0, 0);
+}
+
 static void populate_prov_list(HWND hwnd) {
   HWND lb = GetDlgItem(hwnd, ID_PROV_LIST);
   if (!lb) return;
@@ -239,7 +290,7 @@ static void populate_prov_list(HWND hwnd) {
   if (g_prov_list) {
     char buf[8192];
     buf[0] = 0;
-    g_prov_list(buf, (int)sizeof(buf));
+    g_prov_list(prov_current_tab(hwnd), buf, (int)sizeof(buf));
     std::string s(buf);
     size_t start = 0;
     while (start <= s.size()) {
@@ -259,20 +310,33 @@ static void populate_prov_list(HWND hwnd) {
   }
 }
 
-// Run a provider action in Rust for the selected row; repopulate if it changed.
+// Run a provider action in Rust for the selected row of the ACTIVE tab; repopulate
+// if it changed. `sel` indexes within the active tab's role (the listbox filter).
 static void do_prov_action(HWND hwnd, int action) {
   if (!g_prov_action) return;
   HWND lb = GetDlgItem(hwnd, ID_PROV_LIST);
   int sel = lb ? (int)SendMessage(lb, LB_GETCURSEL, 0, 0) : -1;
-  if (g_prov_action(action, sel)) populate_prov_list(hwnd);
+  if (g_prov_action(action, sel, prov_current_tab(hwnd))) populate_prov_list(hwnd);
 }
 
 static RAAI_DLGRET ProvidersProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
     case WM_INITDIALOG:
       g_prov_dlg = hwnd;  // so the settings dialog can own (disable) this one
+      populate_prov_tabs(hwnd);  // role tabs first, then the first tab's accounts
       populate_prov_list(hwnd);
       return TRUE;
+    case WM_NOTIFY: {
+      // Switching role tabs re-filters the listbox; land the selection at the top.
+      LPNMHDR nh = (LPNMHDR)lParam;
+      if (nh && (int)nh->idFrom == ID_PROV_TABS && nh->code == TCN_SELCHANGE) {
+        populate_prov_list(hwnd);
+        HWND lb = GetDlgItem(hwnd, ID_PROV_LIST);
+        if (lb) SendMessage(lb, LB_SETCURSEL, 0, 0);
+        return TRUE;
+      }
+      return FALSE;
+    }
     case WM_COMMAND:
       switch (LOWORD(wParam)) {
         case ID_PROV_ADD:     do_prov_action(hwnd, 0); return TRUE;
@@ -782,7 +846,8 @@ extern "C" void ui_attach_submenu(void* parent_hmenu, void* submenu, const char*
 #endif
 }
 
-extern "C" void ui_set_provider_cbs(prov_list_cb on_list, prov_action_cb on_action) {
+extern "C" void ui_set_provider_cbs(prov_tabs_cb on_tabs, prov_list_cb on_list, prov_action_cb on_action) {
+  g_prov_tabs   = on_tabs;
   g_prov_list   = on_list;
   g_prov_action = on_action;
 }

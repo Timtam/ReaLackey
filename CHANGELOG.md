@@ -12,17 +12,17 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
-- **Speech-to-text (transcription)** — a new provider *type* alongside chat. Add a
-  transcription account (**Add → "OpenAI Whisper"** or **"Local Whisper server"**),
-  set it as the default, and the assistant can **transcribe a media item's audio to
-  text** with timestamps — ask it to caption, summarise, or find spoken words in the
-  selected item, then act on the text. Cloud transcription is consent-gated (the
+- **Speech-to-text (transcription)** — a new provider *type* alongside chat. The
+  **Providers dialog is now tabbed by role** (Chat / Transcription); on the
+  **Transcription** tab, **Add → "OpenAI Whisper"** (or **"Local Whisper server"**)
+  and set it as the default, and the assistant can **transcribe a media item's audio
+  to text** with timestamps — ask it to caption, summarise, or find spoken words in
+  the selected item, then act on the text. Cloud transcription is consent-gated (the
   audio is uploaded); a local whisper server (whisper.cpp, faster-whisper, LocalAI)
   keeps it on-machine. Long items are transcribed in chunks automatically. `whisper-1`
   (or a local whisper model) returns timestamped segments; OpenAI's `gpt-4o-transcribe`
-  returns text only. Accounts now carry a **role** (chat vs transcription) with its
-  own default, shown in the Providers list. (Dedicated one-click REAPER actions —
-  transcript to item notes, plain text, and SRT — are coming next.)
+  returns text only. Each role has its own default account. (Dedicated one-click
+  REAPER actions — transcript to item notes, plain text, and SRT — are coming next.)
 - **Advanced mode (auto-approve edits)**: a toggle that lets the assistant apply
   changes **without asking for confirmation each time**. Flip it from **Extensions
   → ReaLackey → "Advanced mode (auto-approve edits)"** (the menu item shows the

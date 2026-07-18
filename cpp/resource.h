@@ -18,6 +18,7 @@
 #define ID_PROV_EDIT       1013
 #define ID_PROV_DELETE     1014
 #define ID_PROV_DEFAULT    1015   // "Set as default"
+#define ID_PROV_TABS       1016   // SysTabControl32: one tab per provider role
 
 // Provider settings dialog (Phase 5, M5): add / edit one account, with a
 // "Fetch models" button next to the model field.

@@ -31,8 +31,9 @@ extern "C" {
     fn ui_enable_webview_tabstop();
     fn ui_set_webview_focus_cb(on_focus: extern "C" fn());
     fn ui_set_provider_cbs(
-        on_list: extern "C" fn(*mut c_char, c_int),
-        on_action: extern "C" fn(c_int, c_int) -> c_int,
+        on_tabs: extern "C" fn(*mut c_char, c_int),
+        on_list: extern "C" fn(c_int, *mut c_char, c_int),
+        on_action: extern "C" fn(c_int, c_int, c_int) -> c_int,
     );
     fn ui_show_providers();
     fn ui_popup_menu(items_newline: *const c_char) -> c_int;
@@ -169,7 +170,7 @@ pub fn install_webview_focus_cb() {
 
 /// Register the provider-dialog callbacks (list + row actions). Call once at init.
 pub fn install_provider_cbs() {
-    unsafe { ui_set_provider_cbs(prov_list, prov_action) }
+    unsafe { ui_set_provider_cbs(prov_tabs, prov_list, prov_action) }
 }
 
 /// Register the provider *settings* dialog callbacks. Call once at init.
@@ -352,15 +353,22 @@ unsafe fn write_cstr(buf: *mut c_char, buf_sz: c_int, s: &str) {
     *buf.add(bytes.len()) = 0;
 }
 
-extern "C" fn prov_list(buf: *mut c_char, buf_sz: c_int) {
+extern "C" fn prov_tabs(buf: *mut c_char, buf_sz: c_int) {
     let _ = std::panic::catch_unwind(|| {
-        let text = crate::ui::providers_ui::list_text();
+        let text = crate::ui::providers_ui::tab_labels();
         unsafe { write_cstr(buf, buf_sz, &text) };
     });
 }
 
-extern "C" fn prov_action(action: c_int, index: c_int) -> c_int {
-    std::panic::catch_unwind(|| crate::ui::providers_ui::on_action(action, index) as c_int)
+extern "C" fn prov_list(tab: c_int, buf: *mut c_char, buf_sz: c_int) {
+    let _ = std::panic::catch_unwind(|| {
+        let text = crate::ui::providers_ui::list_text(tab);
+        unsafe { write_cstr(buf, buf_sz, &text) };
+    });
+}
+
+extern "C" fn prov_action(action: c_int, index: c_int, tab: c_int) -> c_int {
+    std::panic::catch_unwind(|| crate::ui::providers_ui::on_action(action, index, tab) as c_int)
         .unwrap_or(0)
 }
 
