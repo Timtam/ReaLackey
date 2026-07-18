@@ -707,6 +707,12 @@ async fn run_tool(
         return capture_video_clip(ui_tx, op_tx, task_rx, input, supports_audio).await;
     }
 
+    // Transcription is worker-orchestrated too: render the item's audio on the main
+    // thread in chunks, transcribe each async (HTTP, off the main thread), stitch.
+    if name == "transcribe_item" {
+        return transcribe_item(ui_tx, op_tx, task_rx, input).await;
+    }
+
     // Tier-B pixel input: arm-per-task consent. The user approves once, then the
     // assistant may click/drag in plugin windows (announced each time) until it
     // is disarmed. GUI clicks bypass REAPER's undo, so this is a distinct gate,
@@ -952,6 +958,218 @@ async fn capture_video_clip(
         images,
         audio,
     }
+}
+
+/// Transcription chunk length. 10 min at 16 kHz mono PCM16 ≈ 19 MB — safely under
+/// Whisper's ~25 MB upload limit (`TRANSCRIBE_SR` in tools). Long items are split
+/// into chunks and stitched by `merge_transcripts`.
+const TRANSCRIBE_CHUNK_SECONDS: f64 = 600.0;
+
+/// A transcription endpoint that isn't a local server — so its uploads are
+/// consent-gated (data protection). Empty/absent base URL is treated as remote.
+fn transcription_is_remote(cfg: &registry::ProviderConfig) -> bool {
+    match cfg.base_url.as_deref() {
+        None => true,
+        Some(url) => {
+            let u = url.to_ascii_lowercase();
+            !(u.contains("localhost")
+                || u.contains("127.0.0.1")
+                || u.contains("0.0.0.0")
+                || u.contains("[::1]"))
+        }
+    }
+}
+
+/// Orchestrate `transcribe_item`: resolve the configured transcription provider,
+/// consent (cloud only), probe the item's length, then per chunk render its audio
+/// on the main thread (`__transcribe_chunk`) and transcribe it async off the main
+/// thread, stitching the segments into one item-relative transcript. Runs in the
+/// worker so the HTTP calls never block REAPER.
+async fn transcribe_item(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    input: Value,
+) -> ToolOutcome {
+    use base64::Engine as _;
+    use crate::providers::transcription::{self, AudioClip, TranscribeOptions};
+
+    // 1. The configured transcription account (its own role default).
+    let Some(cfg) = registry::active_for(registry::ProviderRole::Transcription) else {
+        return ToolOutcome::error(
+            json!({
+                "error": "No transcription provider is configured. Add a transcription-role account \
+                          in Providers (OpenAI Whisper, or a local whisper server)."
+            })
+            .to_string(),
+        );
+    };
+
+    // 2. Consent once for a cloud upload (local servers are exempt).
+    if transcription_is_remote(&cfg) {
+        let msg =
+            "The assistant wants to render this item's audio and send it to the transcription provider";
+        let _ = ui_tx.send(UiEvent::Notice(format!("{msg}?")));
+        let _ = ui_tx.send(UiEvent::Announce(format!("{msg}. Allow?")));
+        if !confirm(
+            op_tx,
+            format!("{msg}?\n\nThis uploads the audio to the cloud transcription provider."),
+        )
+        .await
+        {
+            let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
+            return ToolOutcome::ok(
+                json!({ "declined": true, "reason": "user declined" }).to_string(),
+            );
+        }
+    }
+
+    // 3. Probe the target item's transcribable length (+ its resolved index).
+    let probe = exec_tool(op_tx, "__transcribe_probe".to_string(), input.clone()).await;
+    if probe.is_error {
+        return probe;
+    }
+    let p: Value = serde_json::from_str(&probe.content).unwrap_or_default();
+    let total = p.get("total_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let item_index = p.get("item_index").and_then(|v| v.as_u64());
+    if total <= 0.0 {
+        return ToolOutcome::error(
+            json!({ "error": "the item has no audio to transcribe" }).to_string(),
+        );
+    }
+
+    // 4. Build the transcriber (first failover key; None for a keyless local server).
+    let key = registry::keys_for(&cfg.id).into_iter().next();
+    let transcriber = transcription::build_transcriber(&cfg, key);
+    let opts = TranscribeOptions {
+        language: input
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        prompt: None,
+    };
+
+    // 5. Chunk the item, render + transcribe each, offsetting timestamps.
+    let chunks = transcription::plan_chunks(total, TRANSCRIBE_CHUNK_SECONDS);
+    let n = chunks.len();
+    let mut parts: Vec<(f64, transcription::Transcript)> = Vec::new();
+    let mut any_read_error = false;
+    for (i, (start, length)) in chunks.iter().enumerate() {
+        // Honor a Stop pressed between chunks (the tool loop won't otherwise drain
+        // task_rx until the whole run finishes).
+        if let Ok(MainTask::Cancel) = task_rx.try_recv() {
+            let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
+            return ToolOutcome::ok(json!({ "cancelled": true, "chunks_done": i }).to_string());
+        }
+        // A window below the ASR minimum (only a whole clip shorter than the
+        // minimum reaches here — plan_chunks folds sub-minimum tails) has no
+        // meaningful speech; skip it rather than upload something the endpoint 400s on.
+        if *length < transcription::MIN_CHUNK_SECONDS {
+            continue;
+        }
+        let _ = ui_tx.send(UiEvent::Status(if n > 1 {
+            format!("Transcribing\u{2026} (part {}/{})", i + 1, n)
+        } else {
+            "Transcribing\u{2026}".to_string()
+        }));
+
+        let rendered = exec_tool(
+            op_tx,
+            "__transcribe_chunk".to_string(),
+            json!({ "item_index": item_index, "start": start, "length": length }),
+        )
+        .await;
+        if rendered.is_error {
+            return rendered;
+        }
+        // The chunk render reports a read failure (offline/removable media, a source
+        // rewritten mid-read) in its content — that span rendered as silence, so its
+        // speech is lost. Not fatal, but surface it rather than claim full success.
+        if serde_json::from_str::<Value>(&rendered.content)
+            .ok()
+            .and_then(|m| m.get("read_error").and_then(|v| v.as_bool()))
+            .unwrap_or(false)
+        {
+            any_read_error = true;
+        }
+        let Some(audio) = rendered.audio else {
+            return ToolOutcome::error(
+                json!({ "error": "chunk render returned no audio" }).to_string(),
+            );
+        };
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(&audio.data_base64) {
+            Ok(b) => b,
+            Err(e) => {
+                return ToolOutcome::error(
+                    json!({ "error": format!("could not decode the rendered chunk: {e}") })
+                        .to_string(),
+                )
+            }
+        };
+        let clip = AudioClip {
+            bytes,
+            filename: "audio.wav".into(),
+            mime: "audio/wav".into(),
+        };
+
+        // Transcribe async. Race it against a Stop so a long upload/transcription
+        // stays cancellable: on Cancel, cancel the token (the adapter aborts the
+        // in-flight request) and bail; a queued Prompt just re-shows the wait and
+        // keeps awaiting (the pinned future is never dropped, so no work is lost).
+        let chunk_cancel = CancellationToken::new();
+        let fut = transcriber.transcribe(clip, &opts, chunk_cancel.clone());
+        tokio::pin!(fut);
+        let result = loop {
+            tokio::select! {
+                biased;
+                r = &mut fut => break r,
+                msg = task_rx.recv() => match msg {
+                    Some(MainTask::Cancel) | None => {
+                        chunk_cancel.cancel();
+                        let _ = (&mut fut).await; // let the request unwind
+                        let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
+                        return ToolOutcome::ok(
+                            json!({ "cancelled": true, "chunks_done": i }).to_string(),
+                        );
+                    }
+                    Some(MainTask::Prompt(_)) => {
+                        let _ = ui_tx.send(UiEvent::Status(
+                            "Please wait until transcription finishes\u{2026}".into(),
+                        ));
+                    }
+                },
+            }
+        };
+        match result {
+            Ok(t) => parts.push((*start, t)),
+            Err(e) => {
+                return ToolOutcome::error(
+                    json!({ "error": format!("transcription failed: {e}") }).to_string(),
+                )
+            }
+        }
+    }
+
+    // 6. Merge into one item-relative transcript and return it to the model.
+    let merged = transcription::merge_transcripts(&parts);
+    let r2 = |x: f64| (x * 100.0).round() / 100.0;
+    let segments: Vec<Value> = merged
+        .segments
+        .iter()
+        .map(|s| json!({ "start": r2(s.start), "end": r2(s.end), "text": s.text }))
+        .collect();
+    ToolOutcome::ok(
+        json!({
+            "item_seconds": r2(total),
+            "language": merged.language,
+            "text": merged.text,
+            "segment_count": segments.len(),
+            "segments": segments,
+            "chunks": n,
+            "read_error": any_read_error,
+        })
+        .to_string(),
+    )
 }
 
 /// Ask the user ONCE per request whether the assistant may apply changes. Lists

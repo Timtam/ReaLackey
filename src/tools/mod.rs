@@ -1354,6 +1354,24 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             json!(["target"]),
         ),
     });
+    defs.push(ToolDef {
+        name: "transcribe_item".into(),
+        description: "TRANSCRIBE a media item's audio to text using the configured transcription \
+                      provider (speech-to-text, e.g. Whisper). Returns the full text plus \
+                      timestamped segments (start/end in seconds, relative to the item start). \
+                      Transcribes the SELECTED item by default, or pass item_index. Long items are \
+                      chunked automatically. Cloud providers are consent-gated (the audio is \
+                      uploaded). Use this to caption, summarise, or locate spoken words in an item; \
+                      then act on the text with other tools."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer", "description": "0-based project item index; omit to use the selected item" },
+                "language": { "type": "string", "description": "optional ISO-639-1 hint (e.g. 'en', 'de'); omit to auto-detect" }
+            }),
+            json!([]),
+        ),
+    });
     // --- transport / timeline / global settings ---
     defs.push(ToolDef {
         name: "get_transport".into(),
@@ -1725,6 +1743,15 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     }
     if !supports_audio {
         defs.retain(|d| !is_audio_tool(&d.name));
+    }
+    // transcribe_item only works with a transcription provider configured — don't
+    // advertise it otherwise, so the model can't call a tool that can only error.
+    if crate::providers::registry::active_for(
+        crate::providers::registry::ProviderRole::Transcription,
+    )
+    .is_none()
+    {
+        defs.retain(|d| d.name != "transcribe_item");
     }
     // Strip the mutation boilerplate that the system prompt now states ONCE ("every
     // mutating tool CHANGES the project, is confirmed, and is undo-wrapped"). It was
@@ -2173,6 +2200,11 @@ pub fn execute(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> T
     }
     if name == "listen_to_audio" {
         return listen_to_audio(reaper, input);
+    }
+    // Internal transcription chunk render: returns a WAV as attached audio for the
+    // worker to upload (like listen_to_audio, it bypasses the JSON-only dispatch).
+    if name == "__transcribe_chunk" {
+        return transcribe_chunk(reaper, input);
     }
     match dispatch(reaper, name, input) {
         Ok(v) => ToolOutcome::ok(v.to_string()),
@@ -2729,6 +2761,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
         // capture range + save the current cursor, failing fast if the Video window
         // isn't available. Orchestrated from the worker (see run_tool).
         "__video_begin" => video_begin(reaper, input),
+        "__transcribe_probe" => transcribe_probe(reaper, input),
         "get_time_selection" => Ok(get_time_selection(reaper)),
         "set_time_selection" => set_time_selection(
             reaper,
@@ -7586,8 +7619,10 @@ const ANALYZE_SR: c_int = 48_000;
 /// Cap on how much audio one call reads/analyses, to bound the main-thread cost
 /// (accessor reads must run on the main thread).
 const MAX_ANALYZE_SECONDS: f64 = 30.0;
-/// Read the accessor in blocks of this many frames so no single call is huge.
-const READ_BLOCK_FRAMES: usize = ANALYZE_SR as usize; // 1 second
+/// Whisper's native sample rate; transcription renders 16 kHz mono so upload
+/// chunks stay well under the ~25 MB API limit (~19 MB per 10-minute chunk). The
+/// chunk LENGTH that pairs with this rate lives in the worker (chunk planning).
+const TRANSCRIBE_SR: c_int = 16_000;
 
 /// Read interleaved f64 samples from an audio accessor over `[start, start+len)`
 /// at [`ANALYZE_SR`] / `channels`, block by block. Generic over the opaque
@@ -7601,24 +7636,32 @@ fn read_accessor_samples<A>(
     start: f64,
     length: f64,
 ) -> (Vec<f64>, bool) {
+    read_accessor_samples_at(low, accessor, channels, ANALYZE_SR, start, length)
+}
+
+/// As [`read_accessor_samples`] but at an explicit sample rate — transcription
+/// reads at 16 kHz mono (Whisper's native rate) to keep upload chunks small, while
+/// analysis reads at [`ANALYZE_SR`]. Reads in ~1-second blocks at the given rate.
+fn read_accessor_samples_at<A>(
+    low: &reaper_low::Reaper,
+    accessor: *mut A,
+    channels: c_int,
+    sr: c_int,
+    start: f64,
+    length: f64,
+) -> (Vec<f64>, bool) {
     let ch = channels.max(1) as usize;
-    let total = (length * ANALYZE_SR as f64).round().max(0.0) as usize;
+    let total = (length * sr as f64).round().max(0.0) as usize;
+    let block = sr.max(1) as usize; // ~1 second
     let mut out: Vec<f64> = Vec::with_capacity(total * ch);
     let mut had_error = false;
     let mut done = 0usize;
     while done < total {
-        let n = READ_BLOCK_FRAMES.min(total - done);
-        let t = start + done as f64 / ANALYZE_SR as f64;
+        let n = block.min(total - done);
+        let t = start + done as f64 / sr as f64;
         let mut buf = vec![0.0f64; n * ch];
         let ret = unsafe {
-            low.GetAudioAccessorSamples(
-                accessor as *mut _,
-                ANALYZE_SR,
-                channels,
-                t,
-                n as c_int,
-                buf.as_mut_ptr(),
-            )
+            low.GetAudioAccessorSamples(accessor as *mut _, sr, channels, t, n as c_int, buf.as_mut_ptr())
         };
         if ret < 0 {
             had_error = true;
@@ -7627,6 +7670,94 @@ fn read_accessor_samples<A>(
         done += n;
     }
     (out, had_error)
+}
+
+// ---- transcription (speech-to-text) source rendering -----------------------
+// The worker orchestrates `transcribe_item` (async HTTP off the main thread);
+// these are the main-thread ops it calls per the worker-orchestration pattern.
+
+/// Project index of the first selected media item, if any.
+fn first_selected_item_index(reaper: &Reaper<MainThreadScope>) -> Option<u32> {
+    let proj = ProjectContext::CurrentProject;
+    let sel = reaper.get_selected_media_item(proj, 0)?;
+    media_item_index_map(reaper).get(&sel).copied()
+}
+
+/// Resolve the transcription target: an explicit `item_index`, else the first
+/// selected item. Errors if nothing is selected or the take has no audio source
+/// (e.g. a MIDI or empty item).
+fn transcribe_resolve(
+    reaper: &Reaper<MainThreadScope>,
+    input: &Value,
+) -> Result<(u32, MediaItemTake), String> {
+    let item_index = match opt_u32(input, "item_index") {
+        Some(i) => i,
+        None => first_selected_item_index(reaper)
+            .ok_or("no media item selected — select an item, or pass item_index")?,
+    };
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, opt_u32(input, "take_index"))?;
+    let source = unsafe { reaper.low().GetMediaItemTake_Source(take.as_ptr()) };
+    if source.is_null() {
+        return Err("the selected item's take has no audio source (a MIDI or empty item?)".into());
+    }
+    Ok((item_index, take))
+}
+
+/// Internal op (`__transcribe_probe`): resolve the target and report its
+/// transcribable length so the worker can plan chunks. Main thread.
+fn transcribe_probe(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
+    let (item_index, take) = transcribe_resolve(reaper, input)?;
+    let low = reaper.low();
+    let acc = unsafe { low.CreateTakeAudioAccessor(take.as_ptr()) };
+    if acc.is_null() {
+        return Err("could not create an audio accessor for the take".into());
+    }
+    let start = unsafe { low.GetAudioAccessorStartTime(acc) };
+    let end = unsafe { low.GetAudioAccessorEndTime(acc) };
+    unsafe { low.DestroyAudioAccessor(acc) };
+    let total = (end - start).max(0.0);
+    if total <= 0.0 {
+        return Err("the item has no audible length to transcribe".into());
+    }
+    Ok(json!({ "item_index": item_index, "total_seconds": total }))
+}
+
+/// Internal op (`__transcribe_chunk`): render `[start, start+length)` of the
+/// item's audio at 16 kHz mono to a WAV, returned as attached audio for the worker
+/// to upload. `start` is 0-based within the transcribed region. Main thread.
+fn transcribe_chunk(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome {
+    use base64::Engine as _;
+    let (_, take) = match transcribe_resolve(reaper, input) {
+        Ok(v) => v,
+        Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
+    };
+    let start = input.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
+    let length = input.get("length").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
+    if length <= 0.0 {
+        return ToolOutcome::error(json!({ "error": "empty chunk length" }).to_string());
+    }
+    let low = reaper.low();
+    let acc = unsafe { low.CreateTakeAudioAccessor(take.as_ptr()) };
+    if acc.is_null() {
+        return ToolOutcome::error(
+            json!({ "error": "could not create an audio accessor for the take" }).to_string(),
+        );
+    }
+    let acc_start = unsafe { low.GetAudioAccessorStartTime(acc) };
+    // 1 channel -> REAPER downmixes to mono; 16 kHz keeps the upload small.
+    let (samples, read_error) =
+        read_accessor_samples_at(low, acc, 1, TRANSCRIBE_SR, acc_start + start, length);
+    unsafe { low.DestroyAudioAccessor(acc) };
+    let wav = crate::dsp::encode_pcm16_wav(&samples, 1, TRANSCRIBE_SR as f64);
+    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&wav);
+    ToolOutcome::with_audio(
+        json!({ "seconds": length, "read_error": read_error }).to_string(),
+        CapturedAudio {
+            format: "wav".into(),
+            data_base64,
+        },
+    )
 }
 
 fn audio_result_json(

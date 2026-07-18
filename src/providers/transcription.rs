@@ -89,6 +89,79 @@ pub fn build_transcriber(
     ))
 }
 
+// ---- chunking (long audio) --------------------------------------------------
+
+/// Minimum chunk length to upload. Many ASR endpoints (OpenAI Whisper) reject
+/// audio shorter than ~0.1 s with a 400, so a sub-minimum window is folded into
+/// its neighbour (or skipped when it's the whole clip).
+pub const MIN_CHUNK_SECONDS: f64 = 0.1;
+
+/// Split a total duration into transcription windows of at most `chunk_seconds`,
+/// covering `[0, total)`. Whisper caps uploads (~25 MB ≈ ~13 min at 16 kHz mono),
+/// so long items are transcribed in pieces and stitched. A short clip yields a
+/// single window — chunking is the general path, N=1 is just its degenerate case.
+///
+/// Fixed boundaries can clip a word at a seam; a future refinement can snap seams
+/// to detected silence (the DSP layer already finds silent regions). Kept as one
+/// function so that upgrade is local.
+pub fn plan_chunks(total_seconds: f64, chunk_seconds: f64) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    if total_seconds <= 0.0 || chunk_seconds <= 0.0 {
+        return out;
+    }
+    let mut start = 0.0;
+    // Small epsilon so floating error near the end doesn't emit a zero-length tail.
+    while start < total_seconds - 1e-6 {
+        let len = chunk_seconds.min(total_seconds - start);
+        out.push((start, len));
+        start += len;
+    }
+    // Fold a too-short trailing chunk into its predecessor so a multi-chunk run
+    // never ends on a sub-minimum clip the endpoint would 400 on (which would abort
+    // the whole run and discard the already-transcribed chunks). A whole clip that
+    // is itself below the minimum stays a single short chunk — the caller skips it.
+    if out.len() >= 2 {
+        let last = out[out.len() - 1].1;
+        if last < MIN_CHUNK_SECONDS {
+            let prev = out.len() - 2;
+            out[prev].1 += last;
+            out.pop();
+        }
+    }
+    out
+}
+
+/// Merge per-chunk transcripts (each paired with its start offset in seconds within
+/// the item) into one item-relative transcript: every segment's timestamps are
+/// shifted by its chunk's offset, texts are joined, and the language is taken from
+/// the first chunk that reports one.
+pub fn merge_transcripts(chunks: &[(f64, Transcript)]) -> Transcript {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut language: Option<String> = None;
+    for (offset, t) in chunks {
+        let trimmed = t.text.trim();
+        if !trimmed.is_empty() {
+            text_parts.push(trimmed.to_string());
+        }
+        if language.is_none() {
+            language = t.language.clone();
+        }
+        for s in &t.segments {
+            segments.push(Segment {
+                start: s.start + offset,
+                end: s.end + offset,
+                text: s.text.clone(),
+            });
+        }
+    }
+    Transcript {
+        text: text_parts.join(" "),
+        language,
+        segments,
+    }
+}
+
 // ---- OpenAI-compatible /audio/transcriptions adapter ------------------------
 
 pub struct OpenAiTranscriber {
@@ -106,7 +179,11 @@ pub struct OpenAiTranscriber {
 impl OpenAiTranscriber {
     pub fn new(base_url: impl Into<String>, key: Option<String>, model: impl Into<String>) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
+        // A generous per-request timeout backstops a server that accepts the upload
+        // then stalls (reqwest has no default timeout, so send() would hang forever).
+        // 5 min comfortably covers uploading + transcribing a ~10-minute chunk.
         let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -288,6 +365,56 @@ mod tests {
     fn endpoint_appends_audio_path_and_trims_slash() {
         let t = OpenAiTranscriber::new("https://api.openai.com/v1/", None, "whisper-1");
         assert_eq!(t.endpoint(), "https://api.openai.com/v1/audio/transcriptions");
+    }
+
+    #[test]
+    fn plan_chunks_covers_the_whole_duration() {
+        // Short clip -> a single chunk (the N=1 general case).
+        assert_eq!(plan_chunks(30.0, 600.0), vec![(0.0, 30.0)]);
+        // Exact multiple -> equal chunks, no zero-length tail.
+        assert_eq!(plan_chunks(1200.0, 600.0), vec![(0.0, 600.0), (600.0, 600.0)]);
+        // Remainder -> a short final chunk.
+        let c = plan_chunks(1300.0, 600.0);
+        assert_eq!(c, vec![(0.0, 600.0), (600.0, 600.0), (1200.0, 100.0)]);
+        // The windows tile [0, total) with no gaps or overlaps.
+        let covered: f64 = c.iter().map(|(_, l)| l).sum();
+        assert!((covered - 1300.0).abs() < 1e-9);
+        // Degenerate inputs -> no chunks (never a zero/negative window).
+        assert!(plan_chunks(0.0, 600.0).is_empty());
+        assert!(plan_chunks(100.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn plan_chunks_folds_a_sub_minimum_tail() {
+        // A 0.05 s tail would 400 on Whisper -> fold it into the previous chunk.
+        assert_eq!(plan_chunks(600.05, 600.0), vec![(0.0, 600.05)]);
+        // A comfortably-long tail is kept as its own chunk.
+        assert_eq!(plan_chunks(700.0, 600.0), vec![(0.0, 600.0), (600.0, 100.0)]);
+        // A whole clip below the minimum stays one short chunk (caller skips it).
+        assert_eq!(plan_chunks(0.05, 600.0), vec![(0.0, 0.05)]);
+    }
+
+    #[test]
+    fn merge_offsets_segment_timestamps_by_chunk_start() {
+        let c0 = Transcript {
+            text: "hello world".into(),
+            language: Some("english".into()),
+            segments: vec![Segment { start: 0.0, end: 2.0, text: "hello world".into() }],
+        };
+        let c1 = Transcript {
+            text: "second part".into(),
+            language: Some("english".into()),
+            segments: vec![Segment { start: 1.0, end: 3.0, text: "second part".into() }],
+        };
+        // Chunk 1 started 600 s into the item.
+        let merged = merge_transcripts(&[(0.0, c0), (600.0, c1)]);
+        assert_eq!(merged.text, "hello world second part");
+        assert_eq!(merged.language.as_deref(), Some("english"));
+        assert_eq!(merged.segments.len(), 2);
+        // First chunk's segment is unshifted; second is shifted by its 600 s offset.
+        assert_eq!(merged.segments[0].start, 0.0);
+        assert_eq!(merged.segments[1].start, 601.0);
+        assert_eq!(merged.segments[1].end, 603.0);
     }
 
     #[test]
