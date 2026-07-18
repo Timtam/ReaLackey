@@ -1025,11 +1025,17 @@ fn outcome_error(o: &ToolOutcome, fallback: &str) -> String {
 /// thread, stitching the segments into one item-relative transcript. Runs in the
 /// worker so the HTTP calls never block REAPER. `input` selects the item (empty
 /// object = the selected item). Used by both the chat tool and the direct actions.
+///
+/// `user_initiated` is true for the direct actions: the user explicitly ran a
+/// "transcribe" action, so running it IS their consent to the (cloud) upload — no
+/// prompt. The cloud-upload consent is only shown when the AI drives it (the tool),
+/// where the user didn't ask for the upload.
 async fn run_transcription(
     ui_tx: &CbSender<UiEvent>,
     op_tx: &CbSender<ReaperOp>,
     task_rx: &mut UnboundedReceiver<MainTask>,
     input: Value,
+    user_initiated: bool,
 ) -> TranscribeOutcomeKind {
     use base64::Engine as _;
     use crate::providers::transcription::{self, AudioClip, TranscribeOptions};
@@ -1039,8 +1045,10 @@ async fn run_transcription(
         return TranscribeOutcomeKind::NoProvider;
     };
 
-    // 2. Consent once for a cloud upload (local servers are exempt).
-    if transcription_is_remote(&cfg) {
+    // 2. Consent once for a cloud upload (local servers are exempt) — but ONLY when
+    // the AI drives it. A user who explicitly ran a transcribe action already
+    // consented by running it, so don't prompt them.
+    if !user_initiated && transcription_is_remote(&cfg) {
         let msg =
             "The assistant wants to render this item's audio and send it to the transcription provider";
         let _ = ui_tx.send(UiEvent::Notice(format!("{msg}?")));
@@ -1191,7 +1199,8 @@ async fn transcribe_item(
     task_rx: &mut UnboundedReceiver<MainTask>,
     input: Value,
 ) -> ToolOutcome {
-    match run_transcription(ui_tx, op_tx, task_rx, input).await {
+    // AI-driven: keep the cloud-upload consent (the user didn't ask for the upload).
+    match run_transcription(ui_tx, op_tx, task_rx, input, false).await {
         TranscribeOutcomeKind::Done(t) => {
             let r2 = |x: f64| (x * 100.0).round() / 100.0;
             let segments: Vec<Value> = t
@@ -1251,7 +1260,8 @@ async fn handle_transcribe_action(
         "Transcribing the selected item {dest}\u{2026}"
     )));
 
-    let t = match run_transcription(ui_tx, op_tx, task_rx, json!({})).await {
+    // User-initiated (they ran the action): running it is their consent — no prompt.
+    let t = match run_transcription(ui_tx, op_tx, task_rx, json!({}), true).await {
         TranscribeOutcomeKind::Done(t) => t,
         TranscribeOutcomeKind::NoProvider => {
             let _ = ui_tx.send(UiEvent::Error(
