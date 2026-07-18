@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::protocol::{MainTask, UiEvent};
+use crate::ai::protocol::{MainTask, TranscribeOutput, UiEvent};
 use crate::config;
 use crate::providers::registry::{self, AdapterKind};
 use crate::providers::{
@@ -103,6 +103,9 @@ async fn run(
                     prompt,
                 )
                 .await;
+            }
+            MainTask::Transcribe(output) => {
+                handle_transcribe_action(&ui_tx, &op_tx, &mut task_rx, output).await;
             }
         }
     }
@@ -666,7 +669,7 @@ async fn run_turn(
                     out.cancelled = true;
                     let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
                 }
-                Some(MainTask::Prompt(_)) => {
+                Some(MainTask::Prompt(_)) | Some(MainTask::Transcribe(_)) => {
                     // Phase 0/1: one generation at a time.
                     let _ = ui_tx.send(UiEvent::Status(
                         "Please wait until the current answer is finished…".into(),
@@ -983,29 +986,57 @@ fn transcription_is_remote(cfg: &registry::ProviderConfig) -> bool {
     }
 }
 
-/// Orchestrate `transcribe_item`: resolve the configured transcription provider,
-/// consent (cloud only), probe the item's length, then per chunk render its audio
-/// on the main thread (`__transcribe_chunk`) and transcribe it async off the main
+/// A completed item transcription. Shared by the chat tool (formats it as JSON)
+/// and the direct actions (write it to notes / a file).
+struct ItemTranscription {
+    transcript: crate::providers::transcription::Transcript,
+    /// The target item's stable GUID (for a notes write that survives a
+    /// mid-transcription project edit); empty if it couldn't be read.
+    guid: String,
+    /// The take's source file path (for naming a .txt/.srt); may be empty.
+    source_file: String,
+    /// A chunk rendered with a read error (its audio is partly silence).
+    read_error: bool,
+    /// How many chunks the item was split into.
+    chunks: usize,
+}
+
+/// The outcome of a transcription run — user cancel / decline / a missing provider
+/// are distinguished from a real failure so each caller reacts correctly.
+enum TranscribeOutcomeKind {
+    Done(ItemTranscription),
+    NoProvider,
+    Declined,
+    Cancelled,
+    Failed(String),
+}
+
+/// Pull an `{"error": "..."}` message out of a tool outcome's content.
+fn outcome_error(o: &ToolOutcome, fallback: &str) -> String {
+    serde_json::from_str::<Value>(&o.content)
+        .ok()
+        .and_then(|m| m.get("error").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Shared transcription core: resolve the configured transcription provider,
+/// consent (cloud only), probe the target item, then per chunk render its audio on
+/// the main thread (`__transcribe_chunk`) and transcribe it async off the main
 /// thread, stitching the segments into one item-relative transcript. Runs in the
-/// worker so the HTTP calls never block REAPER.
-async fn transcribe_item(
+/// worker so the HTTP calls never block REAPER. `input` selects the item (empty
+/// object = the selected item). Used by both the chat tool and the direct actions.
+async fn run_transcription(
     ui_tx: &CbSender<UiEvent>,
     op_tx: &CbSender<ReaperOp>,
     task_rx: &mut UnboundedReceiver<MainTask>,
     input: Value,
-) -> ToolOutcome {
+) -> TranscribeOutcomeKind {
     use base64::Engine as _;
     use crate::providers::transcription::{self, AudioClip, TranscribeOptions};
 
     // 1. The configured transcription account (its own role default).
     let Some(cfg) = registry::active_for(registry::ProviderRole::Transcription) else {
-        return ToolOutcome::error(
-            json!({
-                "error": "No transcription provider is configured. Add a transcription-role account \
-                          in Providers (OpenAI Whisper, or a local whisper server)."
-            })
-            .to_string(),
-        );
+        return TranscribeOutcomeKind::NoProvider;
     };
 
     // 2. Consent once for a cloud upload (local servers are exempt).
@@ -1020,25 +1051,27 @@ async fn transcribe_item(
         )
         .await
         {
-            let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
-            return ToolOutcome::ok(
-                json!({ "declined": true, "reason": "user declined" }).to_string(),
-            );
+            return TranscribeOutcomeKind::Declined;
         }
     }
 
-    // 3. Probe the target item's transcribable length (+ its resolved index).
+    // 3. Probe the target item: transcribable length, resolved index, source path.
     let probe = exec_tool(op_tx, "__transcribe_probe".to_string(), input.clone()).await;
     if probe.is_error {
-        return probe;
+        return TranscribeOutcomeKind::Failed(outcome_error(&probe, "could not read the item"));
     }
     let p: Value = serde_json::from_str(&probe.content).unwrap_or_default();
     let total = p.get("total_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let item_index = p.get("item_index").and_then(|v| v.as_u64());
+    // Track the item by its stable GUID across the async gap, not its positional
+    // index (which a mid-transcription project edit could shift to another item).
+    let guid = p.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let source_file = p
+        .get("source_file")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if total <= 0.0 {
-        return ToolOutcome::error(
-            json!({ "error": "the item has no audio to transcribe" }).to_string(),
-        );
+        return TranscribeOutcomeKind::Failed("the item has no audio to transcribe".into());
     }
 
     // 4. Build the transcriber (first failover key; None for a keyless local server).
@@ -1058,15 +1091,12 @@ async fn transcribe_item(
     let mut parts: Vec<(f64, transcription::Transcript)> = Vec::new();
     let mut any_read_error = false;
     for (i, (start, length)) in chunks.iter().enumerate() {
-        // Honor a Stop pressed between chunks (the tool loop won't otherwise drain
-        // task_rx until the whole run finishes).
+        // Honor a Stop pressed between chunks (the loop won't otherwise drain task_rx).
         if let Ok(MainTask::Cancel) = task_rx.try_recv() {
-            let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
-            return ToolOutcome::ok(json!({ "cancelled": true, "chunks_done": i }).to_string());
+            return TranscribeOutcomeKind::Cancelled;
         }
-        // A window below the ASR minimum (only a whole clip shorter than the
-        // minimum reaches here — plan_chunks folds sub-minimum tails) has no
-        // meaningful speech; skip it rather than upload something the endpoint 400s on.
+        // A window below the ASR minimum (only a whole clip shorter than the minimum
+        // reaches here — plan_chunks folds sub-minimum tails) has no meaningful speech.
         if *length < transcription::MIN_CHUNK_SECONDS {
             continue;
         }
@@ -1079,15 +1109,14 @@ async fn transcribe_item(
         let rendered = exec_tool(
             op_tx,
             "__transcribe_chunk".to_string(),
-            json!({ "item_index": item_index, "start": start, "length": length }),
+            json!({ "guid": guid.as_str(), "start": start, "length": length }),
         )
         .await;
         if rendered.is_error {
-            return rendered;
+            return TranscribeOutcomeKind::Failed(outcome_error(&rendered, "chunk render failed"));
         }
-        // The chunk render reports a read failure (offline/removable media, a source
-        // rewritten mid-read) in its content — that span rendered as silence, so its
-        // speech is lost. Not fatal, but surface it rather than claim full success.
+        // A read failure (offline/removable media, a source rewritten mid-read) makes
+        // that span render as silence, so its speech is lost — surface it.
         if serde_json::from_str::<Value>(&rendered.content)
             .ok()
             .and_then(|m| m.get("read_error").and_then(|v| v.as_bool()))
@@ -1096,17 +1125,14 @@ async fn transcribe_item(
             any_read_error = true;
         }
         let Some(audio) = rendered.audio else {
-            return ToolOutcome::error(
-                json!({ "error": "chunk render returned no audio" }).to_string(),
-            );
+            return TranscribeOutcomeKind::Failed("chunk render returned no audio".into());
         };
         let bytes = match base64::engine::general_purpose::STANDARD.decode(&audio.data_base64) {
             Ok(b) => b,
             Err(e) => {
-                return ToolOutcome::error(
-                    json!({ "error": format!("could not decode the rendered chunk: {e}") })
-                        .to_string(),
-                )
+                return TranscribeOutcomeKind::Failed(format!(
+                    "could not decode the rendered chunk: {e}"
+                ))
             }
         };
         let clip = AudioClip {
@@ -1117,8 +1143,8 @@ async fn transcribe_item(
 
         // Transcribe async. Race it against a Stop so a long upload/transcription
         // stays cancellable: on Cancel, cancel the token (the adapter aborts the
-        // in-flight request) and bail; a queued Prompt just re-shows the wait and
-        // keeps awaiting (the pinned future is never dropped, so no work is lost).
+        // in-flight request) and bail; a queued task just re-shows the wait and keeps
+        // awaiting (the pinned future is never dropped, so no work is lost).
         let chunk_cancel = CancellationToken::new();
         let fut = transcriber.transcribe(clip, &opts, chunk_cancel.clone());
         tokio::pin!(fut);
@@ -1130,12 +1156,9 @@ async fn transcribe_item(
                     Some(MainTask::Cancel) | None => {
                         chunk_cancel.cancel();
                         let _ = (&mut fut).await; // let the request unwind
-                        let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
-                        return ToolOutcome::ok(
-                            json!({ "cancelled": true, "chunks_done": i }).to_string(),
-                        );
+                        return TranscribeOutcomeKind::Cancelled;
                     }
-                    Some(MainTask::Prompt(_)) => {
+                    Some(MainTask::Prompt(_)) | Some(MainTask::Transcribe(_)) => {
                         let _ = ui_tx.send(UiEvent::Status(
                             "Please wait until transcription finishes\u{2026}".into(),
                         ));
@@ -1146,33 +1169,231 @@ async fn transcribe_item(
         match result {
             Ok(t) => parts.push((*start, t)),
             Err(e) => {
-                return ToolOutcome::error(
-                    json!({ "error": format!("transcription failed: {e}") }).to_string(),
-                )
+                return TranscribeOutcomeKind::Failed(format!("transcription failed: {e}"))
             }
         }
     }
 
-    // 6. Merge into one item-relative transcript and return it to the model.
-    let merged = transcription::merge_transcripts(&parts);
-    let r2 = |x: f64| (x * 100.0).round() / 100.0;
-    let segments: Vec<Value> = merged
-        .segments
-        .iter()
-        .map(|s| json!({ "start": r2(s.start), "end": r2(s.end), "text": s.text }))
-        .collect();
-    ToolOutcome::ok(
-        json!({
-            "item_seconds": r2(total),
-            "language": merged.language,
-            "text": merged.text,
-            "segment_count": segments.len(),
-            "segments": segments,
-            "chunks": n,
-            "read_error": any_read_error,
-        })
-        .to_string(),
-    )
+    TranscribeOutcomeKind::Done(ItemTranscription {
+        transcript: transcription::merge_transcripts(&parts),
+        guid,
+        source_file,
+        read_error: any_read_error,
+        chunks: n,
+    })
+}
+
+/// The chat tool `transcribe_item`: run the shared core and return the transcript
+/// (text + timestamped segments) to the model as JSON.
+async fn transcribe_item(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    input: Value,
+) -> ToolOutcome {
+    match run_transcription(ui_tx, op_tx, task_rx, input).await {
+        TranscribeOutcomeKind::Done(t) => {
+            let r2 = |x: f64| (x * 100.0).round() / 100.0;
+            let segments: Vec<Value> = t
+                .transcript
+                .segments
+                .iter()
+                .map(|s| json!({ "start": r2(s.start), "end": r2(s.end), "text": s.text }))
+                .collect();
+            ToolOutcome::ok(
+                json!({
+                    "language": t.transcript.language,
+                    "text": t.transcript.text,
+                    "segment_count": segments.len(),
+                    "segments": segments,
+                    "chunks": t.chunks,
+                    "read_error": t.read_error,
+                })
+                .to_string(),
+            )
+        }
+        // The tool is gated on a configured provider, so this shouldn't occur; report
+        // it clearly if it somehow does.
+        TranscribeOutcomeKind::NoProvider => ToolOutcome::error(
+            json!({ "error": "No transcription provider is configured — the user must add one in \
+                              Providers, on the Transcription tab." })
+            .to_string(),
+        ),
+        TranscribeOutcomeKind::Declined => {
+            let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
+            ToolOutcome::ok(json!({ "declined": true }).to_string())
+        }
+        TranscribeOutcomeKind::Cancelled => {
+            let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
+            ToolOutcome::ok(json!({ "cancelled": true }).to_string())
+        }
+        TranscribeOutcomeKind::Failed(e) => {
+            ToolOutcome::error(json!({ "error": e }).to_string())
+        }
+    }
+}
+
+/// A bindable REAPER action: transcribe the selected item and write the result to
+/// its notes, a plain-text file, or an SRT file. Reuses the shared core; announces
+/// the outcome via OSARA (it may run with the chat window closed).
+async fn handle_transcribe_action(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    output: TranscribeOutput,
+) {
+    let dest = match output {
+        TranscribeOutput::Notes => "into the item's notes",
+        TranscribeOutput::Text => "to a text file",
+        TranscribeOutput::Srt => "to an SRT subtitle file",
+    };
+    let _ = ui_tx.send(UiEvent::Announce(format!(
+        "Transcribing the selected item {dest}\u{2026}"
+    )));
+
+    let t = match run_transcription(ui_tx, op_tx, task_rx, json!({})).await {
+        TranscribeOutcomeKind::Done(t) => t,
+        TranscribeOutcomeKind::NoProvider => {
+            let _ = ui_tx.send(UiEvent::Error(
+                "No transcription provider is configured. Open Providers, switch to the \
+                 Transcription tab, and add one (e.g. OpenAI Whisper, or a local whisper server), \
+                 then try again."
+                    .into(),
+            ));
+            return;
+        }
+        TranscribeOutcomeKind::Declined => {
+            let _ = ui_tx.send(UiEvent::Announce("Transcription declined.".into()));
+            return;
+        }
+        TranscribeOutcomeKind::Cancelled => {
+            let _ = ui_tx.send(UiEvent::Announce("Transcription cancelled.".into()));
+            return;
+        }
+        TranscribeOutcomeKind::Failed(e) => {
+            let _ = ui_tx.send(UiEvent::Error(format!("Transcription failed: {e}")));
+            return;
+        }
+    };
+
+    if t.transcript.text.trim().is_empty() {
+        let _ = ui_tx.send(UiEvent::Announce(
+            "The item transcribed to no text (it may contain no speech).".into(),
+        ));
+        return;
+    }
+
+    match output {
+        TranscribeOutput::Notes => {
+            if t.guid.is_empty() {
+                let _ = ui_tx.send(UiEvent::Error("Couldn't resolve the item to write its notes.".into()));
+                return;
+            }
+            let r = exec_tool(
+                op_tx,
+                "__set_item_notes".to_string(),
+                json!({ "guid": t.guid, "notes": t.transcript.text }),
+            )
+            .await;
+            if r.is_error {
+                let _ = ui_tx.send(UiEvent::Error(format!(
+                    "Couldn't write the item's notes: {}",
+                    outcome_error(&r, "unknown error")
+                )));
+            } else {
+                let _ = ui_tx.send(UiEvent::Announce("Transcript written to the item's notes.".into()));
+            }
+        }
+        TranscribeOutput::Text => {
+            write_transcription_file(ui_tx, &t.source_file, "txt", &t.transcript.text)
+        }
+        TranscribeOutput::Srt => {
+            let srt = crate::providers::transcription::to_srt(&t.transcript);
+            if srt.trim().is_empty() {
+                let _ = ui_tx.send(UiEvent::Error(
+                    "No timestamps for an SRT — this transcription model returns text only. Use \
+                     whisper-1 or a local whisper model for subtitles."
+                        .into(),
+                ));
+            } else {
+                write_transcription_file(ui_tx, &t.source_file, "srt", &srt);
+            }
+        }
+    }
+}
+
+/// Write `content` next to the item's source media, as `<source>.<ext>` — or, if
+/// that already exists, the first free `<source> (N).<ext>` beside it, so an
+/// existing file (a hand-authored `.srt`/`.txt`) is NEVER overwritten. Announces
+/// the path actually written (or the error). Errors if the source has no file path.
+fn write_transcription_file(ui_tx: &CbSender<UiEvent>, source_file: &str, ext: &str, content: &str) {
+    if source_file.trim().is_empty() {
+        let _ = ui_tx.send(UiEvent::Error(
+            "Couldn't save the transcript — the item's source has no file path. Try the notes \
+             output instead."
+                .into(),
+        ));
+        return;
+    }
+    let base = std::path::Path::new(source_file).with_extension(ext);
+    match write_without_clobber(&base, content) {
+        Ok(path) => {
+            let _ = ui_tx.send(UiEvent::Announce(format!(
+                "Transcript saved to {}.",
+                path.display()
+            )));
+        }
+        Err(e) => {
+            let _ = ui_tx.send(UiEvent::Error(format!(
+                "Couldn't save the transcript next to {}: {e}",
+                base.display()
+            )));
+        }
+    }
+}
+
+/// Write `content` to `base`, or the first free `<stem> (N)<.ext>` beside it if
+/// `base` exists — never overwriting an existing file. `create_new` makes the
+/// existence check + create atomic. Returns the path written.
+fn write_without_clobber(
+    base: &std::path::Path,
+    content: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    for n in 0..1000u32 {
+        let cand = if n == 0 {
+            base.to_path_buf()
+        } else {
+            numbered_variant(base, n)
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&cand)
+        {
+            Ok(mut f) => {
+                f.write_all(content.as_bytes())?;
+                return Ok(cand);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "too many existing transcript files beside the source",
+    ))
+}
+
+/// `dir/foo.srt` + 2 -> `dir/foo (2).srt`.
+fn numbered_variant(base: &std::path::Path, n: u32) -> std::path::PathBuf {
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("transcript");
+    let ext = base.extension().and_then(|s| s.to_str()).unwrap_or("txt");
+    let name = format!("{stem} ({n}).{ext}");
+    match base.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name),
+        _ => std::path::PathBuf::from(name),
+    }
 }
 
 /// Ask the user ONCE per request whether the assistant may apply changes. Lists
@@ -1316,6 +1537,31 @@ async fn exec_tool(op_tx: &CbSender<ReaperOp>, name: String, input: Value) -> To
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_variant_inserts_before_extension() {
+        let v = numbered_variant(std::path::Path::new("scene.srt"), 2);
+        assert_eq!(v.file_name().unwrap().to_str().unwrap(), "scene (2).srt");
+        // A stem with dots keeps only the final extension.
+        let v2 = numbered_variant(std::path::Path::new("my.mix.txt"), 1);
+        assert_eq!(v2.file_name().unwrap().to_str().unwrap(), "my.mix (1).txt");
+    }
+
+    #[test]
+    fn write_without_clobber_never_overwrites_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("raai_clobber_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let base = dir.join("t.srt");
+        // First write lands on the base name.
+        let p1 = write_without_clobber(&base, "original").unwrap();
+        assert_eq!(p1, base);
+        // Second write goes to a numbered variant — the original is untouched.
+        let p2 = write_without_clobber(&base, "second").unwrap();
+        assert_ne!(p2, base);
+        assert_eq!(std::fs::read_to_string(&base).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&p2).unwrap(), "second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn img_result(tag: &str) -> ChatMessage {
         ChatMessage {

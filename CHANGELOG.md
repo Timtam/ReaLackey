@@ -21,8 +21,11 @@ into a versioned heading and attaches its entries to the GitHub release — see
   audio is uploaded); a local whisper server (whisper.cpp, faster-whisper, LocalAI)
   keeps it on-machine. Long items are transcribed in chunks automatically. `whisper-1`
   (or a local whisper model) returns timestamped segments; OpenAI's `gpt-4o-transcribe`
-  returns text only. Each role has its own default account. (Dedicated one-click
-  REAPER actions — transcript to item notes, plain text, and SRT — are coming next.)
+  returns text only. Each role has its own default account. **Bindable actions**
+  (also under Extensions → ReaLackey) transcribe the selected item straight **to its
+  notes**, a **plain-text file**, or an **SRT subtitle file** — no chat needed. File
+  outputs are written next to the source media and never overwrite an existing file
+  (a numbered variant is used instead); the result is spoken and its path announced.
 - **Advanced mode (auto-approve edits)**: a toggle that lets the assistant apply
   changes **without asking for confirmation each time**. Flip it from **Extensions
   → ReaLackey → "Advanced mode (auto-approve edits)"** (the menu item shows the

@@ -2762,6 +2762,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
         // isn't available. Orchestrated from the worker (see run_tool).
         "__video_begin" => video_begin(reaper, input),
         "__transcribe_probe" => transcribe_probe(reaper, input),
+        "__set_item_notes" => set_item_notes(reaper, input),
         "get_time_selection" => Ok(get_time_selection(reaper)),
         "set_time_selection" => set_time_selection(
             reaper,
@@ -7683,32 +7684,84 @@ fn first_selected_item_index(reaper: &Reaper<MainThreadScope>) -> Option<u32> {
     media_item_index_map(reaper).get(&sel).copied()
 }
 
-/// Resolve the transcription target: an explicit `item_index`, else the first
-/// selected item. Errors if nothing is selected or the take has no audio source
-/// (e.g. a MIDI or empty item).
-fn transcribe_resolve(
+/// A media item's stable GUID string (e.g. `{XXXXXXXX-....}`). Empty on failure.
+/// Unlike the positional index, this survives item add/delete/reorder — used to
+/// re-find the transcription target after the async HTTP gap.
+fn item_guid(reaper: &Reaper<MainThreadScope>, item: MediaItem) -> String {
+    let low = reaper.low();
+    read_string(64, |b, _s| {
+        unsafe { low.GetSetMediaItemInfo_String(item.as_ptr(), c"GUID".as_ptr(), b, false) };
+        true
+    })
+    .unwrap_or_default()
+}
+
+/// Find a media item by its GUID (current index + handle), if it still exists.
+fn item_by_guid(reaper: &Reaper<MainThreadScope>, guid: &str) -> Option<(u32, MediaItem)> {
+    media_item_index_map(reaper)
+        .into_iter()
+        .find_map(|(item, idx)| (item_guid(reaper, item) == guid).then_some((idx, item)))
+}
+
+/// Resolve the transcription target: by `guid` (stable across the async gap) if
+/// given, else an explicit `item_index`, else the first selected item.
+fn resolve_target_item(
     reaper: &Reaper<MainThreadScope>,
     input: &Value,
-) -> Result<(u32, MediaItemTake), String> {
+) -> Result<(u32, MediaItem), String> {
+    if let Some(guid) = input
+        .get("guid")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return item_by_guid(reaper, guid)
+            .ok_or_else(|| "the target item was moved or deleted during transcription".to_string());
+    }
     let item_index = match opt_u32(input, "item_index") {
         Some(i) => i,
         None => first_selected_item_index(reaper)
             .ok_or("no media item selected — select an item, or pass item_index")?,
     };
-    let item = item_at(reaper, item_index)?;
+    Ok((item_index, item_at(reaper, item_index)?))
+}
+
+/// Resolve the transcription target's item + audio take. Errors if nothing is
+/// selected/found or the take has no audio source (a MIDI or empty item).
+fn transcribe_resolve(
+    reaper: &Reaper<MainThreadScope>,
+    input: &Value,
+) -> Result<(u32, MediaItem, MediaItemTake), String> {
+    let (item_index, item) = resolve_target_item(reaper, input)?;
     let take = resolve_take(reaper, item, opt_u32(input, "take_index"))?;
     let source = unsafe { reaper.low().GetMediaItemTake_Source(take.as_ptr()) };
     if source.is_null() {
         return Err("the selected item's take has no audio source (a MIDI or empty item?)".into());
     }
-    Ok((item_index, take))
+    Ok((item_index, item, take))
 }
 
 /// Internal op (`__transcribe_probe`): resolve the target and report its
-/// transcribable length so the worker can plan chunks. Main thread.
+/// transcribable length (so the worker can plan chunks) plus the take's source
+/// file path (so a file-output action can name its .txt/.srt). Main thread.
 fn transcribe_probe(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
-    let (item_index, take) = transcribe_resolve(reaper, input)?;
+    let (item_index, item, take) = transcribe_resolve(reaper, input)?;
+    // A stable GUID so later ops (chunk renders, notes write) re-find THIS item even
+    // if the project is edited during the async transcription.
+    let guid = item_guid(reaper, item);
     let low = reaper.low();
+    // Source file path (for naming file outputs); may be empty for a wrapped source.
+    let source_file = {
+        let source = unsafe { low.GetMediaItemTake_Source(take.as_ptr()) };
+        if source.is_null() {
+            String::new()
+        } else {
+            read_string(4096, |b, s| {
+                unsafe { low.GetMediaSourceFileName(source, b, s) };
+                true
+            })
+            .unwrap_or_default()
+        }
+    };
     let acc = unsafe { low.CreateTakeAudioAccessor(take.as_ptr()) };
     if acc.is_null() {
         return Err("could not create an audio accessor for the take".into());
@@ -7720,7 +7773,48 @@ fn transcribe_probe(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<V
     if total <= 0.0 {
         return Err("the item has no audible length to transcribe".into());
     }
-    Ok(json!({ "item_index": item_index, "total_seconds": total }))
+    Ok(json!({
+        "item_index": item_index,
+        "guid": guid,
+        "total_seconds": total,
+        "source_file": source_file,
+    }))
+}
+
+/// Internal op (`__set_item_notes`): write the selected/target item's notes (the
+/// text travels with the item). Undo-wrapped. Main thread.
+fn set_item_notes(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
+    let notes = input.get("notes").and_then(|v| v.as_str()).unwrap_or("");
+    if notes.as_bytes().contains(&0) {
+        return Err("notes contain a NUL byte".into());
+    }
+    // Resolve by GUID (guid in input) so a mid-transcription edit can't land the
+    // notes on the wrong item — it errors instead of writing to a stale slot.
+    let (item_index, item) = resolve_target_item(reaper, input)?;
+    let project = ProjectContext::CurrentProject;
+    let low = reaper.low();
+    let mut bytes = notes.as_bytes().to_vec();
+    bytes.push(0);
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe {
+        low.GetSetMediaItemInfo_String(
+            item.as_ptr(),
+            c"P_NOTES".as_ptr(),
+            bytes.as_mut_ptr() as *mut c_char,
+            true,
+        )
+    };
+    reaper.undo_end_block_2(
+        project,
+        format!("ReaLackey: set notes of item {item_index}"),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+    if ok {
+        Ok(json!({ "set": true, "item_index": item_index }))
+    } else {
+        Err("failed to set item notes".into())
+    }
 }
 
 /// Internal op (`__transcribe_chunk`): render `[start, start+length)` of the
@@ -7728,7 +7822,7 @@ fn transcribe_probe(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<V
 /// to upload. `start` is 0-based within the transcribed region. Main thread.
 fn transcribe_chunk(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutcome {
     use base64::Engine as _;
-    let (_, take) = match transcribe_resolve(reaper, input) {
+    let (_, _, take) = match transcribe_resolve(reaper, input) {
         Ok(v) => v,
         Err(e) => return ToolOutcome::error(json!({ "error": e }).to_string()),
     };

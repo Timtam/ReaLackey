@@ -11,6 +11,21 @@ pub enum MainTask {
     Prompt(String),
     /// Abort the current generation.
     Cancel,
+    /// Transcribe the selected item and write the result, triggered by a bindable
+    /// REAPER action (no chat involved). Runs in the worker so the HTTP call is off
+    /// the main thread.
+    Transcribe(TranscribeOutput),
+}
+
+/// Where a transcription action writes its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscribeOutput {
+    /// Into the selected item's notes (the text travels with the item).
+    Notes,
+    /// A plain-text `.txt` file next to the item's source media.
+    Text,
+    /// An SRT subtitle file (with timecodes) next to the item's source media.
+    Srt,
 }
 
 /// Something to reflect in the UI / screen reader. Handled ONLY on the main

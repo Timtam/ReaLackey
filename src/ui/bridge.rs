@@ -8,12 +8,20 @@ use std::sync::OnceLock;
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::ai::protocol::MainTask;
+use crate::ai::protocol::{MainTask, TranscribeOutput};
 
 static TASK_TX: OnceLock<UnboundedSender<MainTask>> = OnceLock::new();
 
 pub fn set_task_sender(tx: UnboundedSender<MainTask>) {
     let _ = TASK_TX.set(tx);
+}
+
+/// A transcription action fired (transcribe the selected item → notes/text/SRT).
+/// Handed to the worker so the HTTP call runs off the main thread.
+pub fn transcribe(output: TranscribeOutput) {
+    if let Some(tx) = TASK_TX.get() {
+        let _ = tx.send(MainTask::Transcribe(output));
+    }
 }
 
 /// "Send" pressed.

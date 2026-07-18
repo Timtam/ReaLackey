@@ -13,12 +13,16 @@ use reaper_medium::{
     TranslateAccelResult,
 };
 
+use crate::ai::protocol::TranscribeOutput;
 use crate::ui;
 
 static CMD_OPEN: OnceLock<u32> = OnceLock::new();
 static CMD_PROVIDERS: OnceLock<u32> = OnceLock::new();
 static CMD_PRESETS: OnceLock<u32> = OnceLock::new();
 static CMD_AUTOAPPROVE: OnceLock<u32> = OnceLock::new();
+static CMD_TRANSCRIBE_NOTES: OnceLock<u32> = OnceLock::new();
+static CMD_TRANSCRIBE_TEXT: OnceLock<u32> = OnceLock::new();
+static CMD_TRANSCRIBE_SRT: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<usize> = OnceLock::new();
 
 struct Commands;
@@ -49,6 +53,15 @@ impl HookCommand for Commands {
             } else {
                 "Advanced mode off. The assistant asks before applying edits."
             });
+            true
+        } else if Some(id) == CMD_TRANSCRIBE_NOTES.get().copied() {
+            crate::ui::bridge::transcribe(TranscribeOutput::Notes);
+            true
+        } else if Some(id) == CMD_TRANSCRIBE_TEXT.get().copied() {
+            crate::ui::bridge::transcribe(TranscribeOutput::Text);
+            true
+        } else if Some(id) == CMD_TRANSCRIBE_SRT.get().copied() {
+            crate::ui::bridge::transcribe(TranscribeOutput::Srt);
             true
         } else {
             false
@@ -116,6 +129,15 @@ impl HookCustomMenu for ExtMenu {
             };
             ui::ffi::add_menu_item(submenu, label, id as i32);
         }
+        if let Some(id) = CMD_TRANSCRIBE_NOTES.get().copied() {
+            ui::ffi::add_menu_item(submenu, "Transcribe selected item \u{2192} notes", id as i32);
+        }
+        if let Some(id) = CMD_TRANSCRIBE_TEXT.get().copied() {
+            ui::ffi::add_menu_item(submenu, "Transcribe selected item \u{2192} text file", id as i32);
+        }
+        if let Some(id) = CMD_TRANSCRIBE_SRT.get().copied() {
+            ui::ffi::add_menu_item(submenu, "Transcribe selected item \u{2192} SRT file", id as i32);
+        }
         ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
     }
 }
@@ -158,6 +180,27 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
         cmd_autoapprove,
         "ReaLackey: Toggle advanced mode (auto-approve edits)",
+    ))?;
+
+    // Actions: transcribe the SELECTED item's audio to text, straight to a
+    // destination — no chat needed. Bindable to keys from REAPER's Actions list.
+    let cmd_tr_notes = session.plugin_register_add_command_id("RAAI_TranscribeToNotes")?;
+    let _ = CMD_TRANSCRIBE_NOTES.set(cmd_tr_notes.get());
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        cmd_tr_notes,
+        "ReaLackey: Transcribe selected item to its notes",
+    ))?;
+    let cmd_tr_text = session.plugin_register_add_command_id("RAAI_TranscribeToText")?;
+    let _ = CMD_TRANSCRIBE_TEXT.set(cmd_tr_text.get());
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        cmd_tr_text,
+        "ReaLackey: Transcribe selected item to a text file",
+    ))?;
+    let cmd_tr_srt = session.plugin_register_add_command_id("RAAI_TranscribeToSrt")?;
+    let _ = CMD_TRANSCRIBE_SRT.set(cmd_tr_srt.get());
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        cmd_tr_srt,
+        "ReaLackey: Transcribe selected item to an SRT subtitle file",
     ))?;
 
     // One handler dispatches all command ids.

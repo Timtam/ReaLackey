@@ -162,6 +162,39 @@ pub fn merge_transcripts(chunks: &[(f64, Transcript)]) -> Transcript {
     }
 }
 
+// ---- output formatting ------------------------------------------------------
+
+/// Format a transcript's segments as an SRT subtitle file, using its (item-relative)
+/// timestamps. Empty when there are no segments (e.g. a text-only model).
+pub fn to_srt(t: &Transcript) -> String {
+    let mut out = String::new();
+    for (i, s) in t.segments.iter().enumerate() {
+        out.push_str(&(i + 1).to_string());
+        out.push('\n');
+        out.push_str(&srt_time(s.start));
+        out.push_str(" --> ");
+        out.push_str(&srt_time(s.end));
+        out.push('\n');
+        out.push_str(s.text.trim());
+        out.push_str("\n\n");
+    }
+    out
+}
+
+/// Seconds -> `HH:MM:SS,mmm` (the SRT timecode form). Negative clamps to zero.
+fn srt_time(seconds: f64) -> String {
+    let total_ms = (seconds.max(0.0) * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let total_s = total_ms / 1000;
+    format!(
+        "{:02}:{:02}:{:02},{:03}",
+        total_s / 3600,
+        (total_s / 60) % 60,
+        total_s % 60,
+        ms
+    )
+}
+
 // ---- OpenAI-compatible /audio/transcriptions adapter ------------------------
 
 pub struct OpenAiTranscriber {
@@ -382,6 +415,25 @@ mod tests {
         // Degenerate inputs -> no chunks (never a zero/negative window).
         assert!(plan_chunks(0.0, 600.0).is_empty());
         assert!(plan_chunks(100.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn srt_formats_segments_with_timecodes() {
+        let t = Transcript {
+            text: "hi there".into(),
+            language: None,
+            segments: vec![
+                Segment { start: 0.0, end: 1.5, text: "hi".into() },
+                Segment { start: 3661.5, end: 3661.75, text: "there".into() },
+            ],
+        };
+        let srt = to_srt(&t);
+        assert!(srt.contains("1\n00:00:00,000 --> 00:00:01,500\nhi\n\n"), "{srt}");
+        // Hours/minutes/millis all carry: 3661.5 s = 01:01:01,500.
+        assert!(srt.contains("2\n01:01:01,500 --> 01:01:01,750\nthere\n\n"), "{srt}");
+        // No segments (text-only model) -> empty SRT.
+        let empty = Transcript { text: "x".into(), language: None, segments: vec![] };
+        assert!(to_srt(&empty).is_empty());
     }
 
     #[test]
