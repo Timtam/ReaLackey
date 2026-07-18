@@ -33,6 +33,12 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
+- **Fetch models** now authenticates with the **top (highest-priority) key from the
+  key list** — the one that would actually be used to send — instead of the "Add
+  key" input field or the stale saved key. Reordering or editing the key list and
+  then fetching (before saving) used the wrong key; typing into the Add-key field no
+  longer overrides the configured list either. (Falls back to a just-typed key only
+  when the list is empty, e.g. a brand-new account before you press Add.)
 - Screen-reader announcements were spoken **twice** (most noticeably under
   VoiceOver): the assistant announced through **both** OSARA and the webview's
   aria-live region, so a reader observing both channels heard everything doubled.

@@ -616,21 +616,29 @@ pub fn edit_dialog_key(action: i32) {
 /// "Fetch models" clicked: fetch the list using the endpoint + key currently in
 /// the dialog, let the user pick, and set the Model field + vision checkbox.
 pub fn edit_dialog_fetch() {
-    let Some((kind, id)) =
-        SESSION.with(|s| s.borrow().as_ref().map(|sess| (sess.kind, sess.id.clone())))
-    else {
+    // Grab the kind/id + the TOP of the working key list (highest priority — the key
+    // that would actually be used to send).
+    let Some((kind, id, top_key)) = SESSION.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|sess| (sess.kind, sess.id.clone(), sess.keys.first().cloned()))
+    }) else {
         return;
     };
 
-    // Read live (possibly-unsaved) endpoint + key from the dialog. For Anthropic
-    // the base-URL field is hidden/empty; models_api uses the fixed endpoint.
+    // Read the live (possibly-unsaved) endpoint from the dialog. For Anthropic the
+    // base-URL field is hidden/empty; models_api uses the fixed endpoint.
     let base = ui::ffi::pe_get_text(ui::ffi::PE_BASEURL);
-    let key_field = ui::ffi::pe_get_text(ui::ffi::PE_KEY);
-    let key = if key_field.trim().is_empty() {
-        registry::key_for(&id) // fall back to the stored key (edit)
-    } else {
-        Some(key_field.trim().to_string())
-    };
+    // Authenticate with the HIGHEST-PRIORITY key that would actually be used: the top
+    // of the working key list (the listbox), NOT the "Add key" input field and NOT the
+    // stale stored key. The working list may have been reordered / edited but not yet
+    // saved, so its top can differ from both. Only when the list is empty do we fall
+    // back to a key just typed in the field (a brand-new provider, before Add), then
+    // to the stored key (which also carries the Anthropic env-var fallback).
+    let typed = ui::ffi::pe_get_text(ui::ffi::PE_KEY).trim().to_string();
+    let key = top_key
+        .or_else(|| (!typed.is_empty()).then(|| typed.clone()))
+        .or_else(|| registry::key_for(&id));
     let key_missing = key.as_deref().map(str::trim).unwrap_or("").is_empty();
 
     if kind == AdapterKind::OpenAiCompatible && base.trim().is_empty() {
