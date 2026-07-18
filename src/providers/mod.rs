@@ -8,6 +8,7 @@ pub mod openai_compat;
 pub mod perplexity_agent;
 pub mod registry;
 pub mod sse;
+pub mod transcription;
 
 use async_trait::async_trait;
 use serde_json::Value;

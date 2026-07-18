@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 
 use crate::providers::models_api;
-use crate::providers::registry::{self, AdapterKind, ProviderConfig};
+use crate::providers::registry::{self, AdapterKind, ProviderConfig, ProviderRole};
 use crate::reaper::osara;
 use crate::ui;
 
@@ -715,6 +715,9 @@ pub fn edit_dialog_ok() -> bool {
     let cfg = ProviderConfig {
         id,
         label,
+        // Every provider added through this dialog today is a chat account; the
+        // role-aware UI (transcription tab) will thread the real role through here.
+        role: ProviderRole::Chat,
         kind,
         base_url,
         model,

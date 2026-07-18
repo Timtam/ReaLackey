@@ -33,6 +33,20 @@ pub enum AdapterKind {
     PerplexityAgent,
 }
 
+/// What an account is FOR — an axis orthogonal to [`AdapterKind`] (the wire
+/// protocol). A transcription account still has a wire protocol (an
+/// OpenAI-compatible `/v1/audio/transcriptions` endpoint), but it drives a
+/// different capability than chat. Defaults to `Chat` so accounts saved before
+/// this field existed keep working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProviderRole {
+    /// Drives the conversation (an [`crate::providers::LlmProvider`]).
+    #[default]
+    Chat,
+    /// Speech-to-text (a [`crate::providers::transcription::TranscriptionProvider`]).
+    Transcription,
+}
+
 impl AdapterKind {
     /// Whether the endpoint is built into the adapter (no user-supplied base URL):
     /// Anthropic and Perplexity have fixed endpoints; OpenAI-compatible does not.
@@ -59,6 +73,10 @@ pub struct ProviderConfig {
     pub id: String,
     /// Human-readable name shown in the list.
     pub label: String,
+    /// What the account is for (chat vs transcription). Defaults to `Chat` for
+    /// configs written before roles existed.
+    #[serde(default)]
+    pub role: ProviderRole,
     pub kind: AdapterKind,
     /// Endpoint base URL — OpenAI-compatible accounts only (preset or custom).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,9 +120,13 @@ impl ProviderConfig {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Store {
-    /// Id of the account that drives the conversation.
+    /// Id of the account that drives the conversation (the CHAT default). Kept as
+    /// `default` for backward compatibility with pre-role `providers.json` files.
     #[serde(default)]
     default: Option<String>,
+    /// Id of the account used for transcription (speech-to-text), if any.
+    #[serde(default)]
+    default_transcription: Option<String>,
     #[serde(default)]
     providers: Vec<ProviderConfig>,
     /// "Advanced mode": apply mutating tools WITHOUT asking for confirmation.
@@ -112,6 +134,24 @@ struct Store {
     /// `RAAI_CONFIRM` env var overrides it (see `config::confirmation_required`).
     #[serde(default)]
     auto_approve: bool,
+}
+
+impl Store {
+    /// The stored default id for a role (borrowed).
+    fn role_default(&self, role: ProviderRole) -> &Option<String> {
+        match role {
+            ProviderRole::Chat => &self.default,
+            ProviderRole::Transcription => &self.default_transcription,
+        }
+    }
+
+    /// Mutable slot for a role's default id.
+    fn role_default_mut(&mut self, role: ProviderRole) -> &mut Option<String> {
+        match role {
+            ProviderRole::Chat => &mut self.default,
+            ProviderRole::Transcription => &mut self.default_transcription,
+        }
+    }
 }
 
 static STORE: LazyLock<RwLock<Store>> = LazyLock::new(|| RwLock::new(load_or_seed()));
@@ -129,15 +169,21 @@ pub fn list() -> Vec<ProviderConfig> {
     STORE.read().unwrap().providers.clone()
 }
 
-/// The default account id, if any.
+/// The CHAT default account id, if any. (Back-compat name; the role-aware UI will
+/// add per-role variants.)
 pub fn default_id() -> Option<String> {
     STORE.read().unwrap().default.clone()
 }
 
-/// The default account's config (the one that drives the conversation).
+/// The default account's config (the one that drives the conversation — chat).
 pub fn active() -> Option<ProviderConfig> {
+    active_for(ProviderRole::Chat)
+}
+
+/// The default account's config for a role (e.g. the active transcription account).
+pub fn active_for(role: ProviderRole) -> Option<ProviderConfig> {
     let s = STORE.read().unwrap();
-    let id = s.default.as_ref()?;
+    let id = s.role_default(role).as_ref()?;
     s.providers.iter().find(|p| &p.id == id).cloned()
 }
 
@@ -161,25 +207,29 @@ pub fn toggle_auto_approve() -> bool {
     now
 }
 
-/// Set the default account. Errors if the id is unknown.
+/// Set the default account for ITS role (a chat account becomes the chat default,
+/// a transcription account the transcription default). Errors if the id is unknown.
 pub fn set_default(id: &str) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
-    if !s.providers.iter().any(|p| p.id == id) {
-        return Err(format!("unknown provider id: {id}"));
-    }
-    s.default = Some(id.to_string());
+    let role = s
+        .providers
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.role)
+        .ok_or_else(|| format!("unknown provider id: {id}"))?;
+    *s.role_default_mut(role) = Some(id.to_string());
     save(&s)
 }
 
 /// Add a new account. Its API keys are set separately via [`set_keys`]. Errors on
-/// a duplicate id. Becomes the default if it is the first account.
+/// a duplicate id. Becomes the default for its role if that role has none yet.
 pub fn add(cfg: ProviderConfig) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
     if s.providers.iter().any(|p| p.id == cfg.id) {
         return Err(format!("provider id already exists: {}", cfg.id));
     }
-    if s.default.is_none() {
-        s.default = Some(cfg.id.clone());
+    if s.role_default(cfg.role).is_none() {
+        *s.role_default_mut(cfg.role) = Some(cfg.id.clone());
     }
     s.providers.push(cfg);
     save(&s)
@@ -198,18 +248,18 @@ pub fn update(cfg: ProviderConfig) -> Result<(), String> {
     save(&s)
 }
 
-/// Remove an account (and its stored key). If it was the default, the default
-/// moves to the first remaining account (or none).
+/// Remove an account (and its stored key). If it was its role's default, that
+/// default moves to the first remaining account OF THE SAME ROLE (or none).
 pub fn remove(id: &str) -> Result<(), String> {
     let mut s = STORE.write().unwrap();
-    let before = s.providers.len();
-    s.providers.retain(|p| p.id != id);
-    if s.providers.len() == before {
+    let Some(role) = s.providers.iter().find(|p| p.id == id).map(|p| p.role) else {
         return Err(format!("unknown provider id: {id}"));
-    }
+    };
+    s.providers.retain(|p| p.id != id);
     delete_key(id);
-    if s.default.as_deref() == Some(id) {
-        s.default = s.providers.first().map(|p| p.id.clone());
+    if s.role_default(role).as_deref() == Some(id) {
+        let next = s.providers.iter().find(|p| p.role == role).map(|p| p.id.clone());
+        *s.role_default_mut(role) = next;
     }
     save(&s)
 }
@@ -440,9 +490,11 @@ fn load_or_seed() -> Store {
     // First run: seed a Claude account mirroring the previous fixed settings.
     let store = Store {
         default: Some("anthropic".to_string()),
+        default_transcription: None,
         providers: vec![ProviderConfig {
             id: "anthropic".to_string(),
             label: "Claude (Anthropic)".to_string(),
+            role: ProviderRole::Chat,
             kind: AdapterKind::Anthropic,
             base_url: None,
             model: default_anthropic_model(),
@@ -491,7 +543,45 @@ fn default_max_turns() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::split_keys;
+    use super::{split_keys, ProviderRole, Store};
+
+    #[test]
+    fn provider_role_defaults_to_chat_for_pre_role_configs() {
+        // A providers.json written before roles existed omits the field entirely.
+        let json = r#"{ "id":"x", "label":"X", "kind":"OpenAiCompatible",
+                        "model":"gpt-4o", "max_tokens":4096 }"#;
+        let cfg: super::ProviderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.role, ProviderRole::Chat);
+    }
+
+    #[test]
+    fn provider_role_round_trips_and_defaults() {
+        assert_eq!(ProviderRole::default(), ProviderRole::Chat);
+        for r in [ProviderRole::Chat, ProviderRole::Transcription] {
+            let s = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<ProviderRole>(&s).unwrap(), r);
+        }
+        // Transcription serializes as its variant name (stable on-disk form).
+        assert_eq!(
+            serde_json::to_string(&ProviderRole::Transcription).unwrap(),
+            "\"Transcription\""
+        );
+    }
+
+    #[test]
+    fn store_routes_each_role_to_its_own_default_slot() {
+        let mut s = Store::default();
+        *s.role_default_mut(ProviderRole::Chat) = Some("c".into());
+        *s.role_default_mut(ProviderRole::Transcription) = Some("t".into());
+        assert_eq!(s.role_default(ProviderRole::Chat).as_deref(), Some("c"));
+        assert_eq!(
+            s.role_default(ProviderRole::Transcription).as_deref(),
+            Some("t")
+        );
+        // The two slots are independent (setting one never disturbs the other).
+        assert_eq!(s.default.as_deref(), Some("c"));
+        assert_eq!(s.default_transcription.as_deref(), Some("t"));
+    }
 
     #[test]
     fn split_keys_parses_ordered_list_and_is_backward_compatible() {
