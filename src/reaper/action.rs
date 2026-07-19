@@ -146,9 +146,8 @@ impl HookCustomMenu for ExtMenu {
         if let Some(id) = CMD_TRANSCRIBE_SRT.get().copied() {
             ui::ffi::add_menu_item(submenu, "Transcribe selected item \u{2192} SRT file", id as i32);
         }
-        if let Some(id) = CMD_CUT_EDITOR.get().copied() {
-            ui::ffi::add_menu_item(submenu, "Cut selected item by text\u{2026}", id as i32);
-        }
+        // "Cut selected item by text" is intentionally NOT in the menu — it stays a
+        // registered action (bind it to a key via Actions), just not a menu entry.
         ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
     }
 }
