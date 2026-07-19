@@ -15,6 +15,20 @@ pub enum MainTask {
     /// REAPER action (no chat involved). Runs in the worker so the HTTP call is off
     /// the main thread.
     Transcribe(TranscribeOutput),
+    /// Open the cut-by-text editor on the selected item, triggered by a bindable
+    /// REAPER action: transcribe it, show the editor, then cut what the user
+    /// removed. Runs in the worker (transcription is async HTTP).
+    OpenCutEditor,
+}
+
+/// The outcome of a cut-by-text editor session, sent from the webview (main
+/// thread) back to the waiting worker.
+#[derive(Debug, Clone)]
+pub enum EditorResult {
+    /// The user confirmed: `keep[i]` is true for each word to keep (false = cut).
+    Save { keep: Vec<bool> },
+    /// The user cancelled (or the editor was dismissed) — change nothing.
+    Cancel,
 }
 
 /// Where a transcription action writes its result.
@@ -63,4 +77,9 @@ pub enum UiEvent {
     ProgressUpdate { percent: u8, message: String },
     /// Close the progress dialog.
     ProgressClose,
+    /// Open the cut-by-text editor modal in the webview. Carries the JSON payload
+    /// (words with times + sentence ids, and the item's audio as base64 WAV).
+    OpenCutEditor(String),
+    /// Close the cut-by-text editor modal (e.g. the turn was cancelled).
+    CloseCutEditor,
 }

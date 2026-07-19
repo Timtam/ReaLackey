@@ -187,6 +187,8 @@ impl PumpSurface {
                 ui::ffi::progress_update(percent, &message)
             }
             UiEvent::ProgressClose => ui::ffi::progress_close(),
+            UiEvent::OpenCutEditor(payload) => crate::ui::output::open_cut_editor(&payload),
+            UiEvent::CloseCutEditor => crate::ui::output::close_cut_editor(),
         }
     }
 

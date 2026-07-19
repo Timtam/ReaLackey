@@ -1435,6 +1435,25 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             json!(["kept_text"]),
         ),
     });
+    defs.push(ToolDef {
+        name: "open_cut_editor".into(),
+        description: "Open the INTERACTIVE cut-by-text editor for the USER: it transcribes the item, \
+                      shows a modal where they navigate the transcript by keyboard and delete the \
+                      words/sentences to drop, then cuts the removed audio when they confirm. Use \
+                      this when the user wants to edit by ear/text themselves (rather than telling \
+                      you what to cut). Blocks until they confirm or cancel. Needs the HTML pane \
+                      (Windows/macOS) and a provider that emits WORD timestamps (whisper-1 or a local \
+                      Whisper server). If you already know exactly what to remove, prefer \
+                      cut_item_by_text or remove_item_time_ranges instead."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer", "description": "0-based project item index; omit to use the selected item" },
+                "language": { "type": "string", "description": "optional ISO-639-1 hint (e.g. 'en', 'de'); omit to auto-detect" }
+            }),
+            json!([]),
+        ),
+    });
     // --- transport / timeline / global settings ---
     defs.push(ToolDef {
         name: "get_transport".into(),
@@ -1815,7 +1834,11 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     )
     .is_none()
     {
-        defs.retain(|d| d.name != "transcribe_item" && d.name != "cut_item_by_text");
+        defs.retain(|d| {
+            d.name != "transcribe_item"
+                && d.name != "cut_item_by_text"
+                && d.name != "open_cut_editor"
+        });
     }
     // Strip the mutation boilerplate that the system prompt now states ONCE ("every
     // mutating tool CHANGES the project, is confirmed, and is undo-wrapped"). It was

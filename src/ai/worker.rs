@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::protocol::{MainTask, TranscribeOutput, UiEvent};
+use crate::ai::protocol::{EditorResult, MainTask, TranscribeOutput, UiEvent};
 use crate::config;
 use crate::providers::registry::{self, AdapterKind};
 use crate::providers::{
@@ -106,6 +106,9 @@ async fn run(
             }
             MainTask::Transcribe(output) => {
                 handle_transcribe_action(&ui_tx, &op_tx, &mut task_rx, output).await;
+            }
+            MainTask::OpenCutEditor => {
+                handle_open_cut_editor_action(&ui_tx, &op_tx, &mut task_rx).await;
             }
         }
     }
@@ -669,7 +672,9 @@ async fn run_turn(
                     out.cancelled = true;
                     let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
                 }
-                Some(MainTask::Prompt(_)) | Some(MainTask::Transcribe(_)) => {
+                Some(MainTask::Prompt(_))
+                | Some(MainTask::Transcribe(_))
+                | Some(MainTask::OpenCutEditor) => {
                     // Phase 0/1: one generation at a time.
                     let _ = ui_tx.send(UiEvent::Status(
                         "Please wait until the current answer is finished…".into(),
@@ -725,6 +730,13 @@ async fn run_tool(
     // the batch-preview gate below.
     if name == "cut_item_by_text" {
         return cut_item_by_text(ui_tx, op_tx, task_rx, input, mutations_ok).await;
+    }
+
+    // Open the interactive cut-by-text EDITOR (the user edits in a webview modal,
+    // then we cut). Worker-orchestrated; the user's Confirm in the editor is the
+    // consent, so it doesn't ride the batch mutation gate.
+    if name == "open_cut_editor" {
+        return open_cut_editor_tool(ui_tx, op_tx, task_rx, input).await;
     }
 
     // Tier-B pixel input: arm-per-task consent. The user approves once, then the
@@ -1187,7 +1199,9 @@ async fn run_transcription(
                         let _ = (&mut fut).await; // let the request unwind
                         return TranscribeOutcomeKind::Cancelled;
                     }
-                    Some(MainTask::Prompt(_)) | Some(MainTask::Transcribe(_)) => {
+                    Some(MainTask::Prompt(_))
+                    | Some(MainTask::Transcribe(_))
+                    | Some(MainTask::OpenCutEditor) => {
                         let _ = ui_tx.send(UiEvent::Status(
                             "Please wait until transcription finishes\u{2026}".into(),
                         ));
@@ -1478,6 +1492,209 @@ async fn handle_transcribe_action(
                 write_transcription_file(ui_tx, &t.source_file, "srt", &srt);
             }
         }
+    }
+}
+
+/// The outcome of a cut-by-text editor session.
+enum CutEditorOutcome {
+    Done { removed_seconds: f64, cut: Value },
+    /// No webview (Linux / a failed WebView2) — the editor can't open here.
+    NoWebview,
+    NoProvider,
+    /// The transcription carried no word timestamps, so text can't map to audio.
+    NoWords,
+    Declined,
+    Cancelled,
+    NothingToCut,
+    Failed(String),
+}
+
+/// Shared core for the cut-by-text editor: transcribe the item (word timings),
+/// render its audio to one WAV, open the webview editor, await the user's edit, and
+/// cut what they removed. `user_initiated` follows `run_transcription` (true = the
+/// user ran the action: skip the cloud-upload prompt and show the progress bar).
+async fn run_cut_editor(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    input: Value,
+    user_initiated: bool,
+) -> CutEditorOutcome {
+    // The editor is a webview modal — refuse up front where there's no webview, so
+    // we never send an OpenCutEditor no one will answer and then hang awaiting it.
+    if !crate::ui::output::webview_active() {
+        return CutEditorOutcome::NoWebview;
+    }
+
+    // 1. Transcribe (word timings) via the shared core.
+    let t = match run_transcription(ui_tx, op_tx, task_rx, input.clone(), user_initiated).await {
+        TranscribeOutcomeKind::Done(t) => t,
+        TranscribeOutcomeKind::NoProvider => return CutEditorOutcome::NoProvider,
+        TranscribeOutcomeKind::Declined => return CutEditorOutcome::Declined,
+        TranscribeOutcomeKind::Cancelled => return CutEditorOutcome::Cancelled,
+        TranscribeOutcomeKind::Failed(e) => return CutEditorOutcome::Failed(e),
+    };
+    let _ = ui_tx.send(UiEvent::ProgressClose); // close the transcription progress bar
+    if t.transcript.words.is_empty() {
+        return CutEditorOutcome::NoWords;
+    }
+
+    // 2. Render the whole region to one 16 kHz WAV for in-editor playback (the same
+    // accessor render the transcription uses; word times map to it 1:1).
+    let _ = ui_tx.send(UiEvent::Status("Preparing the editor\u{2026}".into()));
+    let probe = exec_tool(op_tx, "__transcribe_probe".to_string(), json!({ "guid": t.guid })).await;
+    if probe.is_error {
+        return CutEditorOutcome::Failed(outcome_error(&probe, "couldn't read the item"));
+    }
+    let pv: Value = serde_json::from_str(&probe.content).unwrap_or_default();
+    let total = pv.get("total_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let rendered = exec_tool(
+        op_tx,
+        "__transcribe_chunk".to_string(),
+        json!({ "guid": t.guid, "start": 0.0, "length": total }),
+    )
+    .await;
+    if rendered.is_error {
+        return CutEditorOutcome::Failed(outcome_error(&rendered, "couldn't render the item audio"));
+    }
+    let wav_b64 = rendered.audio.map(|a| a.data_base64).unwrap_or_default();
+
+    // 3. Build the editor payload: words with sentence ids + times, and the audio.
+    let sids = crate::edit::sentence_ids(&t.transcript.words, &t.transcript.segments);
+    let words_json: Vec<Value> = t
+        .transcript
+        .words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            json!({ "t": w.text, "start": w.start, "end": w.end, "s": sids.get(i).copied().unwrap_or(0) })
+        })
+        .collect();
+    let item_name = std::path::Path::new(&t.source_file)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let payload = json!({ "words": words_json, "wav": wav_b64, "item": item_name, "duration": total });
+
+    // 4. Arm the reply slot, open the editor, await the user's result. The editor
+    // always resolves (Confirm / Cancel / Esc / dialog-close), so this can't hang;
+    // a dropped sender (dialog closed) resolves to Err -> treated as cancel.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    crate::ui::bridge::install_editor_reply(reply_tx);
+    let _ = ui_tx.send(UiEvent::OpenCutEditor(payload.to_string()));
+    let _ = ui_tx.send(UiEvent::Status("Editing\u{2026} confirm the cut or cancel".into()));
+    let result = reply_rx.await;
+    // Guarantee the modal is gone (the JS self-closes on confirm/cancel; this covers
+    // the dialog-closed / dropped-sender path too).
+    let _ = ui_tx.send(UiEvent::CloseCutEditor);
+    let keep = match result {
+        Ok(EditorResult::Save { keep }) => keep,
+        Ok(EditorResult::Cancel) | Err(_) => return CutEditorOutcome::Cancelled,
+    };
+
+    // 5. Cut the removed spans via the shared executor (one undo point). The user's
+    // Confirm in the editor is the consent, so there's no extra mutation prompt.
+    let spans = crate::edit::remove_spans_from_kept(&t.transcript.words, &keep);
+    if spans.is_empty() {
+        return CutEditorOutcome::NothingToCut;
+    }
+    let removed_seconds: f64 = spans.iter().map(|s| (s.end - s.start).max(0.0)).sum();
+    let ranges: Vec<Value> = spans
+        .iter()
+        .map(|s| json!({ "start": s.start, "end": s.end }))
+        .collect();
+    let cut = exec_tool(
+        op_tx,
+        "remove_item_time_ranges".to_string(),
+        json!({ "guid": t.guid, "ranges": ranges }),
+    )
+    .await;
+    if cut.is_error {
+        return CutEditorOutcome::Failed(outcome_error(&cut, "the cut failed"));
+    }
+    let cut_result: Value = serde_json::from_str(&cut.content).unwrap_or_default();
+    CutEditorOutcome::Done { removed_seconds, cut: cut_result }
+}
+
+/// A bindable REAPER action: open the cut-by-text editor on the selected item, then
+/// cut. Announces the outcome via OSARA (may run with the chat window closed).
+async fn handle_open_cut_editor_action(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+) {
+    let _ = ui_tx.send(UiEvent::Announce("Opening the cut-by-text editor\u{2026}".into()));
+    match run_cut_editor(ui_tx, op_tx, task_rx, json!({}), true).await {
+        CutEditorOutcome::Done { removed_seconds, .. } => {
+            let _ = ui_tx.send(UiEvent::Announce(format!(
+                "Cut applied — {removed_seconds:.1} seconds removed."
+            )));
+        }
+        CutEditorOutcome::NoWebview => {
+            let _ = ui_tx.send(UiEvent::Error(
+                "The cut-by-text editor needs the HTML pane, which isn't available here.".into(),
+            ));
+        }
+        CutEditorOutcome::NoProvider => {
+            let _ = ui_tx.send(UiEvent::Error(
+                "No transcription provider is configured. Open Providers, Transcription tab, and add \
+                 one (whisper-1 or a local whisper server), then try again."
+                    .into(),
+            ));
+        }
+        CutEditorOutcome::NoWords => {
+            let _ = ui_tx.send(UiEvent::Error(
+                "This transcription returned no word timestamps, so the editor can't map text to \
+                 audio. Use whisper-1 or a local whisper server."
+                    .into(),
+            ));
+        }
+        CutEditorOutcome::NothingToCut => {
+            let _ = ui_tx.send(UiEvent::Announce("No words removed — nothing to cut.".into()));
+        }
+        CutEditorOutcome::Declined => {
+            let _ = ui_tx.send(UiEvent::Announce("Transcription declined.".into()));
+        }
+        CutEditorOutcome::Cancelled => {
+            let _ = ui_tx.send(UiEvent::Announce("Cut cancelled.".into()));
+        }
+        CutEditorOutcome::Failed(e) => {
+            let _ = ui_tx.send(UiEvent::Error(format!("Cut-by-text failed: {e}")));
+        }
+    }
+}
+
+/// The chat tool `open_cut_editor`: open the interactive editor and cut. Returns a
+/// summary — or the reason it didn't run — to the model.
+async fn open_cut_editor_tool(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    input: Value,
+) -> ToolOutcome {
+    match run_cut_editor(ui_tx, op_tx, task_rx, input, false).await {
+        CutEditorOutcome::Done { removed_seconds, cut } => ToolOutcome::ok(
+            json!({ "applied": true, "removed_seconds": removed_seconds, "cut": cut }).to_string(),
+        ),
+        CutEditorOutcome::NoWebview => ToolOutcome::error(
+            json!({ "error": "the cut-by-text editor needs the HTML pane, which isn't available here" })
+                .to_string(),
+        ),
+        CutEditorOutcome::NoProvider => ToolOutcome::error(
+            json!({ "error": "No transcription provider is configured — the user must add one in Providers, Transcription tab." })
+                .to_string(),
+        ),
+        CutEditorOutcome::NoWords => ToolOutcome::error(
+            json!({ "error": "the transcription returned no word timestamps; use whisper-1 or a local whisper server" })
+                .to_string(),
+        ),
+        CutEditorOutcome::NothingToCut => {
+            ToolOutcome::ok(json!({ "applied": false, "reason": "the user removed nothing" }).to_string())
+        }
+        CutEditorOutcome::Declined => ToolOutcome::ok(json!({ "declined": true }).to_string()),
+        CutEditorOutcome::Cancelled => ToolOutcome::ok(json!({ "cancelled": true }).to_string()),
+        CutEditorOutcome::Failed(e) => ToolOutcome::error(json!({ "error": e }).to_string()),
     }
 }
 

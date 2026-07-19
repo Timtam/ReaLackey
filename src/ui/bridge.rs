@@ -4,16 +4,54 @@
 //! lives in a process-global `OnceLock`. `send` on a tokio unbounded channel is
 //! sync and thread-safe, so calling it from the main thread is fine.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
-use crate::ai::protocol::{MainTask, TranscribeOutput};
+use crate::ai::protocol::{EditorResult, MainTask, TranscribeOutput};
 
 static TASK_TX: OnceLock<UnboundedSender<MainTask>> = OnceLock::new();
 
+/// Where a cut-by-text editor session sends its result. The worker installs a
+/// fresh sender before opening the editor; the webview's save/cancel message (or
+/// a dialog-close) fulfils it. A `Mutex<Option<..>>` (not `OnceLock`) so it can be
+/// re-armed for each editor session.
+static EDITOR_REPLY: Mutex<Option<oneshot::Sender<EditorResult>>> = Mutex::new(None);
+
 pub fn set_task_sender(tx: UnboundedSender<MainTask>) {
     let _ = TASK_TX.set(tx);
+}
+
+/// Arm the editor-result slot before opening the editor (worker thread).
+pub fn install_editor_reply(tx: oneshot::Sender<EditorResult>) {
+    if let Ok(mut g) = EDITOR_REPLY.lock() {
+        // Replacing any stale sender drops it, which unblocks a previous waiter
+        // with a cancel (its receiver errors) — there is only ever one editor.
+        *g = Some(tx);
+    }
+}
+
+/// Deliver a result to the waiting worker, if one is armed. Idempotent: the first
+/// of save / cancel / dialog-close wins; later ones find the slot empty.
+fn resolve_editor(result: EditorResult) {
+    let taken = EDITOR_REPLY.lock().ok().and_then(|mut g| g.take());
+    if let Some(tx) = taken {
+        let _ = tx.send(result);
+    }
+}
+
+/// Cancel a pending editor session (called when the dialog is destroyed while the
+/// editor is open, so the worker never hangs awaiting a reply).
+pub fn cancel_editor() {
+    resolve_editor(EditorResult::Cancel);
+}
+
+/// A bindable action: open the cut-by-text editor on the selected item.
+pub fn open_cut_editor() {
+    if let Some(tx) = TASK_TX.get() {
+        let _ = tx.send(MainTask::OpenCutEditor);
+    }
 }
 
 /// A transcription action fired (transcribe the selected item → notes/text/SRT).
@@ -59,6 +97,17 @@ pub fn on_webview_message(json: &str) {
         // The composer's "Presets" button / Alt+P: show the native preset picker
         // and insert the chosen prompt into the composer.
         Some("presets:pick") => pick_preset(),
+        // Cut-by-text editor: the user confirmed (with the per-word keep flags) or
+        // cancelled. Hand the outcome to the worker awaiting it.
+        Some("cut:save") => {
+            let keep: Vec<bool> = v
+                .get("keep")
+                .and_then(|k| k.as_array())
+                .map(|a| a.iter().map(|b| b.as_bool().unwrap_or(true)).collect())
+                .unwrap_or_default();
+            resolve_editor(EditorResult::Save { keep });
+        }
+        Some("cut:cancel") => resolve_editor(EditorResult::Cancel),
         _ => {}
     }
 }

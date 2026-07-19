@@ -11,12 +11,23 @@
 //! main-thread `thread_local`.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::text::{html_escape, markdown_to_html};
 use crate::ui::ffi;
 
 thread_local! {
     static STATE: RefCell<Output> = RefCell::new(Output::new());
+}
+
+/// Thread-safe mirror of "is the webview live?", so the worker thread (which can't
+/// touch the main-thread `STATE` thread-local) can decide whether the cut-by-text
+/// editor can open before it commits to awaiting a reply.
+static WEBVIEW_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the embedded webview is live (readable from any thread).
+pub fn webview_active() -> bool {
+    WEBVIEW_ACTIVE.load(Ordering::Acquire)
 }
 
 struct Output {
@@ -194,6 +205,20 @@ impl Output {
             self.eval(if on { "setGenerating(true);" } else { "setGenerating(false);" });
         }
     }
+
+    /// Open the cut-by-text editor modal with its JSON payload (words + audio).
+    fn open_cut_editor(&self, payload_json: &str) {
+        if self.active() {
+            self.call_js("openCutEditor", payload_json);
+        }
+    }
+
+    /// Close the cut-by-text editor modal.
+    fn close_cut_editor(&self) {
+        if self.active() {
+            self.eval("closeCutEditor();");
+        }
+    }
 }
 
 // ---- public API (all main-thread) -------------------------------------------
@@ -214,6 +239,8 @@ pub fn ensure_created() {
         match webview_impl::create() {
             Ok(webview) => {
                 STATE.with(|c| c.borrow_mut().webview = Some(webview));
+                // Publish "webview is live" for the worker thread (cut-by-text editor).
+                WEBVIEW_ACTIVE.store(true, Ordering::Release);
                 // Hand the whole window to the webview (it hosts the conversation
                 // AND the input composer now), hiding every native control, then
                 // re-bound the webview to the freed-up full-window output rect.
@@ -270,6 +297,10 @@ fn console(msg: &str) {
 /// Drop the webview when its parent dialog is destroyed, so it never lingers
 /// with a dangling parent (and `ensure_created` will rebuild on re-open).
 pub fn on_destroy() {
+    // The webview is going away: unblock any worker awaiting a cut-by-text editor
+    // reply (it would otherwise hang), and mark the pane inactive.
+    WEBVIEW_ACTIVE.store(false, Ordering::Release);
+    crate::ui::bridge::cancel_editor();
     #[cfg(webview)]
     {
         // Take the webview out (releasing the borrow) before dropping it. Dropping
@@ -321,6 +352,14 @@ pub fn error(text: &str) {
 }
 pub fn announce(text: &str) {
     STATE.with(|c| c.borrow().announce(text));
+}
+/// Open the cut-by-text editor modal in the webview (main thread).
+pub fn open_cut_editor(payload_json: &str) {
+    STATE.with(|c| c.borrow().open_cut_editor(payload_json));
+}
+/// Close the cut-by-text editor modal (main thread).
+pub fn close_cut_editor() {
+    STATE.with(|c| c.borrow().close_cut_editor());
 }
 /// Speak `text` to the screen reader exactly ONCE. Prefer OSARA (focus-independent
 /// and cross-platform — it reaches the reader whether or not the chat pane is
@@ -482,6 +521,29 @@ details.help{flex:0 0 auto;padding:0 10px 8px;color:#9a9a9a;font-size:12px;}
 details.help summary{cursor:pointer;padding:2px 0;}
 details.help ul{margin:4px 0 0;padding-left:18px;}
 details.help li{margin:2px 0;}
+/* Cut-by-text editor modal (overlays the whole pane). */
+#cutModal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:9999;}
+#cutModal[hidden]{display:none;}
+.cut-card{display:flex;flex-direction:column;width:min(760px,94vw);height:min(88vh,680px);background:#1e1e1e;border:1px solid #3a3a3a;border-radius:10px;overflow:hidden;}
+.cut-head{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #3a3a3a;}
+.cut-title{flex:1;font-weight:700;}
+.cut-item{color:#9a9a9a;font-weight:400;margin-left:8px;font-size:12px;}
+.cut-ico{background:#2a2a2a;color:#e6e6e6;border:1px solid #3a3a3a;border-radius:5px;padding:4px 8px;cursor:pointer;font:inherit;font-size:12px;}
+.cut-ico:hover{background:#333;}
+.cut-transport{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid #3a3a3a;}
+#cutPlay{width:34px;font-size:14px;}
+.cut-summary{color:#9a9a9a;font-size:12px;}
+.cut-grid{flex:1 1 auto;overflow-y:auto;padding:14px 16px;line-height:2.1;font-size:16px;outline:none;}
+.cut-grid:focus{box-shadow:inset 0 0 0 2px #0e639c;}
+.cut-sent{display:inline;}
+.cut-tok{border-radius:4px;padding:1px 3px;}
+.cut-tok.cur{box-shadow:0 0 0 2px #4ea1ff;}
+.cut-tok.sel{background:#264f78;}
+.cut-tok.rm{opacity:.45;text-decoration:line-through;color:#8a8a8a;}
+.cut-foot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid #3a3a3a;}
+.cut-hint{flex:1;color:#8a8a8a;font-size:11px;}
+.cut-foot button{padding:6px 14px;border-radius:5px;border:1px solid #3a3a3a;background:#2a2a2a;color:#e6e6e6;cursor:pointer;font:inherit;}
+.cut-primary{background:#0e639c;border-color:#1177bb;color:#fff;}
 </style></head><body>
 <div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
 <!-- NOT a live region: streaming re-renders it token-by-token; role="log"/
@@ -495,6 +557,26 @@ details.help li{margin:2px 0;}
 <button id="send" type="submit">Send</button>
 </form>
 <details class="help"><summary>Keyboard shortcuts</summary><ul><li>Enter sends; Shift+Enter starts a new line.</li><li>Alt+1 through Alt+0 read that message; press the same combo again quickly to copy it.</li><li>Alt+P inserts a saved prompt preset.</li><li>Escape stops the assistant while it is working.</li></ul></details>
+<div id="cutModal" hidden role="dialog" aria-modal="true" aria-label="Cut by text editor">
+  <div class="cut-card">
+    <div class="cut-head">
+      <div class="cut-title">Cut by text<span id="cutItem" class="cut-item"></span></div>
+      <button id="cutAudioMode" type="button" class="cut-ico" title="Cycle audio feedback">Audio: both</button>
+      <button id="cutUndo" type="button" class="cut-ico" title="Undo (Ctrl+Z)">Undo</button>
+      <button id="cutRedo" type="button" class="cut-ico" title="Redo (Ctrl+Y)">Redo</button>
+    </div>
+    <div class="cut-transport">
+      <button id="cutPlay" type="button" class="cut-ico" aria-label="Play the edited result">&#9654;</button>
+      <div id="cutSummary" class="cut-summary"></div>
+    </div>
+    <div id="cutGrid" class="cut-grid" role="application" tabindex="0" aria-label="Transcript. Arrow keys move by word and sentence; Space selects; Delete removes; Ctrl+Z undoes; Tab leaves to the buttons."></div>
+    <div class="cut-foot">
+      <span class="cut-hint">Up/Down sentence, Left/Right word, Space select, Del remove, Ctrl+Z undo, Tab to buttons</span>
+      <button id="cutCancel" type="button">Cancel</button>
+      <button id="cutConfirm" type="button" class="cut-primary">Confirm cut</button>
+    </div>
+  </div>
+</div>
 <script>
 function sd(){var l=document.getElementById('log');if(l)l.scrollTop=l.scrollHeight;}
 function addBlock(h){var l=document.getElementById('log');if(l){l.insertAdjacentHTML('beforeend',h);sd();}}
@@ -592,6 +674,150 @@ document.addEventListener('keydown',function(e){
   e.preventDefault();
   pickPreset();
 });
+// ---- Cut-by-text editor (modal). openCutEditor(payload)/closeCutEditor() are
+// called from Rust; the user's confirm/cancel posts {t:'cut:save'|'cut:cancel'}. --
+(function(){
+  var st=null,G=null,ctx=null,buf=null,curSrc=null,playTimer=null,preview=[];
+  var MODES=['both','audio','spoken'];
+  var cancelArmed=false,cancelTimer=null;
+  function $(id){return document.getElementById(id);}
+  function announce(t){ if(window.liveAnnounce) liveAnnounce(t); }
+  function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function bare(s){ return (s||'').replace(/[^A-Za-z0-9']/g,''); }
+  function isArrow(k){ return k==='ArrowLeft'||k==='ArrowRight'||k==='ArrowUp'||k==='ArrowDown'; }
+  function b64bytes(b){ var s=atob(b),n=s.length,u=new Uint8Array(n); for(var i=0;i<n;i++)u[i]=s.charCodeAt(i); return u; }
+
+  window.openCutEditor=function(json){
+    try{
+      var d=(typeof json==='string')?JSON.parse(json):json;
+      st={words:(d.words||[]),caret:0,anchor:null,mode:'both',undo:[],redo:[],duration:(d.duration||0)};
+      cancelArmed=false;
+      ctx=null;buf=null;
+      try{ var AC=window.AudioContext||window.webkitAudioContext;
+        if(AC && d.wav){ ctx=new AC(); ctx.decodeAudioData(b64bytes(d.wav).buffer,function(b){buf=b;},function(){buf=null;}); } }catch(e){ctx=null;buf=null;}
+      $('cutItem').textContent=d.item?(' — '+d.item):'';
+      $('cutAudioMode').textContent='Audio: both';
+      G=$('cutGrid'); render();
+      inertComposer(true);
+      $('cutModal').hidden=false;
+      setTimeout(function(){ if(G)G.focus(); },30);
+      announce('Cut by text editor. '+st.words.length+' words. Arrows navigate, Delete removes, Tab to the buttons, Confirm to cut.');
+    }catch(e){ try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:cancel'})); }catch(_){} }
+  };
+  window.closeCutEditor=function(){
+    stopAll(); var m=$('cutModal'); if(m)m.hidden=true; inertComposer(false);
+    st=null; buf=null; if(ctx){ try{ctx.close();}catch(e){} ctx=null; }
+    try{ focusInput(); }catch(e){}
+  };
+  function inertComposer(on){ ['msg','send','preset'].forEach(function(id){ var el=$(id); if(!el)return;
+    if(on){ el.setAttribute('data-pt', el.getAttribute('tabindex')||''); el.setAttribute('tabindex','-1'); }
+    else { var p=el.getAttribute('data-pt'); if(p==='') el.removeAttribute('tabindex'); else if(p!=null) el.setAttribute('tabindex',p); el.removeAttribute('data-pt'); } }); }
+
+  function maxSent(){ return st.words.length?st.words[st.words.length-1].s:0; }
+  function firstOf(s){ for(var i=0;i<st.words.length;i++) if(st.words[i].s===s) return i; return 0; }
+  function lastOf(s){ var r=0; for(var i=0;i<st.words.length;i++) if(st.words[i].s===s) r=i; return r; }
+  function wordR(i){ var n=i+1; return (n<st.words.length && st.words[n].s===st.words[i].s)?n:i; }
+  function wordL(i){ var n=i-1; return (n>=0 && st.words[n].s===st.words[i].s)?n:i; }
+  function sentText(s){ var o=[],rm=0; for(var i=0;i<st.words.length;i++){ if(st.words[i].s===s){ o.push(st.words[i].t); if(st.words[i].rm)rm++; } } return o.join(' ')+(rm?(' ('+rm+' removed)'):''); }
+  function stWord(){ var w=st.words[st.caret]; return bare(w.t)+(w.sel?', selected':'')+(w.rm?', removed':''); }
+  function clearSel(){ for(var i=0;i<st.words.length;i++) st.words[i].sel=false; st.anchor=null; }
+  function extend(){ if(st.anchor===null) st.anchor=st.caret; var a=Math.min(st.anchor,st.caret),b=Math.max(st.anchor,st.caret); for(var i=0;i<st.words.length;i++) st.words[i].sel=(i>=a&&i<=b); }
+
+  function render(){
+    var h='',cs=-1;
+    for(var i=0;i<st.words.length;i++){ var w=st.words[i];
+      if(w.s!==cs){ if(cs!==-1)h+='</span> '; h+='<span class="cut-sent">'; cs=w.s; }
+      h+='<span class="cut-tok'+(i===st.caret?' cur':'')+(w.sel?' sel':'')+(w.rm?' rm':'')+'" data-i="'+i+'">'+esc(w.t)+'</span> ';
+    }
+    if(cs!==-1)h+='</span>';
+    G.innerHTML=h;
+    var rmDur=0,spans=0,prev=false;
+    for(var j=0;j<st.words.length;j++){ var w2=st.words[j]; if(w2.rm){ rmDur+=Math.max(0,w2.end-w2.start); if(!prev)spans++; } prev=w2.rm; }
+    var total=st.duration||sumDur(),kept=Math.max(0,total-rmDur);
+    $('cutSummary').textContent='Cutting '+spans+' span'+(spans===1?'':'s')+' · '+rmDur.toFixed(1)+' s removed · '+(total>0?Math.round(kept/total*100):100)+'% kept';
+  }
+  function sumDur(){ var t=0; for(var i=0;i<st.words.length;i++) t+=Math.max(0,st.words[i].end-st.words[i].start); return t; }
+
+  function stopSnip(){ if(curSrc){ try{curSrc.stop();}catch(e){} curSrc=null; } }
+  function stopPreview(){ preview.forEach(function(s){ try{s.stop();}catch(e){} }); preview=[]; }
+  function stopAll(){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); stopPreview(); }
+  function resume(){ if(ctx && ctx.state==='suspended'){ try{ctx.resume();}catch(e){} } }
+  function playRange(s,e){ if(!ctx||!buf)return; stopSnip(); try{ var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination); n.start(0,Math.max(0,s),Math.max(0.02,e-s)); curSrc=n; }catch(_){} }
+  function snippet(s,e){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); if(st.mode==='spoken')return; playTimer=setTimeout(function(){ playRange(s,e); },140); }
+  function playEdited(){ if(!ctx||!buf){ announce('No audio to preview'); return; } resume(); stopAll();
+    var ranges=[],cur=null;
+    for(var i=0;i<st.words.length;i++){ var w=st.words[i]; if(!w.rm){ if(cur && w.start<=cur.e+0.05) cur.e=Math.max(cur.e,w.end); else { if(cur)ranges.push(cur); cur={s:w.start,e:w.end}; } } }
+    if(cur)ranges.push(cur);
+    if(!ranges.length){ announce('Everything is removed'); return; }
+    var at=ctx.currentTime+0.03;
+    ranges.forEach(function(r){ try{ var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination); var d=Math.max(0.02,r.e-r.s); n.start(at,Math.max(0,r.s),d); preview.push(n); at+=d; }catch(_){} });
+    announce('Playing the edited result');
+  }
+
+  function snap(){ return st.words.map(function(w){return w.rm;}); }
+  function apply(s){ for(var i=0;i<st.words.length;i++) st.words[i].rm=!!s[i]; }
+  function pushUndo(){ st.undo.push(snap()); st.redo.length=0; }
+  function rmSummary(){ var n=st.words.filter(function(w){return w.rm;}).length; return n+' word'+(n===1?'':'s')+' to remove'; }
+  function undo(){ if(!st.undo.length){announce('Nothing to undo');return;} st.redo.push(snap()); apply(st.undo.pop()); render(); announce('Undone. '+rmSummary()); }
+  function redo(){ if(!st.redo.length){announce('Nothing to redo');return;} st.undo.push(snap()); apply(st.redo.pop()); render(); announce('Redone. '+rmSummary()); }
+  function toggleRemove(){ pushUndo(); var any=st.words.some(function(w){return w.sel;});
+    if(any){ var all=st.words.filter(function(w){return w.sel;}).every(function(w){return w.rm;}); for(var i=0;i<st.words.length;i++) if(st.words[i].sel) st.words[i].rm=!all; clearSel(); }
+    else { st.words[st.caret].rm=!st.words[st.caret].rm; } }
+
+  function afterNav(sentence){ render(); var w=st.words[st.caret];
+    if(st.mode!=='audio') announce(sentence?sentText(w.s):stWord());
+    snippet(w.start,w.end); }
+
+  function focusables(){ return Array.prototype.slice.call(document.querySelectorAll('#cutModal button, #cutGrid')); }
+  function postCancel(){ try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:cancel'})); }catch(e){} closeCutEditor(); }
+  function requestCancel(){ var pending=st.words.some(function(w){return w.rm;})||st.undo.length;
+    if(pending && !cancelArmed){ cancelArmed=true; announce('You have edits. Press Cancel or Escape again to discard.'); if(cancelTimer)clearTimeout(cancelTimer); cancelTimer=setTimeout(function(){cancelArmed=false;},4000); return; }
+    postCancel(); }
+  function confirmCut(){ var keep=st.words.map(function(w){return !w.rm;}); try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:save',keep:keep})); }catch(e){} closeCutEditor(); }
+
+  document.addEventListener('keydown',function(e){
+    if(!st) return; var m=$('cutModal'); if(!m||m.hidden) return;
+    var k=e.key,mod=e.ctrlKey||e.metaKey,inGrid=(document.activeElement===G);
+    if(k==='Tab'){ var f=focusables(); if(f.length){ var first=f[0],last=f[f.length-1];
+      if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); }
+      else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); } }
+      e.stopPropagation(); return; }
+    if(mod && (k==='z'||k==='Z')){ e.preventDefault(); e.stopPropagation(); if(e.shiftKey)redo(); else undo(); return; }
+    if(mod && (k==='y'||k==='Y')){ e.preventDefault(); e.stopPropagation(); redo(); return; }
+    e.stopPropagation(); // keep the composer's Alt+N/Alt+P/Enter off while the modal is open
+    if(!inGrid) return;  // let the footer buttons handle their own Enter/Space
+    resume();
+    var handled=true;
+    if(mod && k==='Home'){ st.caret=0; clearSel(); afterNav(false); }
+    else if(mod && k==='End'){ st.caret=st.words.length-1; clearSel(); afterNav(false); }
+    else if(e.shiftKey && isArrow(k)){
+      if(k==='ArrowRight') st.caret=wordR(st.caret);
+      else if(k==='ArrowLeft') st.caret=wordL(st.caret);
+      else if(k==='ArrowDown') st.caret=firstOf(Math.min(maxSent(),st.words[st.caret].s+1));
+      else st.caret=firstOf(Math.max(0,st.words[st.caret].s-1));
+      extend(); afterNav(k==='ArrowUp'||k==='ArrowDown');
+    }
+    else if(k==='ArrowRight'){ st.caret=wordR(st.caret); clearSel(); afterNav(false); }
+    else if(k==='ArrowLeft'){ st.caret=wordL(st.caret); clearSel(); afterNav(false); }
+    else if(k==='ArrowDown'){ st.caret=firstOf(Math.min(maxSent(),st.words[st.caret].s+1)); clearSel(); afterNav(true); }
+    else if(k==='ArrowUp'){ st.caret=firstOf(Math.max(0,st.words[st.caret].s-1)); clearSel(); afterNav(true); }
+    else if(k==='Home'){ st.caret=firstOf(st.words[st.caret].s); clearSel(); afterNav(false); }
+    else if(k==='End'){ st.caret=lastOf(st.words[st.caret].s); clearSel(); afterNav(false); }
+    else if(k===' '||k==='Spacebar'){ var w=st.words[st.caret]; w.sel=!w.sel; st.anchor=w.sel?st.caret:null; render(); if(st.mode!=='audio') announce(bare(w.t)+(w.sel?', selected':', deselected')); snippet(w.start,w.end); }
+    else if(k==='Delete'||k==='Backspace'){ toggleRemove(); render(); announce('Removed. '+rmSummary()); }
+    else if(k==='Escape'){ var anySel=st.words.some(function(w){return w.sel;}); if(anySel){ clearSel(); render(); announce('Selection cleared'); } else { requestCancel(); } }
+    else handled=false;
+    if(handled) e.preventDefault();
+  },true);
+
+  $('cutAudioMode').addEventListener('click',function(){ var i=MODES.indexOf(st.mode); st.mode=MODES[(i+1)%MODES.length]; this.textContent='Audio: '+st.mode; announce('Audio feedback: '+st.mode); if(G)G.focus(); });
+  $('cutUndo').addEventListener('click',function(){ undo(); if(G)G.focus(); });
+  $('cutRedo').addEventListener('click',function(){ redo(); if(G)G.focus(); });
+  $('cutPlay').addEventListener('click',function(){ playEdited(); });
+  $('cutCancel').addEventListener('click',function(){ requestCancel(); });
+  $('cutConfirm').addEventListener('click',function(){ confirmCut(); });
+  $('cutGrid').addEventListener('click',function(e){ var el=e.target.closest('.cut-tok'); if(!el||!st)return; st.caret=+el.getAttribute('data-i'); clearSel(); afterNav(false); G.focus(); });
+})();
 </script></body></html>"#;
 
     // WebView2 is COM and requires the calling (UI) thread to be in a

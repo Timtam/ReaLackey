@@ -48,6 +48,20 @@ into a versioned heading and attaches its entries to the GitHub release — see
   before it runs and is fully undoable. There's also a lower-level
   **`remove_item_time_ranges`** the assistant can use to cut explicit time ranges
   out of an item (e.g. "remove 12s–15s") without transcribing.
+- **Cut-by-text editor** — a keyboard-driven editor for cutting by text yourself,
+  built accessibility-first. Bind **"ReaLackey: Cut selected item by text"** (or run
+  it from **Extensions → ReaLackey → "Cut selected item by text…"**, or ask the
+  assistant to open it): it transcribes the item and opens a modal where you
+  **navigate the transcript by keyboard** — **Up/Down** move by sentence (and read
+  the whole sentence), **Left/Right** by word (staying within the sentence), each
+  landing **plays that snippet of audio** so you can edit by ear. **Space** selects a
+  word, **Shift+arrows** extend the selection, **Delete** removes words (struck
+  through, reversibly), **Ctrl+Z / Ctrl+Y** undo/redo, and **Tab** reaches the
+  Confirm / Cancel buttons. A three-way **audio-feedback setting** (spoken word,
+  audio snippet, or both) lets you tune what you hear on each move; a **Play** button
+  previews the edited result. **Confirm** cuts exactly what you removed, as a single
+  undo point. Deletion-only for now (moving text is a later step); needs the HTML
+  pane (Windows/macOS) and a word-timestamp model (`whisper-1` or local Whisper).
 
 ### Changed
 

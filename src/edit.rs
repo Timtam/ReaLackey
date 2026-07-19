@@ -39,7 +39,7 @@
 //! transcribed audio); mapping them onto the project/take timeline is the
 //! executor's job.
 
-use crate::providers::transcription::Word;
+use crate::providers::transcription::{Segment, Word};
 
 /// A run of consecutive original words treated as one continuous span of the
 /// original audio timeline. Word indices are into the slice passed to
@@ -147,10 +147,10 @@ pub fn plan_cut(words: &[Word], edited: &str) -> CutPlan {
 }
 
 /// Group consecutive original words into keep/remove spans from a per-word
-/// "matched" flag. Factored out of [`plan_cut`] so a future editor path — which
-/// can hand us kept-word flags directly, with no text to reconstruct — reuses
-/// the same span construction.
-fn spans_from_matched(words: &[Word], matched: &[bool]) -> (Vec<Span>, Vec<Span>) {
+/// "matched" flag. Factored out of [`plan_cut`] so the editor path — which hands
+/// us kept-word flags directly, with no text to reconstruct — reuses the same
+/// span construction.
+pub(crate) fn spans_from_matched(words: &[Word], matched: &[bool]) -> (Vec<Span>, Vec<Span>) {
     debug_assert_eq!(words.len(), matched.len());
     let mut keep = Vec::new();
     let mut remove = Vec::new();
@@ -317,6 +317,85 @@ pub fn plan_item_cut(
         pieces,
         removed_seconds,
     }
+}
+
+/// The remove spans (audio to cut) implied by a per-word KEPT flag array — the
+/// editor's Save path. `kept[i] == true` keeps word `i`. A flag array shorter or
+/// longer than `words` is tolerated (a missing flag counts as kept), so a stale
+/// payload can never cut audio the editor didn't mark.
+pub(crate) fn remove_spans_from_kept(words: &[Word], kept: &[bool]) -> Vec<Span> {
+    let matched: Vec<bool> = (0..words.len())
+        .map(|i| kept.get(i).copied().unwrap_or(true))
+        .collect();
+    spans_from_matched(words, &matched).1
+}
+
+/// Whether a word token ends a sentence: its text, after trailing quotes/brackets
+/// are stripped, ends in `.`, `!`, `?`, or `…`.
+fn ends_sentence(text: &str) -> bool {
+    let t = text.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '»' | '”' | '’')
+    });
+    matches!(t.chars().last(), Some('.' | '!' | '?' | '…'))
+}
+
+/// Renumber a non-decreasing id list to contiguous ids starting at 0 (drops ids
+/// that no element uses).
+fn contiguous(ids: &[usize]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(ids.len());
+    let mut cur = 0usize;
+    let mut prev: Option<usize> = None;
+    for &x in ids {
+        if let Some(p) = prev {
+            if x != p {
+                cur += 1;
+            }
+        }
+        out.push(cur);
+        prev = Some(x);
+    }
+    out
+}
+
+/// Assign every word a sentence id, for the editor's Up/Down navigation.
+///
+/// Primary: split on sentence-ending punctuation. If the transcript carries no
+/// such punctuation (some ASR emits none), fall back to the transcript's own
+/// segments as sentence units. If neither yields a split, it's one sentence.
+pub(crate) fn sentence_ids(words: &[Word], segments: &[Segment]) -> Vec<usize> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+    // Primary: punctuation. A word ending a sentence closes the current one.
+    let mut ids = vec![0usize; words.len()];
+    let mut cur = 0usize;
+    for (i, w) in words.iter().enumerate() {
+        ids[i] = cur;
+        if ends_sentence(&w.text) {
+            cur += 1;
+        }
+    }
+    let sentences = ids.last().map_or(0, |&x| x) + 1;
+    if sentences >= 2 {
+        return ids;
+    }
+    // Fallback: use segments as sentences (map each word to the segment covering
+    // its start), when punctuation gave us nothing to split on.
+    if segments.len() >= 2 {
+        let mut seg = vec![0usize; words.len()];
+        let mut si = 0usize;
+        for (i, w) in words.iter().enumerate() {
+            while si + 1 < segments.len() && w.start >= segments[si + 1].start {
+                si += 1;
+            }
+            seg[i] = si;
+        }
+        let out = contiguous(&seg);
+        if out.last().map_or(0, |&x| x) >= 1 {
+            return out;
+        }
+    }
+    ids // one sentence
 }
 
 #[cfg(test)]
@@ -584,5 +663,70 @@ mod tests {
             removed: false,
             new_start,
         }
+    }
+
+    fn segs(spec: &[(f64, f64, &str)]) -> Vec<Segment> {
+        spec.iter()
+            .map(|&(start, end, text)| Segment {
+                start,
+                end,
+                text: text.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remove_spans_follow_the_kept_flags() {
+        let ws = sample(); // Hello brave new world
+        // Keep Hello + world; drop brave + new.
+        let rm = remove_spans_from_kept(&ws, &[true, false, false, true]);
+        assert_eq!(rm.len(), 1);
+        assert_eq!((rm[0].first_word, rm[0].last_word), (1, 2));
+        assert_eq!((rm[0].start, rm[0].end), (0.6, 1.4));
+        // A short flag array counts the missing tail as kept (never over-cuts).
+        let rm = remove_spans_from_kept(&ws, &[false]);
+        assert_eq!(rm.len(), 1);
+        assert_eq!(rm[0].first_word, 0);
+        assert_eq!(rm[0].last_word, 0);
+    }
+
+    #[test]
+    fn sentences_split_on_punctuation() {
+        let ws = words(&[
+            (0.0, 0.4, "Hello"),
+            (0.5, 0.9, "world."),
+            (1.0, 1.4, "How"),
+            (1.5, 1.8, "are"),
+            (1.9, 2.3, "you?"),
+        ]);
+        // Punctuation wins; segments (if any) are ignored.
+        let ids = sentence_ids(&ws, &segs(&[(0.0, 2.3, "everything in one segment")]));
+        assert_eq!(ids, vec![0, 0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn sentences_fall_back_to_segments_without_punctuation() {
+        let ws = words(&[
+            (0.0, 0.4, "hello"),
+            (0.5, 0.9, "world"),
+            (2.1, 2.5, "second"),
+            (2.6, 3.0, "part"),
+        ]);
+        let ids = sentence_ids(&ws, &segs(&[(0.0, 2.0, "hello world"), (2.0, 3.0, "second part")]));
+        assert_eq!(ids, vec![0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn one_sentence_when_no_punctuation_and_no_segments() {
+        let ws = words(&[(0.0, 0.4, "just"), (0.5, 0.9, "words")]);
+        assert_eq!(sentence_ids(&ws, &[]), vec![0, 0]);
+        assert!(sentence_ids(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn sentence_end_survives_a_trailing_quote() {
+        assert!(ends_sentence("world.\""));
+        assert!(ends_sentence("really?”"));
+        assert!(!ends_sentence("mid-word"));
     }
 }

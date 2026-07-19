@@ -23,6 +23,7 @@ static CMD_AUTOAPPROVE: OnceLock<u32> = OnceLock::new();
 static CMD_TRANSCRIBE_NOTES: OnceLock<u32> = OnceLock::new();
 static CMD_TRANSCRIBE_TEXT: OnceLock<u32> = OnceLock::new();
 static CMD_TRANSCRIBE_SRT: OnceLock<u32> = OnceLock::new();
+static CMD_CUT_EDITOR: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<usize> = OnceLock::new();
 
 struct Commands;
@@ -62,6 +63,15 @@ impl HookCommand for Commands {
             true
         } else if Some(id) == CMD_TRANSCRIBE_SRT.get().copied() {
             crate::ui::bridge::transcribe(TranscribeOutput::Srt);
+            true
+        } else if Some(id) == CMD_CUT_EDITOR.get().copied() {
+            // Cut by text: open the assistant window (so the webview modal has a
+            // home + the pane exists), then run the editor on the selected item.
+            if let Some(h) = MAIN_HWND.get().copied() {
+                ui::ffi::show(h as *mut c_void);
+                ui::output::ensure_created();
+            }
+            crate::ui::bridge::open_cut_editor();
             true
         } else {
             false
@@ -138,6 +148,9 @@ impl HookCustomMenu for ExtMenu {
         if let Some(id) = CMD_TRANSCRIBE_SRT.get().copied() {
             ui::ffi::add_menu_item(submenu, "Transcribe selected item \u{2192} SRT file", id as i32);
         }
+        if let Some(id) = CMD_CUT_EDITOR.get().copied() {
+            ui::ffi::add_menu_item(submenu, "Cut selected item by text\u{2026}", id as i32);
+        }
         ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
     }
 }
@@ -201,6 +214,15 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
         cmd_tr_srt,
         "ReaLackey: Transcribe selected item to an SRT subtitle file",
+    ))?;
+
+    // Action: open the cut-by-text editor on the selected item (transcribe, edit
+    // the text in a modal, then cut what was removed). Bindable from the Actions list.
+    let cmd_cut_editor = session.plugin_register_add_command_id("RAAI_CutByText")?;
+    let _ = CMD_CUT_EDITOR.set(cmd_cut_editor.get());
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        cmd_cut_editor,
+        "ReaLackey: Cut selected item by text",
     ))?;
 
     // One handler dispatches all command ids.
