@@ -35,6 +35,19 @@ into a versioned heading and attaches its entries to the GitHub release — see
   a key. Off by default; the state persists. The `RAAI_CONFIRM` environment
   variable still overrides it. (Edits remain undoable in REAPER, and each tool the
   assistant runs is still announced — you're just not prompted per change.)
+- **Cut by text** — edit audio the way modern video editors do: transcribe an
+  item, then cut it down to a shortened transcript. Ask the assistant to "cut out
+  the part where I fumble the intro" (or give it the transcript with the unwanted
+  lines deleted) and it transcribes the item, works out which words you dropped,
+  and **cuts those spans out of the audio**, sliding the kept parts together so
+  they play back-to-back. It's deletion-only for now (moving text around isn't
+  reordered yet), and it needs a transcription provider that returns **per-word
+  timings** — `whisper-1` or a local Whisper server (OpenAI's `gpt-4o-transcribe`
+  doesn't). By default only the target item is compacted; ask it to "ripple the
+  track" to also pull later items on that track earlier. The cut is confirmed
+  before it runs and is fully undoable. There's also a lower-level
+  **`remove_item_time_ranges`** the assistant can use to cut explicit time ranges
+  out of an item (e.g. "remove 12s–15s") without transcribing.
 
 ### Changed
 
