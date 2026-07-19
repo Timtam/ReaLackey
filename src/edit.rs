@@ -187,6 +187,138 @@ fn span_of(words: &[Word], first: usize, last: usize) -> Span {
     }
 }
 
+/// One resulting fragment of an item after a cut, in timeline order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CutPiece {
+    /// Original project-time start of the fragment.
+    pub start: f64,
+    /// Original project-time end of the fragment.
+    pub end: f64,
+    /// True if the fragment is cut (deleted); false if kept.
+    pub removed: bool,
+    /// Where a *kept* fragment moves to once earlier removed spans close up.
+    /// Equal to `start` for removed fragments (unused).
+    pub new_start: f64,
+}
+
+/// A concrete, host-independent split/compact plan for cutting spans out of one
+/// media item and closing the gaps. Produced by [`plan_item_cut`]; consumed by
+/// the REAPER executor, which splits the item at [`ItemCut::splits`], deletes the
+/// removed fragments and slides the kept ones to their `new_start`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemCut {
+    /// Interior project-time positions to split the item at, strictly ascending.
+    /// Splitting there (left to right) yields `pieces.len()` fragments in order.
+    pub splits: Vec<f64>,
+    /// The fragments in timeline order (kept and removed interleaved).
+    pub pieces: Vec<CutPiece>,
+    /// Total removed duration — how much the item (and, if the caller ripples the
+    /// track, everything after it) shortens.
+    pub removed_seconds: f64,
+}
+
+impl ItemCut {
+    /// True when nothing is cut.
+    pub fn is_noop(&self) -> bool {
+        !self.pieces.iter().any(|p| p.removed)
+    }
+
+    /// True when every fragment is removed — the cut would delete the whole item.
+    pub fn removes_everything(&self) -> bool {
+        !self.pieces.is_empty() && self.pieces.iter().all(|p| p.removed)
+    }
+
+    /// The item's right edge after kept fragments are compacted (its new length is
+    /// `kept_end() - item_start`).
+    pub fn kept_end(&self, item_start: f64) -> f64 {
+        item_start + (self.item_span() - self.removed_seconds).max(0.0)
+    }
+
+    fn item_span(&self) -> f64 {
+        self.pieces.last().map_or(0.0, |p| p.end) - self.pieces.first().map_or(0.0, |p| p.start)
+    }
+}
+
+/// Resolve a set of remove ranges (project time) against one item's project span
+/// `[item_start, item_end]` into a concrete split/compact plan. Ranges are clamped
+/// to the item, dropped when empty after clamping, sorted, and merged when they
+/// overlap or sit within `epsilon` of each other. `epsilon` also keeps splits away
+/// from an edge (or each other) so REAPER never gets asked to carve a zero-length
+/// sliver.
+///
+/// The plan keeps everything the ranges don't cover — including the leading and
+/// trailing audio and the pauses between words — and slides the kept fragments
+/// together so they play back-to-back.
+pub fn plan_item_cut(
+    item_start: f64,
+    item_end: f64,
+    removes: &[(f64, f64)],
+    epsilon: f64,
+) -> ItemCut {
+    // Clamp to the item, drop empties, sort by start.
+    let mut norm: Vec<(f64, f64)> = removes
+        .iter()
+        .map(|&(a, b)| (a.max(item_start), b.min(item_end)))
+        .filter(|&(a, b)| b - a > epsilon)
+        .collect();
+    norm.sort_by(|x, y| x.0.total_cmp(&y.0));
+
+    // Merge overlapping / near-touching ranges so the gaps between them can't
+    // become sub-epsilon kept slivers.
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (a, b) in norm {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 + epsilon => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+
+    // Walk the item start to end, emitting a kept fragment before each removed
+    // range and a removed fragment for the range itself, then the trailing keep.
+    let mut pieces: Vec<CutPiece> = Vec::new();
+    let mut cursor = item_start;
+    let mut kept_cursor = item_start; // compaction target for kept fragments
+    let mut removed_seconds = 0.0;
+    for (a, b) in &merged {
+        let (a, b) = (*a, *b);
+        if a - cursor > epsilon {
+            pieces.push(CutPiece {
+                start: cursor,
+                end: a,
+                removed: false,
+                new_start: kept_cursor,
+            });
+            kept_cursor += a - cursor;
+        }
+        pieces.push(CutPiece {
+            start: a,
+            end: b,
+            removed: true,
+            new_start: a,
+        });
+        removed_seconds += b - a;
+        cursor = b;
+    }
+    if item_end - cursor > epsilon {
+        pieces.push(CutPiece {
+            start: cursor,
+            end: item_end,
+            removed: false,
+            new_start: kept_cursor,
+        });
+    }
+
+    // Splits are the interior fragment boundaries — every fragment start but the
+    // first (which is the item's own left edge).
+    let splits: Vec<f64> = pieces.iter().skip(1).map(|p| p.start).collect();
+
+    ItemCut {
+        splits,
+        pieces,
+        removed_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +482,107 @@ mod tests {
         assert!(plan.remove.is_empty());
         assert!(plan.is_noop());
         assert_eq!(plan.unmatched_tokens, 3);
+    }
+
+    const EPS: f64 = 1e-6;
+
+    #[test]
+    fn item_cut_removes_middle_and_compacts() {
+        let cut = plan_item_cut(0.0, 10.0, &[(3.0, 5.0)], EPS);
+        assert_eq!(cut.splits, vec![3.0, 5.0]);
+        assert_eq!(cut.pieces.len(), 3);
+        assert_eq!(cut.pieces[0], keep(0.0, 3.0, 0.0));
+        assert!(cut.pieces[1].removed);
+        assert_eq!((cut.pieces[1].start, cut.pieces[1].end), (3.0, 5.0));
+        // The trailing keep slides left by the 2 s hole: 5.0 -> 3.0.
+        assert_eq!(cut.pieces[2], keep(5.0, 10.0, 3.0));
+        assert_eq!(cut.removed_seconds, 2.0);
+        assert_eq!(cut.kept_end(0.0), 8.0);
+        assert!(!cut.is_noop());
+        assert!(!cut.removes_everything());
+    }
+
+    #[test]
+    fn item_cut_compacts_multiple_holes() {
+        let cut = plan_item_cut(0.0, 20.0, &[(2.0, 4.0), (10.0, 12.0)], EPS);
+        assert_eq!(cut.splits, vec![2.0, 4.0, 10.0, 12.0]);
+        let kept: Vec<_> = cut.pieces.iter().filter(|p| !p.removed).collect();
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[0].new_start, 0.0); // [0,2)
+        assert_eq!(kept[1].new_start, 2.0); // [4,10) slides back 2 s
+        assert_eq!(kept[2].new_start, 8.0); // [12,20) slides back 4 s
+        assert_eq!(cut.removed_seconds, 4.0);
+        assert_eq!(cut.kept_end(0.0), 16.0);
+    }
+
+    #[test]
+    fn item_cut_merges_near_touching_removes() {
+        // A 5 ms gap under a 10 ms epsilon fuses the two removes into one.
+        let cut = plan_item_cut(0.0, 10.0, &[(2.0, 4.0), (4.005, 6.0)], 0.01);
+        assert_eq!(cut.splits, vec![2.0, 6.0]);
+        assert_eq!(cut.removed_seconds, 4.0);
+        let kept: Vec<_> = cut.pieces.iter().filter(|p| !p.removed).collect();
+        assert_eq!(kept.len(), 2); // no sub-epsilon sliver between the removes
+    }
+
+    #[test]
+    fn item_cut_at_the_start_has_no_leading_keep() {
+        let cut = plan_item_cut(0.0, 10.0, &[(0.0, 3.0)], EPS);
+        assert_eq!(cut.splits, vec![3.0]);
+        assert_eq!(cut.pieces.len(), 2);
+        assert!(cut.pieces[0].removed);
+        assert_eq!(cut.pieces[1], keep(3.0, 10.0, 0.0)); // slides to the item start
+    }
+
+    #[test]
+    fn item_cut_at_the_end_has_no_trailing_keep() {
+        let cut = plan_item_cut(0.0, 10.0, &[(7.0, 10.0)], EPS);
+        assert_eq!(cut.splits, vec![7.0]);
+        assert_eq!(cut.pieces.len(), 2);
+        assert_eq!(cut.pieces[0], keep(0.0, 7.0, 0.0));
+        assert!(cut.pieces[1].removed);
+    }
+
+    #[test]
+    fn item_cut_whole_item() {
+        let cut = plan_item_cut(0.0, 10.0, &[(0.0, 10.0)], EPS);
+        assert!(cut.splits.is_empty());
+        assert_eq!(cut.pieces.len(), 1);
+        assert!(cut.removes_everything());
+        assert_eq!(cut.removed_seconds, 10.0);
+        assert_eq!(cut.kept_end(0.0), 0.0);
+    }
+
+    #[test]
+    fn item_cut_is_a_noop_when_nothing_qualifies() {
+        // Empty list, and a sub-epsilon range, both leave the item whole.
+        for removes in [vec![], vec![(3.0, 3.0000001)]] {
+            let cut = plan_item_cut(0.0, 10.0, &removes, EPS);
+            assert!(cut.is_noop(), "{removes:?}");
+            assert!(cut.splits.is_empty());
+            assert_eq!(cut.pieces.len(), 1);
+            assert_eq!(cut.removed_seconds, 0.0);
+        }
+    }
+
+    #[test]
+    fn item_cut_clamps_ranges_to_the_item() {
+        // Ranges reaching past either edge are clipped to the item's span.
+        let cut = plan_item_cut(0.0, 10.0, &[(-5.0, 2.0), (8.0, 20.0)], EPS);
+        assert_eq!(cut.splits, vec![2.0, 8.0]);
+        assert_eq!(cut.removed_seconds, 4.0); // (0,2) + (8,10)
+        let kept: Vec<_> = cut.pieces.iter().filter(|p| !p.removed).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(*kept[0], keep(2.0, 8.0, 0.0));
+    }
+
+    /// A kept [`CutPiece`] with the given original span and compacted position.
+    fn keep(start: f64, end: f64, new_start: f64) -> CutPiece {
+        CutPiece {
+            start,
+            end,
+            removed: false,
+            new_start,
+        }
     }
 }

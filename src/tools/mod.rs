@@ -810,6 +810,43 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                 json!(["item_index", "edge", "time"]),
             ),
         },
+        ToolDef {
+            name: "remove_item_time_ranges".into(),
+            description: "Cut one or more time RANGES out of a media item and close the gaps, so \
+                          the kept audio plays back-to-back. CHANGES the project (confirmed + \
+                          undo-wrapped). 'ranges' is an array of {start, end} in SECONDS FROM THE \
+                          ITEM'S AUDIO START — the same timeline the transcription word/segment \
+                          timestamps use, so you can pass spans straight from a transcript. The item \
+                          is split at the range edges, the covered fragments are deleted, and the \
+                          survivors slide together (becoming several abutting items that share the \
+                          source). ripple 'item' (default) leaves the rest of the track where it is; \
+                          'track' also moves later items on this track earlier by the removed \
+                          duration. This is the cut step of the cut-by-text workflow — transcribe, \
+                          decide what to drop, then call this. Resolve the item by item_index (or \
+                          guid, or the selected item)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer", "description": "0-based media item index; omit to use the selected item" },
+                    "guid": { "type": "string", "description": "item GUID (a stable alternative to item_index)" },
+                    "take_index": { "type": "integer", "description": "0-based take; omit for the active take" },
+                    "ranges": {
+                        "type": "array",
+                        "description": "spans to cut, in seconds from the item's audio start",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start": { "type": "number" },
+                                "end": { "type": "number" }
+                            },
+                            "required": ["start", "end"]
+                        }
+                    },
+                    "ripple": { "type": "string", "enum": ["item", "track"], "description": "'item' (default) keeps the rest of the track put; 'track' shifts later items earlier" }
+                }),
+                json!(["ranges"]),
+            ),
+        },
         // --- take properties ---
         ToolDef {
             name: "get_take_properties".into(),
@@ -2931,6 +2968,7 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_str(input, "edge")?,
             req_f64(input, "time")?,
         ),
+        "remove_item_time_ranges" => cut_item_time_ranges(reaper, input),
         // take properties
         "get_take_properties" => get_take_properties(
             reaper,
@@ -3391,6 +3429,23 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("item_index"),
             input.get("edge").and_then(|v| v.as_str()).unwrap_or("?"),
             show("time"),
+        )),
+        "remove_item_time_ranges" => Some(format!(
+            "Cut {} time range(s) out of item {}{}",
+            input
+                .get("ranges")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0),
+            input
+                .get("item_index")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(selected)".into()),
+            if opt_str(input, "ripple") == Some("track") {
+                ", rippling the track"
+            } else {
+                ""
+            },
         )),
         "set_track_state_chunk" => Some(format!(
             "Replace the full state chunk of track {}",
@@ -6959,6 +7014,187 @@ fn set_item_edge(
         }
         other => Err(format!("edge must be 'left' or 'right', got '{other}'")),
     }
+}
+
+/// Smallest cut worth making — below this a split would only create a sliver, and
+/// it also keeps split points clear of the item edges and of each other.
+const CUT_EPSILON: f64 = 1e-4;
+
+/// Parse the `ranges` argument of [`cut_item_time_ranges`]: an array of
+/// `{start, end}` objects (or `[start, end]` pairs), each in SECONDS FROM THE
+/// ITEM'S AUDIO START. Out-of-range / inverted values are tolerated — the planner
+/// clamps and drops them.
+fn parse_cut_ranges(input: &Value) -> Result<Vec<(f64, f64)>, String> {
+    let arr = input
+        .get("ranges")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing 'ranges' array of {start, end} seconds".to_string())?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, r) in arr.iter().enumerate() {
+        let (s, e) = if let Some(o) = r.as_object() {
+            (
+                o.get("start").and_then(|v| v.as_f64()),
+                o.get("end").and_then(|v| v.as_f64()),
+            )
+        } else if let Some(pair) = r.as_array() {
+            (
+                pair.first().and_then(|v| v.as_f64()),
+                pair.get(1).and_then(|v| v.as_f64()),
+            )
+        } else {
+            (None, None)
+        };
+        match (s, e) {
+            (Some(s), Some(e)) => out.push((s, e)),
+            _ => return Err(format!("range {i} must have a numeric start and end")),
+        }
+    }
+    Ok(out)
+}
+
+/// Cut one or more time ranges out of a media item and close the gaps.
+///
+/// `ranges` are in seconds from the item's audio start — the SAME timeline the
+/// transcript word/segment timestamps use — so a caller holding a transcription
+/// can pass spans straight through. The item's exact project frame comes from the
+/// take audio accessor (the origin transcription used), so a range `t` maps to
+/// project time `acc_start + t` with no playrate/offset math. The item is split at
+/// the range edges, the covered fragments are deleted, and the survivors slide
+/// together so they play back-to-back. With `ripple = "track"` the items after
+/// this one on the same track also move earlier by the removed duration; the
+/// default `"item"` leaves the rest of the track put.
+///
+/// Undo-wrapped and confirmation-gated (see [`preview`]). Main thread.
+fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
+    let ranges = parse_cut_ranges(input)?;
+    let ripple_track = match opt_str(input, "ripple").unwrap_or("item") {
+        "item" => false,
+        "track" => true,
+        other => return Err(format!("ripple must be 'item' or 'track', got '{other}'")),
+    };
+
+    // Resolve the item + an audio take, and read its exact project frame.
+    let (item_index, item, take) = transcribe_resolve(reaper, input)?;
+    let low = reaper.low();
+    let acc = unsafe { low.CreateTakeAudioAccessor(take.as_ptr()) };
+    if acc.is_null() {
+        return Err("could not create an audio accessor for the take".into());
+    }
+    let acc_start = unsafe { low.GetAudioAccessorStartTime(acc) };
+    let acc_end = unsafe { low.GetAudioAccessorEndTime(acc) };
+    unsafe { low.DestroyAudioAccessor(acc) };
+    if acc_end - acc_start <= CUT_EPSILON {
+        return Err("the item has no audible length to cut".into());
+    }
+
+    // Map ranges (item-relative) to project time, then plan the split/compact.
+    let project_removes: Vec<(f64, f64)> = ranges
+        .iter()
+        .map(|&(s, e)| (acc_start + s, acc_start + e))
+        .collect();
+    let plan = crate::edit::plan_item_cut(acc_start, acc_end, &project_removes, CUT_EPSILON);
+    if plan.is_noop() {
+        return Ok(json!({
+            "applied": false,
+            "reason": "nothing to cut (ranges empty or outside the item)",
+            "item_index": item_index,
+        }));
+    }
+
+    let track = MediaTrack::new(unsafe { low.GetMediaItemTrack(item.as_ptr()) })
+        .ok_or_else(|| "could not resolve the item's track".to_string())?;
+
+    // Snapshot the downstream items to ripple BEFORE splitting adds new ones.
+    let ripple_targets: Vec<(MediaItem, f64)> = if ripple_track {
+        let n = unsafe { low.CountTrackMediaItems(track.as_ptr()) };
+        (0..n)
+            .filter_map(|i| MediaItem::new(unsafe { low.GetTrackMediaItem(track.as_ptr(), i) }))
+            .filter(|it| *it != item)
+            .filter_map(|it| {
+                let pos =
+                    unsafe { low.GetMediaItemInfo_Value(it.as_ptr(), c"D_POSITION".as_ptr()) };
+                (pos >= acc_end - CUT_EPSILON).then_some((it, pos))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let project = ProjectContext::CurrentProject;
+    reaper.undo_begin_block_2(project);
+
+    // Split the item left to right; each split returns the right-hand fragment and
+    // leaves `cur` as the left one. Fragments line up 1:1 with `plan.pieces`.
+    let mut handles: Vec<MediaItem> = Vec::with_capacity(plan.pieces.len());
+    let mut cur = item;
+    for &pos in &plan.splits {
+        match MediaItem::new(unsafe { low.SplitMediaItem(cur.as_ptr(), pos) }) {
+            Some(right) => {
+                handles.push(cur);
+                cur = right;
+            }
+            None => {
+                // Interior splits should always succeed; bail without altering audio.
+                reaper.undo_end_block_2(
+                    project,
+                    "ReaLackey: cut item (aborted)".to_string(),
+                    UndoScope::All,
+                );
+                return Err(format!("REAPER refused to split the item at {pos:.4}s"));
+            }
+        }
+    }
+    handles.push(cur);
+
+    // Delete the removed fragments first, then compact the kept ones.
+    let mut removed = 0usize;
+    for (h, piece) in handles.iter().zip(&plan.pieces) {
+        if piece.removed {
+            unsafe { low.DeleteTrackMediaItem(track.as_ptr(), h.as_ptr()) };
+            removed += 1;
+        }
+    }
+    let mut moved = 0usize;
+    for (h, piece) in handles.iter().zip(&plan.pieces) {
+        if !piece.removed && (piece.new_start - piece.start).abs() > CUT_EPSILON {
+            unsafe {
+                low.SetMediaItemInfo_Value(h.as_ptr(), c"D_POSITION".as_ptr(), piece.new_start);
+                low.UpdateItemInProject(h.as_ptr());
+            }
+            moved += 1;
+        }
+    }
+
+    // Ripple the rest of the track left by the removed duration.
+    for (it, pos) in &ripple_targets {
+        unsafe {
+            low.SetMediaItemInfo_Value(
+                it.as_ptr(),
+                c"D_POSITION".as_ptr(),
+                pos - plan.removed_seconds,
+            );
+            low.UpdateItemInProject(it.as_ptr());
+        }
+    }
+
+    reaper.undo_end_block_2(
+        project,
+        format!("ReaLackey: cut {:.2}s from item {item_index}", plan.removed_seconds),
+        UndoScope::All,
+    );
+    reaper.update_arrange();
+
+    Ok(json!({
+        "applied": true,
+        "item_index": item_index,
+        "removed_seconds": plan.removed_seconds,
+        "fragments_removed": removed,
+        "fragments_kept": plan.pieces.len() - removed,
+        "fragments_moved": moved,
+        "removed_whole_item": plan.removes_everything(),
+        "rippled_track_items": ripple_targets.len(),
+        "new_item_end_seconds": plan.kept_end(acc_start) - acc_start,
+    }))
 }
 
 /// Read a named FX config value (TrackFX_GetNamedConfigParm), e.g. "fx_type".
