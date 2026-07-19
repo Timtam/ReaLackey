@@ -97,6 +97,9 @@ pub fn on_webview_message(json: &str) {
         // The composer's "Presets" button / Alt+P: show the native preset picker
         // and insert the chosen prompt into the composer.
         Some("presets:pick") => pick_preset(),
+        // The webview page finished loading — the worker waits on this before it
+        // injects the cut-by-text editor modal.
+        Some("ui:ready") => crate::ui::output::set_webview_ready(),
         // Cut-by-text editor: the user confirmed (with the per-word keep flags) or
         // cancelled. Hand the outcome to the worker awaiting it.
         Some("cut:save") => {

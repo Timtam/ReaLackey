@@ -77,6 +77,9 @@ pub enum UiEvent {
     ProgressUpdate { percent: u8, message: String },
     /// Close the progress dialog.
     ProgressClose,
+    /// Show the assistant window + bring up its webview (main thread). Used to open
+    /// the pane lazily, right before the cut-by-text editor modal.
+    ShowAssistantWindow,
     /// Open the cut-by-text editor modal in the webview. Carries the JSON payload
     /// (words with times + sentence ids, and the item's audio as base64 WAV).
     OpenCutEditor(String),

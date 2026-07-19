@@ -65,12 +65,10 @@ impl HookCommand for Commands {
             crate::ui::bridge::transcribe(TranscribeOutput::Srt);
             true
         } else if Some(id) == CMD_CUT_EDITOR.get().copied() {
-            // Cut by text: open the assistant window (so the webview modal has a
-            // home + the pane exists), then run the editor on the selected item.
-            if let Some(h) = MAIN_HWND.get().copied() {
-                ui::ffi::show(h as *mut c_void);
-                ui::output::ensure_created();
-            }
+            // Cut by text: just kick off the worker. The window/webview is opened
+            // lazily only once transcription succeeds and the editor is about to
+            // show — so an error (no provider, no word timings) is announced via
+            // OSARA without popping the pane and stealing focus.
             crate::ui::bridge::open_cut_editor();
             true
         } else {
@@ -152,6 +150,16 @@ impl HookCustomMenu for ExtMenu {
             ui::ffi::add_menu_item(submenu, "Cut selected item by text\u{2026}", id as i32);
         }
         ui::ffi::attach_submenu(parent, submenu, "ReaLackey");
+    }
+}
+
+/// Show the assistant window and bring up its webview, on the main thread. Called
+/// (via a UiEvent) when the cut-by-text editor is about to open, so the pane only
+/// appears when it's actually needed. Idempotent — no-op if already shown/created.
+pub fn ensure_window_shown() {
+    if let Some(h) = MAIN_HWND.get().copied() {
+        ui::ffi::show(h as *mut c_void);
+        ui::output::ensure_created();
     }
 }
 

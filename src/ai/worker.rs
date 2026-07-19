@@ -1520,13 +1520,8 @@ async fn run_cut_editor(
     input: Value,
     user_initiated: bool,
 ) -> CutEditorOutcome {
-    // The editor is a webview modal — refuse up front where there's no webview, so
-    // we never send an OpenCutEditor no one will answer and then hang awaiting it.
-    if !crate::ui::output::webview_active() {
-        return CutEditorOutcome::NoWebview;
-    }
-
-    // 1. Transcribe (word timings) via the shared core.
+    // 1. Transcribe (word timings) via the shared core. No webview needed yet, so an
+    // error here is announced via OSARA without popping the pane and stealing focus.
     let t = match run_transcription(ui_tx, op_tx, task_rx, input.clone(), user_initiated).await {
         TranscribeOutcomeKind::Done(t) => t,
         TranscribeOutcomeKind::NoProvider => return CutEditorOutcome::NoProvider,
@@ -1539,7 +1534,23 @@ async fn run_cut_editor(
         return CutEditorOutcome::NoWords;
     }
 
-    // 2. Render the whole region to one 16 kHz WAV for in-editor playback (the same
+    // 2. The editor needs the webview — open the pane NOW (lazily, only for the
+    // success path) and wait for its page to load. Where there's no webview host
+    // (Linux / a failed WebView2) the pane never goes active: bail to NoWebview.
+    let _ = ui_tx.send(UiEvent::ShowAssistantWindow);
+    let mut waited = 0u32;
+    while waited < 4000 && !crate::ui::output::webview_ready() {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        waited += 50;
+        if waited >= 400 && !crate::ui::output::webview_active() {
+            break; // no webview host — stop waiting for a page that won't load
+        }
+    }
+    if !crate::ui::output::webview_active() {
+        return CutEditorOutcome::NoWebview;
+    }
+
+    // 3. Render the whole region to one 16 kHz WAV for in-editor playback (the same
     // accessor render the transcription uses; word times map to it 1:1).
     let _ = ui_tx.send(UiEvent::Status("Preparing the editor\u{2026}".into()));
     let probe = exec_tool(op_tx, "__transcribe_probe".to_string(), json!({ "guid": t.guid })).await;
@@ -1559,7 +1570,7 @@ async fn run_cut_editor(
     }
     let wav_b64 = rendered.audio.map(|a| a.data_base64).unwrap_or_default();
 
-    // 3. Build the editor payload: words with sentence ids + times, and the audio.
+    // 4. Build the editor payload: words with sentence ids + times, and the audio.
     let sids = crate::edit::sentence_ids(&t.transcript.words, &t.transcript.segments);
     let words_json: Vec<Value> = t
         .transcript
@@ -1577,7 +1588,7 @@ async fn run_cut_editor(
         .to_string();
     let payload = json!({ "words": words_json, "wav": wav_b64, "item": item_name, "duration": total });
 
-    // 4. Arm the reply slot, open the editor, await the user's result. The editor
+    // 5. Arm the reply slot, open the editor, await the user's result. The editor
     // always resolves (Confirm / Cancel / Esc / dialog-close), so this can't hang;
     // a dropped sender (dialog closed) resolves to Err -> treated as cancel.
     let (reply_tx, mut reply_rx) = oneshot::channel();
@@ -1609,7 +1620,7 @@ async fn run_cut_editor(
     // any path where it didn't).
     let _ = ui_tx.send(UiEvent::CloseCutEditor);
 
-    // 5. Cut the removed spans via the shared executor (one undo point). The user's
+    // 6. Cut the removed spans via the shared executor (one undo point). The user's
     // Confirm in the editor is the consent, so there's no extra mutation prompt.
     let spans = crate::edit::remove_spans_from_kept(&t.transcript.words, &keep);
     if spans.is_empty() {

@@ -25,9 +25,24 @@ thread_local! {
 /// editor can open before it commits to awaiting a reply.
 static WEBVIEW_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// True once the webview's HTML/JS has finished loading (the page pings `ui:ready`).
+/// `WEBVIEW_ACTIVE` flips the instant the webview is created, but its page loads
+/// asynchronously — the worker waits on THIS before injecting the editor modal.
+static WEBVIEW_READY: AtomicBool = AtomicBool::new(false);
+
 /// Whether the embedded webview is live (readable from any thread).
 pub fn webview_active() -> bool {
     WEBVIEW_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Whether the webview's page has finished loading (readable from any thread).
+pub fn webview_ready() -> bool {
+    WEBVIEW_READY.load(Ordering::Acquire)
+}
+
+/// Mark the webview page ready — called when it pings `ui:ready` on load.
+pub fn set_webview_ready() {
+    WEBVIEW_READY.store(true, Ordering::Release);
 }
 
 struct Output {
@@ -298,8 +313,10 @@ fn console(msg: &str) {
 /// with a dangling parent (and `ensure_created` will rebuild on re-open).
 pub fn on_destroy() {
     // The webview is going away: unblock any worker awaiting a cut-by-text editor
-    // reply (it would otherwise hang), and mark the pane inactive.
+    // reply (it would otherwise hang), and mark the pane inactive + not-ready (a
+    // rebuild re-pings ui:ready when its page reloads).
     WEBVIEW_ACTIVE.store(false, Ordering::Release);
+    WEBVIEW_READY.store(false, Ordering::Release);
     crate::ui::bridge::cancel_editor();
     #[cfg(webview)]
     {
@@ -818,6 +835,9 @@ document.addEventListener('keydown',function(e){
   $('cutConfirm').addEventListener('click',function(){ confirmCut(); });
   $('cutGrid').addEventListener('click',function(e){ var el=e.target.closest('.cut-tok'); if(!el||!st)return; st.caret=+el.getAttribute('data-i'); clearSel(); afterNav(false); G.focus(); });
 })();
+// Tell the host the page has loaded (the worker waits on this before opening the
+// cut-by-text editor modal, so it isn't injected before openCutEditor exists).
+try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'ui:ready'})); }catch(e){}
 </script></body></html>"#;
 
     // WebView2 is COM and requires the calling (UI) thread to be in a
