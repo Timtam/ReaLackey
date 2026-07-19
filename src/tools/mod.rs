@@ -1461,6 +1461,57 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             json!([]),
         ),
     });
+    // --- project / track templates ---
+    defs.push(ToolDef {
+        name: "list_templates".into(),
+        description: "List the user's saved TEMPLATES from REAPER's resource folder: track \
+                      templates (.RTrackTemplate, reusable track setups) and/or project templates \
+                      (.RPP, starting-point projects). kind: 'track', 'project', or 'both' (default). \
+                      Returns each template's name and its path relative to the templates folder \
+                      (pass that path to load_template). Read-only."
+            .into(),
+        input_schema: obj(
+            json!({
+                "kind": { "type": "string", "enum": ["track", "project", "both"], "description": "which templates to list (default 'both')" }
+            }),
+            json!([]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "load_template".into(),
+        description: "Load a saved template by name (or the relative path from list_templates). \
+                      kind 'track' ADDS the template's tracks to the CURRENT project; kind 'project' \
+                      opens a NEW project from the template (REAPER may prompt to save the current \
+                      one first). CHANGES the project (undo-wrapped by REAPER). Use list_templates \
+                      first to see what's available."
+            .into(),
+        input_schema: obj(
+            json!({
+                "name": { "type": "string", "description": "template name or relative path (extension optional)" },
+                "kind": { "type": "string", "enum": ["track", "project"], "description": "'track' adds tracks here; 'project' opens a new project" }
+            }),
+            json!(["name", "kind"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "save_track_template".into(),
+        description: "Save the currently SELECTED track(s) as a track template (.RTrackTemplate) in \
+                      REAPER's TrackTemplates folder, so they can be reused later. CHANGES the user's \
+                      template files (never overwrites — a numbered variant is used if the name \
+                      exists). Select the tracks first. include_envelopes (default true) and \
+                      include_media (default false) mirror REAPER's save options. (Saving the whole \
+                      project as a project template isn't supported here — use REAPER's File menu, \
+                      which won't disturb your current project.)"
+            .into(),
+        input_schema: obj(
+            json!({
+                "name": { "type": "string", "description": "template file name (extension optional; subfolders allowed with '/')" },
+                "include_envelopes": { "type": "boolean", "description": "include track envelopes (default true)" },
+                "include_media": { "type": "boolean", "description": "include the tracks' media items (default false)" }
+            }),
+            json!(["name"]),
+        ),
+    });
     // --- transport / timeline / global settings ---
     defs.push(ToolDef {
         name: "get_transport".into(),
@@ -2070,6 +2121,55 @@ fn score_tool(d: &ToolDef, words: &[String]) -> usize {
 
 #[cfg(test)]
 mod definition_tests {
+    use std::path::Path;
+
+    #[test]
+    fn resolve_template_path_appends_extension_and_keeps_subfolders() {
+        let dir = Path::new("/res/TrackTemplates");
+        // Plain name -> extension appended.
+        assert_eq!(
+            super::resolve_template_path(dir, "Drums", "RTrackTemplate").unwrap(),
+            dir.join("Drums.RTrackTemplate")
+        );
+        // Subfolder preserved; already-correct extension not doubled.
+        assert_eq!(
+            super::resolve_template_path(dir, "Band/Guitars.RTrackTemplate", "RTrackTemplate").unwrap(),
+            dir.join("Band/Guitars.RTrackTemplate")
+        );
+        // A dotted stem keeps its dots (extension still appended).
+        assert_eq!(
+            super::resolve_template_path(dir, "intro.v2", "RPP").unwrap(),
+            dir.join("intro.v2.RPP")
+        );
+    }
+
+    #[test]
+    fn resolve_template_path_rejects_traversal() {
+        let dir = Path::new("/res/TrackTemplates");
+        let bad = [
+            "../secret",
+            "a/../../etc/passwd",
+            "/abs/path",
+            "C:\\win",
+            "",
+            "  ",
+            ".. /secret",   // Windows strips the trailing space -> ".."
+            "a/.. /b",      // non-final segment, same trick
+            "...",          // collapses to empty after stripping dots
+            ".",            // current-dir ref
+            "sub//name",    // empty middle segment
+        ];
+        for b in bad {
+            assert!(
+                super::resolve_template_path(dir, b, "RTrackTemplate").is_err(),
+                "should reject {b:?}"
+            );
+        }
+        // A leading dot (hidden-style name) and internal dots stay legal.
+        assert!(super::resolve_template_path(dir, ".hidden", "RPP").is_ok());
+        assert!(super::resolve_template_path(dir, "a.b/c", "RPP").is_ok());
+    }
+
     #[test]
     fn mutation_boilerplate_is_stripped_from_descriptions() {
         // The build-time strip removes the "CHANGES the project (confirmed +
@@ -3096,6 +3196,15 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
         "delete_item" => delete_item(reaper, req_u32(input, "item_index")?),
         "duplicate_track" => duplicate_track(reaper, req_u32(input, "track_index")?),
         "delete_track" => delete_track(reaper, req_u32(input, "track_index")?),
+        // project / track templates
+        "list_templates" => list_templates(reaper, opt_str(input, "kind").unwrap_or("both")),
+        "load_template" => load_template(reaper, req_str(input, "name")?, req_str(input, "kind")?),
+        "save_track_template" => save_track_template(
+            reaper,
+            req_str(input, "name")?,
+            input.get("include_envelopes").and_then(|v| v.as_bool()).unwrap_or(true),
+            input.get("include_media").and_then(|v| v.as_bool()).unwrap_or(false),
+        ),
         "copy_take" => copy_take(
             reaper,
             req_u32(input, "src_item_index")?,
@@ -3594,6 +3703,23 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
         "delete_item" => Some(format!("Delete item {}", show("item_index"))),
         "duplicate_track" => Some(format!("Duplicate track {}", show("track_index"))),
         "delete_track" => Some(format!("Delete track {}", show("track_index"))),
+        "load_template" => Some(format!(
+            "Load the {} template {}",
+            input.get("kind").and_then(|v| v.as_str()).unwrap_or("?"),
+            input
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "?".into()),
+        )),
+        "save_track_template" => Some(format!(
+            "Save the selected track(s) as track template {}",
+            input
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "?".into()),
+        )),
         "copy_take" => Some(format!(
             "Copy a take from item {} to item {}",
             show("src_item_index"),
@@ -7804,6 +7930,270 @@ fn delete_track(reaper: &Reaper<MainThreadScope>, track_index: u32) -> Result<Va
     reaper.low().TrackList_AdjustWindows(false);
     reaper.update_arrange();
     Ok(json!({ "deleted": true, "track_index": track_index }))
+}
+
+/// The two template kinds REAPER keeps under its resource folder.
+#[derive(Clone, Copy)]
+enum TemplateKind {
+    Track,
+    Project,
+}
+
+impl TemplateKind {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "track" => Some(Self::Track),
+            "project" => Some(Self::Project),
+            _ => None,
+        }
+    }
+    /// Sub-folder of the resource path where REAPER stores this kind.
+    fn subdir(self) -> &'static str {
+        match self {
+            Self::Track => "TrackTemplates",
+            Self::Project => "ProjectTemplates",
+        }
+    }
+    /// File extension (without the dot), case-insensitive on disk.
+    fn ext(self) -> &'static str {
+        match self {
+            Self::Track => "RTrackTemplate",
+            Self::Project => "RPP",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Track => "track",
+            Self::Project => "project",
+        }
+    }
+}
+
+/// Absolute path of a template kind's folder under the REAPER resource path.
+fn template_dir(reaper: &Reaper<MainThreadScope>, kind: TemplateKind) -> std::path::PathBuf {
+    reaper.get_resource_path(|rp| rp.join(kind.subdir()).into_std_path_buf())
+}
+
+/// Collect template files (matching `ext`, case-insensitive) under `dir`,
+/// recursively, as (display name, path relative to `dir` with '/' separators).
+/// A missing folder yields an empty list. Sorted by relative path.
+fn collect_templates(dir: &std::path::Path, ext: &str) -> Vec<(String, String)> {
+    // Bounds so a symlink/junction cycle or a pathological tree can't spin the main
+    // thread. `file_type()` does NOT follow links, so skipping symlinks avoids cycles
+    // outright; the depth/entry caps are belt-and-suspenders (Windows junctions).
+    const MAX_DEPTH: usize = 16;
+    const MAX_ENTRIES: usize = 10_000;
+    let mut out = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((d, depth)) = stack.pop() {
+        if depth > MAX_DEPTH || out.len() >= MAX_ENTRIES {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_ENTRIES {
+                break;
+            }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue; // never follow a link — no cycles
+            }
+            let p = entry.path();
+            if ft.is_dir() {
+                stack.push((p, depth + 1));
+            } else if p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+            {
+                let rel = p
+                    .strip_prefix(dir)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let name = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.push((name, rel));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Resolve a caller-supplied template `name` (a plain name or a relative path,
+/// with or without the extension) to a path under `dir`. Rejects absolute paths
+/// and `..` traversal so a name can't escape the templates folder.
+fn resolve_template_path(
+    dir: &std::path::Path,
+    name: &str,
+    ext: &str,
+) -> Result<std::path::PathBuf, String> {
+    let rel = name.trim().replace('\\', "/");
+    if rel.is_empty() {
+        return Err("template name is empty".into());
+    }
+    // Reject anything that could escape the folder. Windows strips a component's
+    // trailing dots and spaces before resolving, so ".. " normalises to ".." — test
+    // each segment with those trailing chars removed, which collapses "..", ".",
+    // "... ", and empty segments to the empty string.
+    let bad_segment = rel
+        .split('/')
+        .any(|seg| seg.trim_end_matches([' ', '.']).is_empty());
+    if rel.starts_with('/') || rel.contains(':') || bad_segment {
+        return Err("template name must be a plain name or relative path (no absolute paths, \
+                    drive letters, '..', or empty segments)"
+            .into());
+    }
+    // Append the extension only when it's not already present (preserve any dots
+    // in the stem, e.g. "intro.v2" -> "intro.v2.RTrackTemplate").
+    let has_ext = std::path::Path::new(&rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    let leaf = if has_ext {
+        rel
+    } else {
+        format!("{rel}.{ext}")
+    };
+    Ok(dir.join(leaf))
+}
+
+/// First non-existing path at `base`, else `base (1).ext`, `base (2).ext`, … —
+/// so a save never overwrites an existing template. `None` if even that many
+/// variants already exist (rather than fall back to overwriting `base`).
+fn nonclobber_path(base: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !base.exists() {
+        return Some(base.to_path_buf());
+    }
+    let parent = base.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("template");
+    let ext = base.extension().and_then(|e| e.to_str()).unwrap_or("");
+    (1..1000u32)
+        .map(|n| {
+            let leaf = if ext.is_empty() {
+                format!("{stem} ({n})")
+            } else {
+                format!("{stem} ({n}).{ext}")
+            };
+            parent.join(leaf)
+        })
+        .find(|cand| !cand.exists())
+}
+
+fn list_templates(reaper: &Reaper<MainThreadScope>, kind: &str) -> Result<Value, String> {
+    let kinds: &[TemplateKind] = match kind.trim().to_ascii_lowercase().as_str() {
+        "track" => &[TemplateKind::Track],
+        "project" => &[TemplateKind::Project],
+        "" | "both" => &[TemplateKind::Track, TemplateKind::Project],
+        other => return Err(format!("kind must be 'track', 'project', or 'both', got '{other}'")),
+    };
+    let mut out = serde_json::Map::new();
+    for &k in kinds {
+        let items: Vec<Value> = collect_templates(&template_dir(reaper, k), k.ext())
+            .into_iter()
+            .map(|(name, path)| json!({ "name": name, "path": path }))
+            .collect();
+        out.insert(k.label().to_string(), json!(items));
+    }
+    Ok(Value::Object(out))
+}
+
+fn load_template(
+    reaper: &Reaper<MainThreadScope>,
+    name: &str,
+    kind: &str,
+) -> Result<Value, String> {
+    let kind = TemplateKind::parse(kind)
+        .ok_or_else(|| format!("kind must be 'track' or 'project', got '{kind}'"))?;
+    let path = resolve_template_path(&template_dir(reaper, kind), name, kind.ext())?;
+    if !path.is_file() {
+        return Err(format!(
+            "no {} template named '{name}' (use list_templates to see what's available)",
+            kind.label()
+        ));
+    }
+    let path_str = path.to_string_lossy();
+    // A .RTrackTemplate path adds its tracks to the current project; a "template:"
+    // prefix on an .RPP opens a new project FROM the template (leaving the original
+    // untouched). No "noprompt:" — REAPER should still offer to save the current
+    // project if opening the template would replace it.
+    let arg = match kind {
+        TemplateKind::Track => path_str.into_owned(),
+        TemplateKind::Project => format!("template:{path_str}"),
+    };
+    let c = CString::new(arg).map_err(|_| "template path contains a NUL byte".to_string())?;
+    match kind {
+        // Adds tracks to the current project — wrap it so it's a single, labelled
+        // undo step regardless of what REAPER does internally.
+        TemplateKind::Track => {
+            let project = ProjectContext::CurrentProject;
+            reaper.undo_begin_block_2(project);
+            unsafe { reaper.low().Main_openProject(c.as_ptr()) };
+            reaper.undo_end_block_2(project, "ReaLackey: load track template".to_string(), UndoScope::All);
+            reaper.update_arrange();
+        }
+        // Opens a NEW project from the template — nothing in the current project to
+        // undo (and it manages its own document/tab).
+        TemplateKind::Project => unsafe { reaper.low().Main_openProject(c.as_ptr()) },
+    }
+    Ok(json!({
+        "loaded": true,
+        "kind": kind.label(),
+        "path": path.file_name().map(|s| s.to_string_lossy().into_owned()),
+    }))
+}
+
+fn save_track_template(
+    reaper: &Reaper<MainThreadScope>,
+    name: &str,
+    include_envelopes: bool,
+    include_media: bool,
+) -> Result<Value, String> {
+    let low = reaper.low();
+    // Save operates on the SELECTED tracks (REAPER option &1) — nothing selected
+    // would write an empty/meaningless template.
+    let selected = unsafe { low.CountSelectedTracks(std::ptr::null_mut()) };
+    if selected <= 0 {
+        return Err("select one or more tracks first — a track template saves the selected tracks".into());
+    }
+    let dir = template_dir(reaper, TemplateKind::Track);
+    let path = resolve_template_path(&dir, name, TemplateKind::Track.ext())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("couldn't create the TrackTemplates folder: {e}"))?;
+    }
+    // Never overwrite an existing template.
+    let path = nonclobber_path(&path)
+        .ok_or_else(|| format!("too many templates already named like '{name}'"))?;
+    // options: &1 = save selected tracks as track template, &2 = include media,
+    // &4 = include envelopes.
+    let mut options: c_int = 1;
+    if include_media {
+        options |= 2;
+    }
+    if include_envelopes {
+        options |= 4;
+    }
+    let c = CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| "template path contains a NUL byte".to_string())?;
+    unsafe { low.Main_SaveProjectEx(std::ptr::null_mut(), c.as_ptr(), options) };
+    if !path.is_file() {
+        return Err("REAPER didn't write the track template (nothing selected, or the write failed)".into());
+    }
+    Ok(json!({
+        "saved": true,
+        "tracks": selected,
+        "path": path.file_name().map(|s| s.to_string_lossy().into_owned()),
+        "include_envelopes": include_envelopes,
+        "include_media": include_media,
+    }))
 }
 
 fn copy_take(

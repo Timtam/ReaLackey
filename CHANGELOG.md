@@ -63,6 +63,16 @@ into a versioned heading and attaches its entries to the GitHub release — see
   undo point. Deletion-only for now (moving text is a later step); needs the HTML
   pane (Windows/macOS) and a word-timestamp model (`whisper-1` or local Whisper).
 
+- **Templates** — the assistant can now **list**, **load**, and **save** REAPER
+  templates. Ask it to list your track and project templates, load one by name (a
+  track template adds its tracks to the current project; a project template opens a
+  new project from it, leaving your current one alone), or **save the selected
+  track(s) as a track template** (with options for envelopes and media; existing
+  templates are never overwritten — a numbered variant is used). Saving the whole
+  project as a project template isn't included, since there's no way to do it without
+  re-pointing your current project at the template file — use REAPER's File menu for
+  that.
+
 ### Changed
 
 - The "still working" feedback now says **what the assistant is doing** instead of
