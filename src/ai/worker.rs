@@ -1580,18 +1580,34 @@ async fn run_cut_editor(
     // 4. Arm the reply slot, open the editor, await the user's result. The editor
     // always resolves (Confirm / Cancel / Esc / dialog-close), so this can't hang;
     // a dropped sender (dialog closed) resolves to Err -> treated as cancel.
-    let (reply_tx, reply_rx) = oneshot::channel();
+    let (reply_tx, mut reply_rx) = oneshot::channel();
     crate::ui::bridge::install_editor_reply(reply_tx);
     let _ = ui_tx.send(UiEvent::OpenCutEditor(payload.to_string()));
     let _ = ui_tx.send(UiEvent::Status("Editing\u{2026} confirm the cut or cancel".into()));
-    let result = reply_rx.await;
-    // Guarantee the modal is gone (the JS self-closes on confirm/cancel; this covers
-    // the dialog-closed / dropped-sender path too).
-    let _ = ui_tx.send(UiEvent::CloseCutEditor);
-    let keep = match result {
-        Ok(EditorResult::Save { keep }) => keep,
-        Ok(EditorResult::Cancel) | Err(_) => return CutEditorOutcome::Cancelled,
+    // Await the user's result, but also poll webview liveness every 500 ms: if the
+    // pane was torn down — including the race where it closed during transcription so
+    // the modal never actually opened — bail instead of hanging on a reply that can
+    // never come. (A normal confirm/cancel/dialog-close resolves reply_rx directly.)
+    let keep = loop {
+        tokio::select! {
+            r = &mut reply_rx => match r {
+                Ok(EditorResult::Save { keep }) => break keep,
+                Ok(EditorResult::Cancel) | Err(_) => {
+                    let _ = ui_tx.send(UiEvent::CloseCutEditor);
+                    return CutEditorOutcome::Cancelled;
+                }
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                if !crate::ui::output::webview_active() {
+                    let _ = ui_tx.send(UiEvent::CloseCutEditor);
+                    return CutEditorOutcome::Cancelled;
+                }
+            }
+        }
     };
+    // Guarantee the modal is gone (the JS self-closes on confirm; this also covers
+    // any path where it didn't).
+    let _ = ui_tx.send(UiEvent::CloseCutEditor);
 
     // 5. Cut the removed spans via the shared executor (one undo point). The user's
     // Confirm in the editor is the consent, so there's no extra mutation prompt.
