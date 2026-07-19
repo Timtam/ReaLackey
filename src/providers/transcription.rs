@@ -33,8 +33,20 @@ pub struct Segment {
     pub text: String,
 }
 
-/// A completed transcription: the full text plus timestamped segments (empty if
-/// the server returned only plain text).
+/// One timestamped WORD (from `timestamp_granularities[]=word`). The fine-grained
+/// timing cut-by-text needs — segment timestamps are too coarse to cut on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Word {
+    /// Start time in seconds, relative to the start of the clip.
+    pub start: f64,
+    /// End time in seconds, relative to the start of the clip.
+    pub end: f64,
+    pub text: String,
+}
+
+/// A completed transcription: the full text plus timestamped segments and words
+/// (either may be empty — a text-only server returns neither; segment-only servers
+/// return no words).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Transcript {
     pub text: String,
@@ -42,6 +54,9 @@ pub struct Transcript {
     /// verbose_json returns the full English name (e.g. "english"), not a code.
     pub language: Option<String>,
     pub segments: Vec<Segment>,
+    /// Per-word timestamps (present only when the server returns word granularity —
+    /// whisper-1 / local whisper; not gpt-4o-transcribe). Cut-by-text uses these.
+    pub words: Vec<Word>,
 }
 
 /// The audio to transcribe. The multipart upload needs the bytes plus a filename
@@ -138,6 +153,7 @@ pub fn plan_chunks(total_seconds: f64, chunk_seconds: f64) -> Vec<(f64, f64)> {
 pub fn merge_transcripts(chunks: &[(f64, Transcript)]) -> Transcript {
     let mut text_parts: Vec<String> = Vec::new();
     let mut segments: Vec<Segment> = Vec::new();
+    let mut words: Vec<Word> = Vec::new();
     let mut language: Option<String> = None;
     for (offset, t) in chunks {
         let trimmed = t.text.trim();
@@ -154,11 +170,19 @@ pub fn merge_transcripts(chunks: &[(f64, Transcript)]) -> Transcript {
                 text: s.text.clone(),
             });
         }
+        for w in &t.words {
+            words.push(Word {
+                start: w.start + offset,
+                end: w.end + offset,
+                text: w.text.clone(),
+            });
+        }
     }
     Transcript {
         text: text_parts.join(" "),
         language,
         segments,
+        words,
     }
 }
 
@@ -244,12 +268,20 @@ impl TranscriptionProvider for OpenAiTranscriber {
             .file_name(clip.filename)
             .mime_str(&clip.mime)
             .map_err(|e| ProviderError::Other(e.to_string()))?;
+        let format = response_format_for(&self.model);
         let mut form = reqwest::multipart::Form::new()
             .part("file", part)
             .text("model", self.model.clone())
             // verbose_json gives per-segment timestamps + detected language — but
             // OpenAI's gpt-4o-transcribe family rejects it (whisper-1/local only).
-            .text("response_format", response_format_for(&self.model));
+            .text("response_format", format);
+        if format == "verbose_json" {
+            // Ask for BOTH word and segment timestamps (words power cut-by-text;
+            // segments power subtitles). Repeated field = an array server-side.
+            form = form
+                .text("timestamp_granularities[]", "word")
+                .text("timestamp_granularities[]", "segment");
+        }
         if let Some(lang) = opts.language.as_ref().filter(|l| !l.trim().is_empty()) {
             form = form.text("language", lang.clone());
         }
@@ -307,6 +339,11 @@ fn parse_response(body: &str) -> Transcript {
                 .and_then(|s| s.as_array())
                 .map(|arr| arr.iter().filter_map(parse_segment).collect())
                 .unwrap_or_default(),
+            words: v
+                .get("words")
+                .and_then(|s| s.as_array())
+                .map(|arr| arr.iter().filter_map(parse_word).collect())
+                .unwrap_or_default(),
         },
         // Not a JSON object (plain text, or a bare JSON string/number): use it
         // verbatim as the text.
@@ -314,6 +351,7 @@ fn parse_response(body: &str) -> Transcript {
             text: body.trim().to_string(),
             language: None,
             segments: Vec::new(),
+            words: Vec::new(),
         },
     }
 }
@@ -337,6 +375,17 @@ fn parse_segment(seg: &Value) -> Option<Segment> {
     let end = seg.get("end")?.as_f64()?;
     let text = seg.get("text")?.as_str()?.trim().to_string();
     Some(Segment { start, end, text })
+}
+
+/// A word entry from `verbose_json` `words[]` — note the field is `word`, not `text`.
+fn parse_word(w: &Value) -> Option<Word> {
+    let start = w.get("start")?.as_f64()?;
+    let end = w.get("end")?.as_f64()?;
+    let text = w.get("word")?.as_str()?.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(Word { start, end, text })
 }
 
 #[cfg(test)]
@@ -364,6 +413,37 @@ mod tests {
         // Leading/trailing whitespace on segment text is trimmed.
         assert_eq!(t.segments[0].text, "Hello world.");
         assert_eq!(t.segments[1].text, "Bring the vocals up.");
+    }
+
+    #[test]
+    fn parses_verbose_json_word_timestamps() {
+        // With timestamp_granularities[]=word, Whisper adds a top-level `words`
+        // array whose entries use `word` (not `text`) for the token.
+        let body = r#"{
+            "language": "english",
+            "text": "Hello world",
+            "segments": [{ "id": 0, "start": 0.0, "end": 1.0, "text": " Hello world" }],
+            "words": [
+                { "word": "Hello", "start": 0.0, "end": 0.5 },
+                { "word": "world", "start": 0.6, "end": 1.0 }
+            ]
+        }"#;
+        let t = parse_response(body);
+        assert_eq!(t.words.len(), 2);
+        assert_eq!(t.words[0].text, "Hello");
+        assert_eq!(t.words[0].start, 0.0);
+        assert_eq!(t.words[0].end, 0.5);
+        assert_eq!(t.words[1].text, "world");
+        assert_eq!(t.words[1].start, 0.6);
+        // A malformed word (missing `end`) is skipped, not fatal.
+        let body = r#"{ "text": "x", "words": [
+            { "word": "keep", "start": 0.0, "end": 0.3 },
+            { "word": "drop", "start": 0.4 },
+            { "start": 0.5, "end": 0.9 }
+        ]}"#;
+        let t = parse_response(body);
+        assert_eq!(t.words.len(), 1);
+        assert_eq!(t.words[0].text, "keep");
     }
 
     #[test]
@@ -426,13 +506,19 @@ mod tests {
                 Segment { start: 0.0, end: 1.5, text: "hi".into() },
                 Segment { start: 3661.5, end: 3661.75, text: "there".into() },
             ],
+            words: vec![],
         };
         let srt = to_srt(&t);
         assert!(srt.contains("1\n00:00:00,000 --> 00:00:01,500\nhi\n\n"), "{srt}");
         // Hours/minutes/millis all carry: 3661.5 s = 01:01:01,500.
         assert!(srt.contains("2\n01:01:01,500 --> 01:01:01,750\nthere\n\n"), "{srt}");
         // No segments (text-only model) -> empty SRT.
-        let empty = Transcript { text: "x".into(), language: None, segments: vec![] };
+        let empty = Transcript {
+            text: "x".into(),
+            language: None,
+            segments: vec![],
+            words: vec![],
+        };
         assert!(to_srt(&empty).is_empty());
     }
 
@@ -452,11 +538,13 @@ mod tests {
             text: "hello world".into(),
             language: Some("english".into()),
             segments: vec![Segment { start: 0.0, end: 2.0, text: "hello world".into() }],
+            words: vec![Word { start: 0.0, end: 0.5, text: "hello".into() }],
         };
         let c1 = Transcript {
             text: "second part".into(),
             language: Some("english".into()),
             segments: vec![Segment { start: 1.0, end: 3.0, text: "second part".into() }],
+            words: vec![Word { start: 1.0, end: 1.4, text: "second".into() }],
         };
         // Chunk 1 started 600 s into the item.
         let merged = merge_transcripts(&[(0.0, c0), (600.0, c1)]);
@@ -467,6 +555,11 @@ mod tests {
         assert_eq!(merged.segments[0].start, 0.0);
         assert_eq!(merged.segments[1].start, 601.0);
         assert_eq!(merged.segments[1].end, 603.0);
+        // Words are offset the same way.
+        assert_eq!(merged.words.len(), 2);
+        assert_eq!(merged.words[0].start, 0.0);
+        assert_eq!(merged.words[1].start, 601.0);
+        assert_eq!(merged.words[1].end, 601.4);
     }
 
     #[test]
