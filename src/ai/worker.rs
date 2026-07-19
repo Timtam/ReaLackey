@@ -719,6 +719,14 @@ async fn run_tool(
         return transcribe_item(ui_tx, op_tx, task_rx, input).await;
     }
 
+    // Cut-by-text: transcribe, align the caller's kept text, then cut. Also
+    // worker-orchestrated (transcription is async); the destructive cut honours the
+    // turn's mutation confirmation (`mutations_ok`) directly, since this bypasses
+    // the batch-preview gate below.
+    if name == "cut_item_by_text" {
+        return cut_item_by_text(ui_tx, op_tx, task_rx, input, mutations_ok).await;
+    }
+
     // Tier-B pixel input: arm-per-task consent. The user approves once, then the
     // assistant may click/drag in plugin windows (announced each time) until it
     // is disarmed. GUI clicks bypass REAPER's undo, so this is a distinct gate,
@@ -1260,6 +1268,124 @@ async fn transcribe_item(
             ToolOutcome::error(json!({ "error": e }).to_string())
         }
     }
+}
+
+/// The chat tool `cut_item_by_text`: transcribe the item (word timings), align the
+/// caller's kept text against it (deterministic diff — see `crate::edit::plan_cut`),
+/// and cut the removed spans out of the audio. Worker-orchestrated because
+/// transcription is async HTTP; the destructive cut runs through the shared
+/// `remove_item_time_ranges` executor on the main thread.
+///
+/// `mutations_ok` is the turn's batch mutation confirmation — this tool bypasses the
+/// batch-preview gate, so it enforces it here, and does so BEFORE transcribing so a
+/// declined change never triggers a (cloud) upload either.
+async fn cut_item_by_text(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    input: Value,
+    mutations_ok: bool,
+) -> ToolOutcome {
+    if !mutations_ok {
+        return ToolOutcome::ok(
+            json!({ "applied": false, "reason": "user declined the change" }).to_string(),
+        );
+    }
+    let Some(kept_text) = input.get("kept_text").and_then(|v| v.as_str()) else {
+        return ToolOutcome::error(
+            json!({ "error": "missing 'kept_text' — the transcript to keep, with the unwanted parts removed" })
+                .to_string(),
+        );
+    };
+
+    // 1. Transcribe (AI-driven, so it keeps its own cloud-upload consent). Reuse the
+    // caller's item selection + language hint.
+    let t = match run_transcription(ui_tx, op_tx, task_rx, input.clone(), false).await {
+        TranscribeOutcomeKind::Done(t) => t,
+        TranscribeOutcomeKind::NoProvider => {
+            return ToolOutcome::error(
+                json!({ "error": "No transcription provider is configured — the user must add one in \
+                                  Providers, on the Transcription tab." })
+                .to_string(),
+            )
+        }
+        TranscribeOutcomeKind::Declined => {
+            let _ = ui_tx.send(UiEvent::Notice("Declined.".into()));
+            return ToolOutcome::ok(json!({ "declined": true }).to_string());
+        }
+        TranscribeOutcomeKind::Cancelled => {
+            let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
+            return ToolOutcome::ok(json!({ "cancelled": true }).to_string());
+        }
+        TranscribeOutcomeKind::Failed(e) => {
+            return ToolOutcome::error(json!({ "error": e }).to_string())
+        }
+    };
+
+    // 2. Word timings are required to map kept text back to the audio. whisper-1 and
+    // local Whisper emit them; gpt-4o-transcribe returns none.
+    if t.transcript.words.is_empty() {
+        return ToolOutcome::error(
+            json!({ "error": "the transcription returned no word timestamps, so the text can't be \
+                              aligned to the audio — use whisper-1 or a local Whisper server, which \
+                              emit per-word timings" })
+            .to_string(),
+        );
+    }
+
+    // 3. Deterministic diff: which audio spans did the kept text drop?
+    let plan = crate::edit::plan_cut(&t.transcript.words, kept_text);
+    if plan.is_noop() {
+        return ToolOutcome::ok(
+            json!({
+                "applied": false,
+                "reason": "the kept text still covers the whole transcript — nothing to cut",
+                "unmatched_tokens": plan.unmatched_tokens,
+            })
+            .to_string(),
+        );
+    }
+
+    // 4. Cut via the shared executor. The remove spans are in the transcript timeline
+    // (seconds from the item start), which the executor maps to project time. Track
+    // the item by GUID so a project edit during transcription can't hit the wrong one.
+    let ranges: Vec<Value> = plan
+        .remove
+        .iter()
+        .map(|s| json!({ "start": s.start, "end": s.end }))
+        .collect();
+    let removed_seconds = plan.removed_seconds();
+    let removed_words: usize = plan.remove.iter().map(|s| s.words()).sum();
+    let cut = exec_tool(
+        op_tx,
+        "remove_item_time_ranges".to_string(),
+        json!({
+            "guid": t.guid,
+            "ranges": ranges,
+            "ripple": input.get("ripple").and_then(|v| v.as_str()).unwrap_or("item"),
+        }),
+    )
+    .await;
+    if cut.is_error {
+        return ToolOutcome::error(
+            json!({ "error": outcome_error(&cut, "the cut failed") }).to_string(),
+        );
+    }
+    let cut_result: Value = serde_json::from_str(&cut.content).unwrap_or_default();
+
+    ToolOutcome::ok(
+        json!({
+            "applied": true,
+            "removed_seconds": removed_seconds,
+            "removed_span_count": plan.remove.len(),
+            "removed_words": removed_words,
+            "kept_seconds": plan.kept_seconds(),
+            "unmatched_tokens": plan.unmatched_tokens,
+            "read_error": t.read_error,
+            "cut": cut_result,
+        })
+        .to_string(),
+    )
 }
 
 /// A bindable REAPER action: transcribe the selected item and write the result to

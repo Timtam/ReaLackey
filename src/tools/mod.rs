@@ -1409,6 +1409,32 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             json!([]),
         ),
     });
+    defs.push(ToolDef {
+        name: "cut_item_by_text".into(),
+        description: "CUT-BY-TEXT: transcribe a media item, then cut it down to match an edited \
+                      transcript. Pass 'kept_text' — the transcript with the unwanted parts removed \
+                      (delete the words/sentences to drop, keep the rest in order). The tool \
+                      transcribes the item (word timestamps), aligns kept_text against it, and cuts \
+                      the removed spans out of the audio, sliding the survivors together. For a \
+                      cloud provider it also uploads the audio (consent-gated). CHANGES the project \
+                      (confirmed + undo-wrapped). Needs a provider that emits WORD timestamps \
+                      (whisper-1 or a local Whisper server; gpt-4o-transcribe does not). Deletion \
+                      only — moved \
+                      text is not reordered (its words read as removed). ripple 'item' (default) \
+                      leaves the rest of the track put; 'track' shifts later items earlier. To just \
+                      read the transcript, use transcribe_item; to cut explicit time ranges, use \
+                      remove_item_time_ranges."
+            .into(),
+        input_schema: obj(
+            json!({
+                "kept_text": { "type": "string", "description": "the transcript to KEEP, with the unwanted parts deleted" },
+                "item_index": { "type": "integer", "description": "0-based project item index; omit to use the selected item" },
+                "language": { "type": "string", "description": "optional ISO-639-1 hint (e.g. 'en', 'de'); omit to auto-detect" },
+                "ripple": { "type": "string", "enum": ["item", "track"], "description": "'item' (default) or 'track'" }
+            }),
+            json!(["kept_text"]),
+        ),
+    });
     // --- transport / timeline / global settings ---
     defs.push(ToolDef {
         name: "get_transport".into(),
@@ -1781,14 +1807,15 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
     if !supports_audio {
         defs.retain(|d| !is_audio_tool(&d.name));
     }
-    // transcribe_item only works with a transcription provider configured — don't
-    // advertise it otherwise, so the model can't call a tool that can only error.
+    // The transcription tools only work with a transcription provider configured —
+    // don't advertise them otherwise, so the model can't call a tool that can only
+    // error. (cut_item_by_text transcribes internally, so it needs one too.)
     if crate::providers::registry::active_for(
         crate::providers::registry::ProviderRole::Transcription,
     )
     .is_none()
     {
-        defs.retain(|d| d.name != "transcribe_item");
+        defs.retain(|d| d.name != "transcribe_item" && d.name != "cut_item_by_text");
     }
     // Strip the mutation boilerplate that the system prompt now states ONCE ("every
     // mutating tool CHANGES the project, is confirmed, and is undo-wrapped"). It was
@@ -3437,6 +3464,18 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
                 .and_then(|v| v.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0),
+            input
+                .get("item_index")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(selected)".into()),
+            if opt_str(input, "ripple") == Some("track") {
+                ", rippling the track"
+            } else {
+                ""
+            },
+        )),
+        "cut_item_by_text" => Some(format!(
+            "Transcribe item {} and cut it to the edited text{}",
             input
                 .get("item_index")
                 .map(|v| v.to_string())

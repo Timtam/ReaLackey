@@ -18,11 +18,6 @@ mod ai;
 mod app;
 mod config;
 mod dsp;
-// TODO(cut-engine): the cut executor (task 9) consumes `plan_cut`; until it lands
-// the pure, tested planner has no in-crate caller, so allow dead_code here (a
-// cdylib exposes no reachable Rust API). Drop this attribute when the engine wires
-// it in.
-#[allow(dead_code)]
 mod edit;
 mod prompts;
 mod providers;
