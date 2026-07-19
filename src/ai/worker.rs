@@ -1426,40 +1426,49 @@ async fn handle_transcribe_action(
     let _ = ui_tx.send(UiEvent::ProgressClose);
     let t = match outcome {
         TranscribeOutcomeKind::Done(t) => t,
+        // A bindable action runs with no chat pane, so report every terminal outcome
+        // with a native dialog (visible + screen-reader-read) — not an OSARA-only
+        // announcement that a sighted user can't perceive.
         TranscribeOutcomeKind::NoProvider => {
-            let _ = ui_tx.send(UiEvent::Error(
+            alert(
+                op_tx,
                 "No transcription provider is configured. Open Providers, switch to the \
                  Transcription tab, and add one (e.g. OpenAI Whisper, or a local whisper server), \
                  then try again."
                     .into(),
-            ));
+            )
+            .await;
             return;
         }
         TranscribeOutcomeKind::Declined => {
             let _ = ui_tx.send(UiEvent::Announce("Transcription declined.".into()));
             return;
         }
+        // The user hit Cancel on the (visible) progress dialog — its closing is the
+        // on-screen feedback, so just note it.
         TranscribeOutcomeKind::Cancelled => {
             let _ = ui_tx.send(UiEvent::Announce("Transcription cancelled.".into()));
             return;
         }
         TranscribeOutcomeKind::Failed(e) => {
-            let _ = ui_tx.send(UiEvent::Error(format!("Transcription failed: {e}")));
+            alert(op_tx, format!("Transcription failed: {e}")).await;
             return;
         }
     };
 
     if t.transcript.text.trim().is_empty() {
-        let _ = ui_tx.send(UiEvent::Announce(
+        alert(
+            op_tx,
             "The item transcribed to no text (it may contain no speech).".into(),
-        ));
+        )
+        .await;
         return;
     }
 
     match output {
         TranscribeOutput::Notes => {
             if t.guid.is_empty() {
-                let _ = ui_tx.send(UiEvent::Error("Couldn't resolve the item to write its notes.".into()));
+                alert(op_tx, "Couldn't resolve the item to write its notes.".into()).await;
                 return;
             }
             let r = exec_tool(
@@ -1469,27 +1478,30 @@ async fn handle_transcribe_action(
             )
             .await;
             if r.is_error {
-                let _ = ui_tx.send(UiEvent::Error(format!(
-                    "Couldn't write the item's notes: {}",
-                    outcome_error(&r, "unknown error")
-                )));
+                alert(
+                    op_tx,
+                    format!("Couldn't write the item's notes: {}", outcome_error(&r, "unknown error")),
+                )
+                .await;
             } else {
-                let _ = ui_tx.send(UiEvent::Announce("Transcript written to the item's notes.".into()));
+                alert(op_tx, "Transcript written to the item's notes.".into()).await;
             }
         }
         TranscribeOutput::Text => {
-            write_transcription_file(ui_tx, &t.source_file, "txt", &t.transcript.text)
+            write_transcription_file(op_tx, &t.source_file, "txt", &t.transcript.text).await
         }
         TranscribeOutput::Srt => {
             let srt = crate::providers::transcription::to_srt(&t.transcript);
             if srt.trim().is_empty() {
-                let _ = ui_tx.send(UiEvent::Error(
+                alert(
+                    op_tx,
                     "No timestamps for an SRT — this transcription model returns text only. Use \
                      whisper-1 or a local whisper model for subtitles."
                         .into(),
-                ));
+                )
+                .await;
             } else {
-                write_transcription_file(ui_tx, &t.source_file, "srt", &srt);
+                write_transcription_file(op_tx, &t.source_file, "srt", &srt).await;
             }
         }
     }
@@ -1741,28 +1753,31 @@ async fn open_cut_editor_tool(
 /// that already exists, the first free `<source> (N).<ext>` beside it, so an
 /// existing file (a hand-authored `.srt`/`.txt`) is NEVER overwritten. Announces
 /// the path actually written (or the error). Errors if the source has no file path.
-fn write_transcription_file(ui_tx: &CbSender<UiEvent>, source_file: &str, ext: &str, content: &str) {
+async fn write_transcription_file(
+    op_tx: &CbSender<ReaperOp>,
+    source_file: &str,
+    ext: &str,
+    content: &str,
+) {
     if source_file.trim().is_empty() {
-        let _ = ui_tx.send(UiEvent::Error(
+        alert(
+            op_tx,
             "Couldn't save the transcript — the item's source has no file path. Try the notes \
              output instead."
                 .into(),
-        ));
+        )
+        .await;
         return;
     }
     let base = std::path::Path::new(source_file).with_extension(ext);
     match write_without_clobber(&base, content) {
-        Ok(path) => {
-            let _ = ui_tx.send(UiEvent::Announce(format!(
-                "Transcript saved to {}.",
-                path.display()
-            )));
-        }
+        Ok(path) => alert(op_tx, format!("Transcript saved to {}.", path.display())).await,
         Err(e) => {
-            let _ = ui_tx.send(UiEvent::Error(format!(
-                "Couldn't save the transcript next to {}: {e}",
-                base.display()
-            )));
+            alert(
+                op_tx,
+                format!("Couldn't save the transcript next to {}: {e}", base.display()),
+            )
+            .await
         }
     }
 }
