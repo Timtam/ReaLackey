@@ -42,6 +42,13 @@ pub enum ReaperOp {
         message: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Show a native OK message box — a VISIBLE, screen-reader-accessible, focused
+    /// alert (used to report an action's error to sighted AND blind users alike,
+    /// where an OSARA-only announcement would be silent for sighted users).
+    Alert {
+        message: String,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// An image produced by a tool (a screenshot), returned to the model as an

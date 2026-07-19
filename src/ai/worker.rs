@@ -1658,25 +1658,40 @@ async fn handle_open_cut_editor_action(
                 "Cut applied — {removed_seconds:.1} seconds removed."
             )));
         }
+        // These fail BEFORE the editor becomes visible, so there's no on-screen
+        // feedback — report them with a native OK box (visible to sighted users AND
+        // read by the screen reader), not an OSARA-only announcement.
         CutEditorOutcome::NoWebview => {
-            let _ = ui_tx.send(UiEvent::Error(
+            alert(
+                op_tx,
                 "The cut-by-text editor needs the HTML pane, which isn't available here.".into(),
-            ));
+            )
+            .await;
         }
         CutEditorOutcome::NoProvider => {
-            let _ = ui_tx.send(UiEvent::Error(
+            alert(
+                op_tx,
                 "No transcription provider is configured. Open Providers, Transcription tab, and add \
                  one (whisper-1 or a local whisper server), then try again."
                     .into(),
-            ));
+            )
+            .await;
         }
         CutEditorOutcome::NoWords => {
-            let _ = ui_tx.send(UiEvent::Error(
+            alert(
+                op_tx,
                 "This transcription returned no word timestamps, so the editor can't map text to \
                  audio. Use whisper-1 or a local whisper server."
                     .into(),
-            ));
+            )
+            .await;
         }
+        CutEditorOutcome::Failed(e) => {
+            alert(op_tx, format!("Cut-by-text failed: {e}")).await;
+        }
+        // These happen AFTER the editor was on screen (or are a deliberate user
+        // stop), so the pane itself already gave sighted feedback — a spoken note
+        // is enough.
         CutEditorOutcome::NothingToCut => {
             let _ = ui_tx.send(UiEvent::Announce("No words removed — nothing to cut.".into()));
         }
@@ -1685,9 +1700,6 @@ async fn handle_open_cut_editor_action(
         }
         CutEditorOutcome::Cancelled => {
             let _ = ui_tx.send(UiEvent::Announce("Cut cancelled.".into()));
-        }
-        CutEditorOutcome::Failed(e) => {
-            let _ = ui_tx.send(UiEvent::Error(format!("Cut-by-text failed: {e}")));
         }
     }
 }
@@ -1901,6 +1913,16 @@ async fn confirm(op_tx: &CbSender<ReaperOp>, message: String) -> bool {
         return false;
     }
     rx.await.unwrap_or(false)
+}
+
+/// Show a native OK alert (main thread) and wait for it to be dismissed. Visible to
+/// sighted users and read by the screen reader — used to report an action's error,
+/// where an OSARA-only announcement would be silent for a sighted user.
+async fn alert(op_tx: &CbSender<ReaperOp>, message: String) {
+    let (tx, rx) = oneshot::channel();
+    if op_tx.send(ReaperOp::Alert { message, reply: tx }).is_ok() {
+        let _ = rx.await;
+    }
 }
 
 /// Send a tool to the main thread for execution and await its result.

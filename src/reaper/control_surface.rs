@@ -229,6 +229,14 @@ impl PumpSurface {
                 .unwrap_or(false);
                 let _ = reply.send(yes);
             }
+            ReaperOp::Alert { message, reply } => {
+                // A native OK box: visible to sighted users, read by the screen
+                // reader, and correctly focused for both.
+                api::with(|reaper| {
+                    reaper.show_message_box(message.as_str(), "ReaLackey", MessageBoxType::Okay)
+                });
+                let _ = reply.send(());
+            }
         }
     }
 
