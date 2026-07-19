@@ -49,6 +49,14 @@ pub enum ReaperOp {
         message: String,
         reply: oneshot::Sender<()>,
     },
+    /// Show the assistant window and bring up its webview (for the cut-by-text
+    /// editor), then reply with whether the webview is now live. Building the
+    /// WebView2/WKWebView controller is synchronous but slow on a cold first open,
+    /// so the worker awaits THIS (rather than polling a flag) to learn the real
+    /// outcome without racing the controller's creation.
+    EnsureEditorWindow {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// An image produced by a tool (a screenshot), returned to the model as an

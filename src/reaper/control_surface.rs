@@ -187,7 +187,6 @@ impl PumpSurface {
                 ui::ffi::progress_update(percent, &message)
             }
             UiEvent::ProgressClose => ui::ffi::progress_close(),
-            UiEvent::ShowAssistantWindow => crate::reaper::action::ensure_window_shown(),
             UiEvent::OpenCutEditor(payload) => crate::ui::output::open_cut_editor(&payload),
             UiEvent::CloseCutEditor => crate::ui::output::close_cut_editor(),
         }
@@ -236,6 +235,12 @@ impl PumpSurface {
                     reaper.show_message_box(message.as_str(), "ReaLackey", MessageBoxType::Okay)
                 });
                 let _ = reply.send(());
+            }
+            ReaperOp::EnsureEditorWindow { reply } => {
+                // Synchronously show the pane + build the webview, then report whether
+                // it came up (false = no webview host, e.g. Linux).
+                crate::reaper::action::ensure_window_shown();
+                let _ = reply.send(crate::ui::output::webview_active());
             }
         }
     }

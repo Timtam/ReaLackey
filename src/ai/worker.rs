@@ -1546,20 +1546,21 @@ async fn run_cut_editor(
         return CutEditorOutcome::NoWords;
     }
 
-    // 2. The editor needs the webview — open the pane NOW (lazily, only for the
-    // success path) and wait for its page to load. Where there's no webview host
-    // (Linux / a failed WebView2) the pane never goes active: bail to NoWebview.
-    let _ = ui_tx.send(UiEvent::ShowAssistantWindow);
+    // 2. The editor needs the webview. Open the pane on the main thread and AWAIT
+    // the result: building the WebView2/WKWebView controller is synchronous but slow
+    // on a cold first open, so awaiting the real outcome avoids racing a flag (a
+    // 400 ms poll used to time out mid-creation and wrongly report "no webview"). A
+    // `false` reply means there's no webview host (Linux, or a failed controller).
+    if !ensure_editor_window(op_tx).await {
+        return CutEditorOutcome::NoWebview;
+    }
+    // The controller is live; give its page a moment to finish loading (it pings
+    // `ui:ready` on load) so openCutEditor's JS exists before we inject the modal.
+    // Best-effort: proceed once the window is up even if the ping is missed.
     let mut waited = 0u32;
-    while waited < 4000 && !crate::ui::output::webview_ready() {
+    while waited < 6000 && !crate::ui::output::webview_ready() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         waited += 50;
-        if waited >= 400 && !crate::ui::output::webview_active() {
-            break; // no webview host — stop waiting for a page that won't load
-        }
-    }
-    if !crate::ui::output::webview_active() {
-        return CutEditorOutcome::NoWebview;
     }
 
     // 3. Render the whole region to one 16 kHz WAV for in-editor playback (the same
@@ -1938,6 +1939,20 @@ async fn alert(op_tx: &CbSender<ReaperOp>, message: String) {
     if op_tx.send(ReaperOp::Alert { message, reply: tx }).is_ok() {
         let _ = rx.await;
     }
+}
+
+/// Show the assistant window + build its webview on the main thread, AWAITING the
+/// synchronous controller creation. Returns whether the webview is live afterwards
+/// (false = no webview host: Linux, or a failed WebView2/WKWebView controller).
+async fn ensure_editor_window(op_tx: &CbSender<ReaperOp>) -> bool {
+    let (tx, rx) = oneshot::channel();
+    if op_tx
+        .send(ReaperOp::EnsureEditorWindow { reply: tx })
+        .is_err()
+    {
+        return false;
+    }
+    rx.await.unwrap_or(false)
 }
 
 /// Send a tool to the main thread for execution and await its result.
