@@ -788,7 +788,15 @@ document.addEventListener('keydown',function(e){
   function stopPreview(){ preview.forEach(function(s){ try{s.stop();}catch(e){} }); preview=[]; }
   function stopAll(){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); stopPreview(); }
   function resume(){ if(ctx && ctx.state==='suspended'){ try{ctx.resume();}catch(e){} } }
-  function playRange(s,e){ if(!ctx||!buf)return; stopSnip(); try{ var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination); n.start(0,Math.max(0,s),Math.max(0.02,e-s)); curSrc=n; }catch(_){} }
+  // Whisper's word boundaries come from attention alignment, not a forced aligner,
+  // so they run a few tens of ms early/late and clip onsets. Pad each snippet a
+  // little (and a bit more at the tail) so you hear the WHOLE word — this only
+  // affects preview playback, never where the cut lands.
+  var PAD_IN=0.04,PAD_OUT=0.09;
+  function playRange(s,e){ if(!ctx||!buf)return; stopSnip();
+    try{ var o=Math.max(0,s-PAD_IN), d=Math.max(0.02,(e-o)+PAD_OUT);
+      if(buf.duration) d=Math.min(d,Math.max(0.02,buf.duration-o));
+      var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination); n.start(0,o,d); curSrc=n; }catch(_){} }
   // `fast` = a single deliberate keypress: start the audio NOW. Only auto-repeat
   // (holding an arrow) settles first, so holding a key doesn't machine-gun the
   // audio. The old code delayed EVERY press by 140 ms, which is what made single
