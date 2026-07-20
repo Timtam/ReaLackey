@@ -857,7 +857,8 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                             "required": ["start", "end"]
                         }
                     },
-                    "ripple": { "type": "string", "enum": ["item", "track"], "description": "'item' (default) keeps the rest of the track put; 'track' shifts later items earlier" }
+                    "ripple": { "type": "string", "enum": ["item", "track"], "description": "'item' (default) keeps the rest of the track put; 'track' shifts later items earlier" },
+                    "snap_to_silence": { "type": "boolean", "description": "default true: nudge each cut edge into the nearest pause (±120ms) so cuts don't land mid-word — transcript word timings are only approximate. Set false to cut at the exact times given." }
                 }),
                 json!(["ranges"]),
             ),
@@ -7223,6 +7224,43 @@ fn set_item_edge(
 /// it also keeps split points clear of the item edges and of each other.
 const CUT_EPSILON: f64 = 1e-4;
 
+/// How far either side of a cut boundary we look for a pause to snap to. Wide
+/// enough to cover typical word-timing error, narrow enough that it can't skip
+/// past a neighbouring word.
+const SNAP_RADIUS: f64 = 0.12;
+/// Analysis window for the snap — short enough to fit inside a brief pause.
+const SNAP_WINDOW: f64 = 0.02;
+/// Only move a boundary when the quietest point found is clearly quieter than where
+/// the boundary already sits. In continuous speech or music there is no pause, and
+/// moving the cut to an arbitrary "least loud" spot would be worse than leaving it.
+const SNAP_RATIO: f64 = 0.6;
+
+/// Nudge one cut boundary (project time) into the nearest pause, using the item's
+/// own audio. Returns the refined time — or `t` unchanged when there's no clearly
+/// quieter point nearby, the read fails, or the window is too short to analyse.
+fn snap_boundary<A>(
+    low: &reaper_low::Reaper,
+    acc: *mut A,
+    lo: f64,
+    hi: f64,
+    t: f64,
+) -> f64 {
+    let start = (t - SNAP_RADIUS).max(lo);
+    let end = (t + SNAP_RADIUS).min(hi);
+    if end - start <= SNAP_WINDOW {
+        return t;
+    }
+    let (samples, read_error) =
+        read_accessor_samples_at(low, acc, 1, TRANSCRIBE_SR, start, end - start);
+    if read_error || samples.is_empty() {
+        return t;
+    }
+    match crate::dsp::quietest_point(&samples, TRANSCRIBE_SR as f64, SNAP_WINDOW) {
+        Some(q) if q.rms < q.centre_rms * SNAP_RATIO => start + q.offset_seconds,
+        _ => t,
+    }
+}
+
 /// Parse the `ranges` argument of [`cut_item_time_ranges`]: an array of
 /// `{start, end}` objects (or `[start, end]` pairs), each in SECONDS FROM THE
 /// ITEM'S AUDIO START. Out-of-range / inverted values are tolerated — the planner
@@ -7270,6 +7308,10 @@ fn parse_cut_ranges(input: &Value) -> Result<Vec<(f64, f64)>, String> {
 /// Undo-wrapped and confirmation-gated (see [`preview`]). Main thread.
 fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Result<Value, String> {
     let ranges = parse_cut_ranges(input)?;
+    let snap_to_silence = input
+        .get("snap_to_silence")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let ripple_track = match opt_str(input, "ripple").unwrap_or("item") {
         "item" => false,
         "track" => true,
@@ -7285,16 +7327,41 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     }
     let acc_start = unsafe { low.GetAudioAccessorStartTime(acc) };
     let acc_end = unsafe { low.GetAudioAccessorEndTime(acc) };
-    unsafe { low.DestroyAudioAccessor(acc) };
     if acc_end - acc_start <= CUT_EPSILON {
+        unsafe { low.DestroyAudioAccessor(acc) };
         return Err("the item has no audible length to cut".into());
     }
 
-    // Map ranges (item-relative) to project time, then plan the split/compact.
-    let project_removes: Vec<(f64, f64)> = ranges
+    // Map ranges (item-relative) to project time.
+    let mut project_removes: Vec<(f64, f64)> = ranges
         .iter()
         .map(|&(s, e)| (acc_start + s, acc_start + e))
         .collect();
+
+    // Nudge each boundary into the nearest pause. Speech-recognition word timings
+    // are approximate (Whisper aligns by attention, not forced alignment), so a
+    // word-tight cut lands mid-syllable and leaves the pauses on BOTH sides of a
+    // removed span, doubling the gap. Snapping to a real silence fixes both — and,
+    // as a bonus, puts REAPER's split auto-fades over near-silence where they're
+    // inaudible. Boundaries in continuous speech/music are left alone.
+    let mut snapped = 0usize;
+    if snap_to_silence {
+        for r in project_removes.iter_mut() {
+            let a = snap_boundary(low, acc, acc_start, acc_end, r.0);
+            let b = snap_boundary(low, acc, acc_start, acc_end, r.1);
+            if b - a > CUT_EPSILON {
+                if (a - r.0).abs() > CUT_EPSILON {
+                    snapped += 1;
+                }
+                if (b - r.1).abs() > CUT_EPSILON {
+                    snapped += 1;
+                }
+                *r = (a, b);
+            }
+        }
+    }
+    unsafe { low.DestroyAudioAccessor(acc) };
+
     let plan = crate::edit::plan_item_cut(acc_start, acc_end, &project_removes, CUT_EPSILON);
     if plan.is_noop() {
         return Ok(json!({
@@ -7397,6 +7464,7 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         "removed_whole_item": plan.removes_everything(),
         "rippled_track_items": ripple_targets.len(),
         "new_item_end_seconds": plan.kept_end(acc_start) - acc_start,
+        "boundaries_snapped_to_silence": snapped,
     }))
 }
 

@@ -982,10 +982,116 @@ fn decimate<T>(v: Vec<T>, max: usize) -> Vec<T> {
     v.into_iter().step_by(stride).collect()
 }
 
+/// The quietest short window found inside a slice of mono audio.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuietPoint {
+    /// Centre of the quietest window, in seconds from the slice start.
+    pub offset_seconds: f64,
+    /// RMS of that window.
+    pub rms: f64,
+    /// RMS of the window centred on the slice's MIDPOINT — i.e. the level where the
+    /// caller's original boundary sits, so it can judge whether moving is worth it.
+    pub centre_rms: f64,
+}
+
+/// Scan `samples` (mono, at `sample_rate`) for the quietest `window_seconds` window.
+///
+/// Used to nudge a cut boundary into a pause instead of mid-word: speech-recognition
+/// word timings are only approximate (Whisper aligns via attention, not a forced
+/// aligner), but a real pause is unambiguous in the signal. The caller compares
+/// `rms` against `centre_rms` to decide whether it actually found a pause — in
+/// continuous speech or music there is no quiet point and the boundary should stay put.
+///
+/// `None` when the slice is shorter than one analysis window.
+pub fn quietest_point(samples: &[f64], sample_rate: f64, window_seconds: f64) -> Option<QuietPoint> {
+    if sample_rate <= 0.0 || window_seconds <= 0.0 {
+        return None;
+    }
+    let win = ((window_seconds * sample_rate).round() as usize).max(1);
+    if samples.len() < win {
+        return None;
+    }
+    // ~4 hops per window: fine enough to land inside a brief pause, cheap to scan.
+    let hop = (win / 4).max(1);
+    let rms_at = |start: usize| -> f64 {
+        let end = (start + win).min(samples.len());
+        let n = end - start;
+        if n == 0 {
+            return 0.0;
+        }
+        (samples[start..end].iter().map(|s| s * s).sum::<f64>() / n as f64).sqrt()
+    };
+    let mut best_start = 0usize;
+    let mut best = f64::INFINITY;
+    let mut i = 0usize;
+    while i + win <= samples.len() {
+        let r = rms_at(i);
+        if r < best {
+            best = r;
+            best_start = i;
+        }
+        i += hop;
+    }
+    if !best.is_finite() {
+        return None;
+    }
+    Some(QuietPoint {
+        offset_seconds: (best_start as f64 + win as f64 / 2.0) / sample_rate,
+        rms: best,
+        centre_rms: rms_at((samples.len() - win) / 2),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    /// tone | silence | tone -> the quietest window lands in the silent middle.
+    #[test]
+    fn quietest_point_finds_the_pause() {
+        let sr = 16_000.0;
+        let seg = (sr * 0.1) as usize; // 100 ms each
+        let mut s = Vec::with_capacity(seg * 3);
+        let tone = |i: usize| (2.0 * PI * 440.0 * i as f64 / sr).sin() * 0.5;
+        s.extend((0..seg).map(tone));
+        s.extend(std::iter::repeat_n(0.0, seg));
+        s.extend((0..seg).map(tone));
+        let q = quietest_point(&s, sr, 0.02).expect("long enough");
+        // The pause spans 0.10..0.20 s; the quietest window must sit inside it.
+        assert!(
+            q.offset_seconds > 0.10 && q.offset_seconds < 0.20,
+            "offset {} not in the pause",
+            q.offset_seconds
+        );
+        // And it must be clearly quieter than the slice centre... which IS the pause
+        // here, so instead assert it's near-silent versus the tone's RMS (~0.354).
+        assert!(q.rms < 0.01, "rms {} should be near silence", q.rms);
+    }
+
+    /// With the boundary mid-word (slice centred on a tone) the pause is off to one
+    /// side, and `centre_rms` reports the loud original position — which is what lets
+    /// the caller decide to move.
+    #[test]
+    fn quietest_point_reports_the_centre_level() {
+        let sr = 16_000.0;
+        let seg = (sr * 0.1) as usize;
+        let tone = |i: usize| (2.0 * PI * 440.0 * i as f64 / sr).sin() * 0.5;
+        // silence | tone  -> centre sits at the boundary, quietest is in the silence.
+        let mut s: Vec<f64> = std::iter::repeat_n(0.0, seg).collect();
+        s.extend((0..seg).map(tone));
+        let q = quietest_point(&s, sr, 0.02).unwrap();
+        assert!(q.offset_seconds < 0.10, "should land in the leading silence");
+        assert!(q.rms < q.centre_rms, "pause must be quieter than the centre");
+    }
+
+    #[test]
+    fn quietest_point_needs_a_full_window() {
+        let sr = 16_000.0;
+        assert!(quietest_point(&[0.0; 10], sr, 0.02).is_none());
+        assert!(quietest_point(&[], sr, 0.02).is_none());
+        assert!(quietest_point(&[0.0; 1000], 0.0, 0.02).is_none());
+    }
 
     fn sine(freq: f64, amp: f64, secs: f64, sr: f64) -> Vec<f64> {
         let n = (secs * sr) as usize;
