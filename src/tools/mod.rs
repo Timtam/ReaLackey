@@ -7224,30 +7224,45 @@ fn set_item_edge(
 /// it also keeps split points clear of the item edges and of each other.
 const CUT_EPSILON: f64 = 1e-4;
 
-/// How far either side of a cut boundary we look for a pause to snap to. Wide
-/// enough to cover typical word-timing error, narrow enough that it can't skip
-/// past a neighbouring word.
-const SNAP_RADIUS: f64 = 0.12;
+/// How far we look OUTWARD from a cut edge for a pause. Generous, because transcript
+/// word timings are routinely off by more than 100 ms — but bounded, so a search can
+/// never run past a short neighbouring word.
+const SNAP_OUT: f64 = 0.25;
+/// How far we look INWARD. Small: if the timing ran early the edge is already sitting
+/// in the pause, and we only need enough context to measure it.
+const SNAP_IN: f64 = 0.08;
 /// Analysis window for the snap — short enough to fit inside a brief pause.
 const SNAP_WINDOW: f64 = 0.02;
-/// Only move a boundary when the quietest point found is clearly quieter than where
-/// the boundary already sits. In continuous speech or music there is no pause, and
-/// moving the cut to an arbitrary "least loud" spot would be worse than leaving it.
-const SNAP_RATIO: f64 = 0.6;
+/// A pause is a window at or below this share of the loudest window nearby.
+const SNAP_RATIO: f64 = 0.25;
 
-/// Nudge one cut boundary (project time) into the nearest pause, using the item's
-/// own audio. Returns the refined time — or `t` unchanged when there's no clearly
-/// quieter point nearby, the read fails, or the window is too short to analyse.
+/// Nudge one edge of a REMOVED span into the nearest pause, using the item's own
+/// audio. `leading` = this is the span's start, so look EARLIER; otherwise it's the
+/// span's end, so look LATER.
+///
+/// Outward is the safe direction: a removal starting a hair too early only eats
+/// silence, whereas one starting too late leaves the front of the deleted word
+/// audible. Searching directionally (not for a global minimum) also means the scan
+/// stops at the first pause and can't swallow a neighbouring kept word.
+///
+/// Returns `t` unchanged when no pause is reachable (continuous speech/music), the
+/// read fails, or the window is too short to analyse.
 fn snap_boundary<A>(
     low: &reaper_low::Reaper,
     acc: *mut A,
     lo: f64,
     hi: f64,
     t: f64,
+    leading: bool,
 ) -> f64 {
-    let start = (t - SNAP_RADIUS).max(lo);
-    let end = (t + SNAP_RADIUS).min(hi);
-    if end - start <= SNAP_WINDOW {
+    let (back, fwd) = if leading {
+        (SNAP_OUT, SNAP_IN)
+    } else {
+        (SNAP_IN, SNAP_OUT)
+    };
+    let start = (t - back).max(lo);
+    let end = (t + fwd).min(hi);
+    if end - start <= SNAP_WINDOW * 2.0 {
         return t;
     }
     let (samples, read_error) =
@@ -7255,9 +7270,21 @@ fn snap_boundary<A>(
     if read_error || samples.is_empty() {
         return t;
     }
-    match crate::dsp::quietest_point(&samples, TRANSCRIBE_SR as f64, SNAP_WINDOW) {
-        Some(q) if q.rms < q.centre_rms * SNAP_RATIO => start + q.offset_seconds,
-        _ => t,
+    let dir = if leading {
+        crate::dsp::PauseDir::Backward
+    } else {
+        crate::dsp::PauseDir::Forward
+    };
+    match crate::dsp::nearest_pause_centre(
+        &samples,
+        TRANSCRIBE_SR as f64,
+        SNAP_WINDOW,
+        t - start,
+        dir,
+        SNAP_RATIO,
+    ) {
+        Some(off) => (start + off).clamp(lo, hi),
+        None => t,
     }
 }
 
@@ -7347,8 +7374,8 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     let mut snapped = 0usize;
     if snap_to_silence {
         for r in project_removes.iter_mut() {
-            let a = snap_boundary(low, acc, acc_start, acc_end, r.0);
-            let b = snap_boundary(low, acc, acc_start, acc_end, r.1);
+            let a = snap_boundary(low, acc, acc_start, acc_end, r.0, true);
+            let b = snap_boundary(low, acc, acc_start, acc_end, r.1, false);
             if b - a > CUT_EPSILON {
                 if (a - r.0).abs() > CUT_EPSILON {
                     snapped += 1;
@@ -8610,11 +8637,18 @@ fn transcribe_chunk(reaper: &Reaper<MainThreadScope>, input: &Value) -> ToolOutc
         );
     }
     let acc_start = unsafe { low.GetAudioAccessorStartTime(acc) };
-    // 1 channel -> REAPER downmixes to mono; 16 kHz keeps the upload small.
+    // 1 channel -> REAPER downmixes to mono. 16 kHz by default, which keeps a
+    // transcription upload small; the cut-by-text editor passes a higher `sr` so its
+    // preview playback doesn't sound telephone-thin.
+    let sr = input
+        .get("sr")
+        .and_then(|v| v.as_i64())
+        .map(|v| v.clamp(8_000, 96_000) as c_int)
+        .unwrap_or(TRANSCRIBE_SR);
     let (samples, read_error) =
-        read_accessor_samples_at(low, acc, 1, TRANSCRIBE_SR, acc_start + start, length);
+        read_accessor_samples_at(low, acc, 1, sr, acc_start + start, length);
     unsafe { low.DestroyAudioAccessor(acc) };
-    let wav = crate::dsp::encode_pcm16_wav(&samples, 1, TRANSCRIBE_SR as f64);
+    let wav = crate::dsp::encode_pcm16_wav(&samples, 1, sr as f64);
     let data_base64 = base64::engine::general_purpose::STANDARD.encode(&wav);
     ToolOutcome::with_audio(
         json!({ "seconds": length, "read_error": read_error }).to_string(),

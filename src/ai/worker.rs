@@ -1563,8 +1563,8 @@ async fn run_cut_editor(
         waited += 50;
     }
 
-    // 3. Render the whole region to one 16 kHz WAV for in-editor playback (the same
-    // accessor render the transcription uses; word times map to it 1:1).
+    // 3. Render the whole region to one WAV for in-editor playback (the same accessor
+    // render the transcription uses; word times map to it 1:1, whatever the rate).
     let _ = ui_tx.send(UiEvent::Status("Preparing the editor\u{2026}".into()));
     let probe = exec_tool(op_tx, "__transcribe_probe".to_string(), json!({ "guid": t.guid })).await;
     if probe.is_error {
@@ -1572,10 +1572,19 @@ async fn run_cut_editor(
     }
     let pv: Value = serde_json::from_str(&probe.content).unwrap_or_default();
     let total = pv.get("total_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    // Preview fidelity: the 16 kHz transcription render sounds telephone-thin when
+    // you're auditioning words, so render full-band and only step down for long
+    // items — the WAV crosses into the webview as one base64 string, so its size is
+    // the constraint (mono PCM16 = sr * 2 bytes/s).
+    const PREVIEW_BUDGET_BYTES: f64 = 18.0 * 1024.0 * 1024.0;
+    let preview_sr = [48_000i64, 32_000, 24_000]
+        .into_iter()
+        .find(|sr| total * (*sr as f64) * 2.0 <= PREVIEW_BUDGET_BYTES)
+        .unwrap_or(16_000);
     let rendered = exec_tool(
         op_tx,
         "__transcribe_chunk".to_string(),
-        json!({ "guid": t.guid, "start": 0.0, "length": total }),
+        json!({ "guid": t.guid, "start": 0.0, "length": total, "sr": preview_sr }),
     )
     .await;
     if rendered.is_error {

@@ -982,28 +982,35 @@ fn decimate<T>(v: Vec<T>, max: usize) -> Vec<T> {
     v.into_iter().step_by(stride).collect()
 }
 
-/// The quietest short window found inside a slice of mono audio.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct QuietPoint {
-    /// Centre of the quietest window, in seconds from the slice start.
-    pub offset_seconds: f64,
-    /// RMS of that window.
-    pub rms: f64,
-    /// RMS of the window centred on the slice's MIDPOINT — i.e. the level where the
-    /// caller's original boundary sits, so it can judge whether moving is worth it.
-    pub centre_rms: f64,
+/// Which way to look for a pause, relative to a starting point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseDir {
+    Backward,
+    Forward,
 }
 
-/// Scan `samples` (mono, at `sample_rate`) for the quietest `window_seconds` window.
+/// Find the pause NEAREST to `from_seconds` in `samples` (mono at `sample_rate`),
+/// searching only in `direction`, and return that pause's CENTRE (seconds from the
+/// slice start).
 ///
-/// Used to nudge a cut boundary into a pause instead of mid-word: speech-recognition
-/// word timings are only approximate (Whisper aligns via attention, not a forced
-/// aligner), but a real pause is unambiguous in the signal. The caller compares
-/// `rms` against `centre_rms` to decide whether it actually found a pause — in
-/// continuous speech or music there is no quiet point and the boundary should stay put.
+/// A "pause" is a run of analysis windows at or below `ratio` of the LOUDEST window
+/// in the slice — quiet *relative* to the speech around it, so it adapts to level.
 ///
-/// `None` when the slice is shorter than one analysis window.
-pub fn quietest_point(samples: &[f64], sample_rate: f64, window_seconds: f64) -> Option<QuietPoint> {
+/// Searching directionally, and stopping at the FIRST quiet run, is what makes this
+/// safe: it cannot jump past a neighbouring word into some further-away silence the
+/// way a global minimum can. Returning the run's centre (rather than its edge) leaves
+/// half the pause on each side of a cut, so a join keeps one natural-sounding gap.
+///
+/// `None` when no pause is reachable that way — continuous speech or music, where any
+/// cut point is equally bad and the caller should leave the boundary alone.
+pub fn nearest_pause_centre(
+    samples: &[f64],
+    sample_rate: f64,
+    window_seconds: f64,
+    from_seconds: f64,
+    direction: PauseDir,
+    ratio: f64,
+) -> Option<f64> {
     if sample_rate <= 0.0 || window_seconds <= 0.0 {
         return None;
     }
@@ -1011,35 +1018,43 @@ pub fn quietest_point(samples: &[f64], sample_rate: f64, window_seconds: f64) ->
     if samples.len() < win {
         return None;
     }
-    // ~4 hops per window: fine enough to land inside a brief pause, cheap to scan.
-    let hop = (win / 4).max(1);
-    let rms_at = |start: usize| -> f64 {
-        let end = (start + win).min(samples.len());
-        let n = end - start;
-        if n == 0 {
-            return 0.0;
-        }
-        (samples[start..end].iter().map(|s| s * s).sum::<f64>() / n as f64).sqrt()
-    };
-    let mut best_start = 0usize;
-    let mut best = f64::INFINITY;
+    let hop = (win / 2).max(1);
+    let mut frames: Vec<f64> = Vec::new();
     let mut i = 0usize;
     while i + win <= samples.len() {
-        let r = rms_at(i);
-        if r < best {
-            best = r;
-            best_start = i;
-        }
+        let s: f64 = samples[i..i + win].iter().map(|x| x * x).sum();
+        frames.push((s / win as f64).sqrt());
         i += hop;
     }
-    if !best.is_finite() {
+    if frames.is_empty() {
         return None;
     }
-    Some(QuietPoint {
-        offset_seconds: (best_start as f64 + win as f64 / 2.0) / sample_rate,
-        rms: best,
-        centre_rms: rms_at((samples.len() - win) / 2),
-    })
+    let peak = frames.iter().copied().fold(0.0f64, f64::max);
+    // Digital silence throughout: there is no "pause" to find, and moving the
+    // boundary inside uniform silence would gain nothing.
+    if peak <= 1e-6 {
+        return None;
+    }
+    let thresh = peak * ratio;
+    let frame_time = |idx: usize| (idx as f64 * hop as f64 + win as f64 / 2.0) / sample_rate;
+    let start_idx = (((from_seconds * sample_rate) - win as f64 / 2.0) / hop as f64)
+        .round()
+        .clamp(0.0, (frames.len() - 1) as f64) as usize;
+    // Walk outward to the first quiet frame...
+    let found = match direction {
+        PauseDir::Backward => (0..=start_idx).rev().find(|&j| frames[j] <= thresh),
+        PauseDir::Forward => (start_idx..frames.len()).find(|&j| frames[j] <= thresh),
+    }?;
+    // ...then span the whole contiguous quiet run and take its centre.
+    let mut lo = found;
+    while lo > 0 && frames[lo - 1] <= thresh {
+        lo -= 1;
+    }
+    let mut hi = found;
+    while hi + 1 < frames.len() && frames[hi + 1] <= thresh {
+        hi += 1;
+    }
+    Some((frame_time(lo) + frame_time(hi)) / 2.0)
 }
 
 #[cfg(test)]
@@ -1047,50 +1062,63 @@ mod tests {
     use super::*;
     use std::f64::consts::PI;
 
-    /// tone | silence | tone -> the quietest window lands in the silent middle.
-    #[test]
-    fn quietest_point_finds_the_pause() {
-        let sr = 16_000.0;
-        let seg = (sr * 0.1) as usize; // 100 ms each
-        let mut s = Vec::with_capacity(seg * 3);
-        let tone = |i: usize| (2.0 * PI * 440.0 * i as f64 / sr).sin() * 0.5;
-        s.extend((0..seg).map(tone));
-        s.extend(std::iter::repeat_n(0.0, seg));
-        s.extend((0..seg).map(tone));
-        let q = quietest_point(&s, sr, 0.02).expect("long enough");
-        // The pause spans 0.10..0.20 s; the quietest window must sit inside it.
-        assert!(
-            q.offset_seconds > 0.10 && q.offset_seconds < 0.20,
-            "offset {} not in the pause",
-            q.offset_seconds
-        );
-        // And it must be clearly quieter than the slice centre... which IS the pause
-        // here, so instead assert it's near-silent versus the tone's RMS (~0.354).
-        assert!(q.rms < 0.01, "rms {} should be near silence", q.rms);
-    }
-
-    /// With the boundary mid-word (slice centred on a tone) the pause is off to one
-    /// side, and `centre_rms` reports the loud original position — which is what lets
-    /// the caller decide to move.
-    #[test]
-    fn quietest_point_reports_the_centre_level() {
+    /// word | pause | word, at 16 kHz: 0.0-0.1 tone, 0.1-0.2 silence, 0.2-0.3 tone.
+    fn word_pause_word() -> Vec<f64> {
         let sr = 16_000.0;
         let seg = (sr * 0.1) as usize;
         let tone = |i: usize| (2.0 * PI * 440.0 * i as f64 / sr).sin() * 0.5;
-        // silence | tone  -> centre sits at the boundary, quietest is in the silence.
-        let mut s: Vec<f64> = std::iter::repeat_n(0.0, seg).collect();
+        let mut s = Vec::with_capacity(seg * 3);
         s.extend((0..seg).map(tone));
-        let q = quietest_point(&s, sr, 0.02).unwrap();
-        assert!(q.offset_seconds < 0.10, "should land in the leading silence");
-        assert!(q.rms < q.centre_rms, "pause must be quieter than the centre");
+        s.extend(std::iter::repeat_n(0.0, seg));
+        s.extend((0..seg).map(tone));
+        s
     }
 
+    /// THE BUG THIS FIXES: a word's start reported LATE, i.e. the boundary sits
+    /// inside the second word. Searching backward must walk out of the word and land
+    /// in the middle of the preceding pause, so the cut takes the whole word.
     #[test]
-    fn quietest_point_needs_a_full_window() {
+    fn nearest_pause_backward_from_inside_a_word() {
+        let s = word_pause_word();
+        // Boundary at 0.25 s = 50 ms INTO the second tone (a "late" word start).
+        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.25, PauseDir::Backward, 0.25)
+            .expect("a pause precedes the word");
+        assert!(c > 0.10 && c < 0.20, "centre {c} should be inside the pause");
+        assert!((c - 0.15).abs() < 0.02, "centre {c} should be mid-pause");
+    }
+
+    /// The mirror case: a word's end reported EARLY, searching forward.
+    #[test]
+    fn nearest_pause_forward_from_inside_a_word() {
+        let s = word_pause_word();
+        // Boundary at 0.05 s = inside the FIRST tone.
+        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.05, PauseDir::Forward, 0.25)
+            .expect("a pause follows the word");
+        assert!((c - 0.15).abs() < 0.02, "centre {c} should be mid-pause");
+    }
+
+    /// Already sitting in the pause: stay in it (snap to its centre), don't wander.
+    #[test]
+    fn nearest_pause_from_inside_the_pause() {
+        let s = word_pause_word();
+        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.12, PauseDir::Backward, 0.25).unwrap();
+        assert!((c - 0.15).abs() < 0.02, "centre {c} should be mid-pause");
+    }
+
+    /// Continuous speech (no pause) and uniform silence both mean "don't move".
+    #[test]
+    fn nearest_pause_gives_up_without_a_pause() {
         let sr = 16_000.0;
-        assert!(quietest_point(&[0.0; 10], sr, 0.02).is_none());
-        assert!(quietest_point(&[], sr, 0.02).is_none());
-        assert!(quietest_point(&[0.0; 1000], 0.0, 0.02).is_none());
+        let n = (sr * 0.3) as usize;
+        let tone: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * 440.0 * i as f64 / sr).sin() * 0.5)
+            .collect();
+        assert!(nearest_pause_centre(&tone, sr, 0.02, 0.15, PauseDir::Backward, 0.25).is_none());
+        let silence = vec![0.0; n];
+        assert!(nearest_pause_centre(&silence, sr, 0.02, 0.15, PauseDir::Forward, 0.25).is_none());
+        // Too short to analyse / nonsense rate.
+        assert!(nearest_pause_centre(&[0.0; 10], sr, 0.02, 0.0, PauseDir::Forward, 0.25).is_none());
+        assert!(nearest_pause_centre(&tone, 0.0, 0.02, 0.0, PauseDir::Forward, 0.25).is_none());
     }
 
     fn sine(freq: f64, amp: f64, secs: f64, sr: f64) -> Vec<f64> {
