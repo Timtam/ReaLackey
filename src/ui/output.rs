@@ -616,7 +616,14 @@ function updateAssistant(h){var c=document.getElementById('cur');if(c){c.innerHT
 function startReasoning(){var o=document.getElementById('rcur');if(o)o.removeAttribute('id');addBlock('<details class="reasoning"><summary>Reasoning</summary><div class="rbody" id="rcur"></div></details>');}
 function updateReasoning(h){var c=document.getElementById('rcur');if(c){c.innerHTML=h;sd();}}
 function setToolResult(h){var l=document.querySelectorAll('#log details.tool');if(l.length){var t=l[l.length-1].querySelector('.tres');if(t){t.innerHTML=h;sd();}}}
-function liveAnnounce(t){var l=document.getElementById('live');if(!l)return;l.textContent='';setTimeout(function(){l.textContent=t;setTimeout(function(){l.textContent='';},2500);},60);}
+var _liveT=null,_liveAlt=false;
+// Announce via the aria-live region. Set the text IMMEDIATELY (the old 60 ms
+// clear-then-set delayed every announcement and, under fast navigation, let
+// overlapping timers clobber each other so words were silently skipped). The
+// toggled zero-width space guarantees the text differs from the previous
+// announcement — screen readers drop a live-region update that repeats the same
+// string, which otherwise silences repeated words ("the" ... "the").
+function liveAnnounce(t){var l=document.getElementById('live');if(!l||!t)return;if(_liveT){clearTimeout(_liveT);_liveT=null;}_liveAlt=!_liveAlt;l.textContent=t+(_liveAlt?'\u200B':'');_liveT=setTimeout(function(){l.textContent='';_liveT=null;},4000);}
 function setStatus(t){var s=document.getElementById('status');if(s)s.textContent=t;}
 function focusInput(){var m=document.getElementById('msg');if(m)m.focus();}
 // Prompt presets: the host shows a native picker; on a choice it calls
@@ -711,7 +718,10 @@ document.addEventListener('keydown',function(e){
       cancelArmed=false;
       ctx=null;buf=null;
       try{ var AC=window.AudioContext||window.webkitAudioContext;
-        if(AC && d.wav){ ctx=new AC(); ctx.decodeAudioData(b64bytes(d.wav).buffer,function(b){buf=b;},function(){buf=null;}); } }catch(e){ctx=null;buf=null;}
+        // latencyHint 'interactive' asks for the smallest output buffer — this is
+        // keypress-driven feedback, so latency matters more than power draw.
+        if(AC && d.wav){ try{ ctx=new AC({latencyHint:'interactive'}); }catch(_){ ctx=new AC(); }
+          ctx.decodeAudioData(b64bytes(d.wav).buffer,function(b){buf=b;},function(){buf=null;}); } }catch(e){ctx=null;buf=null;}
       $('cutItem').textContent=d.item?(' — '+d.item):'';
       $('cutAudioMode').textContent='Audio: both';
       G=$('cutGrid'); render();
@@ -740,6 +750,14 @@ document.addEventListener('keydown',function(e){
   function clearSel(){ for(var i=0;i<st.words.length;i++) st.words[i].sel=false; st.anchor=null; }
   function extend(){ if(st.anchor===null) st.anchor=st.caret; var a=Math.min(st.anchor,st.caret),b=Math.max(st.anchor,st.caret); for(var i=0;i<st.words.length;i++) st.words[i].sel=(i>=a&&i<=b); }
 
+  function summary(){
+    var rmDur=0,spans=0,prev=false;
+    for(var j=0;j<st.words.length;j++){ var w2=st.words[j]; if(w2.rm){ rmDur+=Math.max(0,w2.end-w2.start); if(!prev)spans++; } prev=w2.rm; }
+    var total=st.duration||sumDur(),kept=Math.max(0,total-rmDur);
+    $('cutSummary').textContent='Cutting '+spans+' span'+(spans===1?'':'s')+' · '+rmDur.toFixed(1)+' s removed · '+(total>0?Math.round(kept/total*100):100)+'% kept';
+  }
+  // Build the token DOM ONCE (on open). The token set never changes — only their
+  // state does — so navigation must not rebuild it.
   function render(){
     var h='',cs=-1;
     for(var i=0;i<st.words.length;i++){ var w=st.words[i];
@@ -748,10 +766,21 @@ document.addEventListener('keydown',function(e){
     }
     if(cs!==-1)h+='</span>';
     G.innerHTML=h;
-    var rmDur=0,spans=0,prev=false;
-    for(var j=0;j<st.words.length;j++){ var w2=st.words[j]; if(w2.rm){ rmDur+=Math.max(0,w2.end-w2.start); if(!prev)spans++; } prev=w2.rm; }
-    var total=st.duration||sumDur(),kept=Math.max(0,total-rmDur);
-    $('cutSummary').textContent='Cutting '+spans+' span'+(spans===1?'':'s')+' · '+rmDur.toFixed(1)+' s removed · '+(total>0?Math.round(kept/total*100):100)+'% kept';
+    summary();
+  }
+  // Incremental repaint: sync only the classes that changed. Rebuilding innerHTML
+  // on every arrow key was both slow on long transcripts AND tore down the DOM
+  // under the screen reader mid-announcement, which dropped spoken words.
+  function paint(){
+    if(!G) return;
+    var els=G.getElementsByClassName('cut-tok'),n=Math.min(els.length,st.words.length);
+    for(var i=0;i<n;i++){ var w=st.words[i];
+      var c='cut-tok'+(i===st.caret?' cur':'')+(w.sel?' sel':'')+(w.rm?' rm':'');
+      if(els[i].className!==c) els[i].className=c;
+    }
+    var cur=els[st.caret];
+    if(cur&&cur.scrollIntoView){ try{ cur.scrollIntoView({block:'nearest'}); }catch(_){ } }
+    summary();
   }
   function sumDur(){ var t=0; for(var i=0;i<st.words.length;i++) t+=Math.max(0,st.words[i].end-st.words[i].start); return t; }
 
@@ -760,7 +789,13 @@ document.addEventListener('keydown',function(e){
   function stopAll(){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); stopPreview(); }
   function resume(){ if(ctx && ctx.state==='suspended'){ try{ctx.resume();}catch(e){} } }
   function playRange(s,e){ if(!ctx||!buf)return; stopSnip(); try{ var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination); n.start(0,Math.max(0,s),Math.max(0.02,e-s)); curSrc=n; }catch(_){} }
-  function snippet(s,e){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); if(st.mode==='spoken')return; playTimer=setTimeout(function(){ playRange(s,e); },140); }
+  // `fast` = a single deliberate keypress: start the audio NOW. Only auto-repeat
+  // (holding an arrow) settles first, so holding a key doesn't machine-gun the
+  // audio. The old code delayed EVERY press by 140 ms, which is what made single
+  // arrow presses feel sluggish.
+  function snippet(s,e,fast){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); if(st.mode==='spoken')return;
+    if(fast){ playRange(s,e); return; }
+    playTimer=setTimeout(function(){ playRange(s,e); },110); }
   function playEdited(){ if(!ctx||!buf){ announce('No audio to preview'); return; } resume(); stopAll();
     var ranges=[],cur=null;
     for(var i=0;i<st.words.length;i++){ var w=st.words[i]; if(!w.rm){ if(cur && w.start<=cur.e+0.05) cur.e=Math.max(cur.e,w.end); else { if(cur)ranges.push(cur); cur={s:w.start,e:w.end}; } } }
@@ -775,15 +810,15 @@ document.addEventListener('keydown',function(e){
   function apply(s){ for(var i=0;i<st.words.length;i++) st.words[i].rm=!!s[i]; }
   function pushUndo(){ st.undo.push(snap()); st.redo.length=0; }
   function rmSummary(){ var n=st.words.filter(function(w){return w.rm;}).length; return n+' word'+(n===1?'':'s')+' to remove'; }
-  function undo(){ if(!st.undo.length){announce('Nothing to undo');return;} st.redo.push(snap()); apply(st.undo.pop()); render(); announce('Undone. '+rmSummary()); }
-  function redo(){ if(!st.redo.length){announce('Nothing to redo');return;} st.undo.push(snap()); apply(st.redo.pop()); render(); announce('Redone. '+rmSummary()); }
+  function undo(){ if(!st.undo.length){announce('Nothing to undo');return;} st.redo.push(snap()); apply(st.undo.pop()); paint(); announce('Undone. '+rmSummary()); }
+  function redo(){ if(!st.redo.length){announce('Nothing to redo');return;} st.undo.push(snap()); apply(st.redo.pop()); paint(); announce('Redone. '+rmSummary()); }
   function toggleRemove(){ pushUndo(); var any=st.words.some(function(w){return w.sel;});
     if(any){ var all=st.words.filter(function(w){return w.sel;}).every(function(w){return w.rm;}); for(var i=0;i<st.words.length;i++) if(st.words[i].sel) st.words[i].rm=!all; clearSel(); }
     else { st.words[st.caret].rm=!st.words[st.caret].rm; } }
 
-  function afterNav(sentence){ render(); var w=st.words[st.caret];
+  function afterNav(sentence,fast){ paint(); var w=st.words[st.caret];
     if(st.mode!=='audio') announce(sentence?sentText(w.s):stWord());
-    snippet(w.start,w.end); }
+    snippet(w.start,w.end,fast!==false); }
 
   function focusables(){ return Array.prototype.slice.call(document.querySelectorAll('#cutModal button, #cutGrid')); }
   function postCancel(){ try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:cancel'})); }catch(e){} closeCutEditor(); }
@@ -805,24 +840,27 @@ document.addEventListener('keydown',function(e){
     if(!inGrid) return;  // let the footer buttons handle their own Enter/Space
     resume();
     var handled=true;
-    if(mod && k==='Home'){ st.caret=0; clearSel(); afterNav(false); }
-    else if(mod && k==='End'){ st.caret=st.words.length-1; clearSel(); afterNav(false); }
+    // A held-down arrow (auto-repeat) settles before playing; a single deliberate
+    // press plays immediately.
+    var fast=!e.repeat;
+    if(mod && k==='Home'){ st.caret=0; clearSel(); afterNav(false,fast); }
+    else if(mod && k==='End'){ st.caret=st.words.length-1; clearSel(); afterNav(false,fast); }
     else if(e.shiftKey && isArrow(k)){
       if(k==='ArrowRight') st.caret=wordR(st.caret);
       else if(k==='ArrowLeft') st.caret=wordL(st.caret);
       else if(k==='ArrowDown') st.caret=firstOf(Math.min(maxSent(),st.words[st.caret].s+1));
       else st.caret=firstOf(Math.max(0,st.words[st.caret].s-1));
-      extend(); afterNav(k==='ArrowUp'||k==='ArrowDown');
+      extend(); afterNav(k==='ArrowUp'||k==='ArrowDown',fast);
     }
-    else if(k==='ArrowRight'){ st.caret=wordR(st.caret); clearSel(); afterNav(false); }
-    else if(k==='ArrowLeft'){ st.caret=wordL(st.caret); clearSel(); afterNav(false); }
-    else if(k==='ArrowDown'){ st.caret=firstOf(Math.min(maxSent(),st.words[st.caret].s+1)); clearSel(); afterNav(true); }
-    else if(k==='ArrowUp'){ st.caret=firstOf(Math.max(0,st.words[st.caret].s-1)); clearSel(); afterNav(true); }
-    else if(k==='Home'){ st.caret=firstOf(st.words[st.caret].s); clearSel(); afterNav(false); }
-    else if(k==='End'){ st.caret=lastOf(st.words[st.caret].s); clearSel(); afterNav(false); }
-    else if(k===' '||k==='Spacebar'){ var w=st.words[st.caret]; w.sel=!w.sel; st.anchor=w.sel?st.caret:null; render(); if(st.mode!=='audio') announce(bare(w.t)+(w.sel?', selected':', deselected')); snippet(w.start,w.end); }
-    else if(k==='Delete'||k==='Backspace'){ toggleRemove(); render(); announce('Removed. '+rmSummary()); }
-    else if(k==='Escape'){ var anySel=st.words.some(function(w){return w.sel;}); if(anySel){ clearSel(); render(); announce('Selection cleared'); } else { requestCancel(); } }
+    else if(k==='ArrowRight'){ st.caret=wordR(st.caret); clearSel(); afterNav(false,fast); }
+    else if(k==='ArrowLeft'){ st.caret=wordL(st.caret); clearSel(); afterNav(false,fast); }
+    else if(k==='ArrowDown'){ st.caret=firstOf(Math.min(maxSent(),st.words[st.caret].s+1)); clearSel(); afterNav(true,fast); }
+    else if(k==='ArrowUp'){ st.caret=firstOf(Math.max(0,st.words[st.caret].s-1)); clearSel(); afterNav(true,fast); }
+    else if(k==='Home'){ st.caret=firstOf(st.words[st.caret].s); clearSel(); afterNav(false,fast); }
+    else if(k==='End'){ st.caret=lastOf(st.words[st.caret].s); clearSel(); afterNav(false,fast); }
+    else if(k===' '||k==='Spacebar'){ var w=st.words[st.caret]; w.sel=!w.sel; st.anchor=w.sel?st.caret:null; paint(); if(st.mode!=='audio') announce(bare(w.t)+(w.sel?', selected':', deselected')); snippet(w.start,w.end,true); }
+    else if(k==='Delete'||k==='Backspace'){ toggleRemove(); paint(); announce('Removed. '+rmSummary()); }
+    else if(k==='Escape'){ var anySel=st.words.some(function(w){return w.sel;}); if(anySel){ clearSel(); paint(); announce('Selection cleared'); } else { requestCancel(); } }
     else handled=false;
     if(handled) e.preventDefault();
   },true);
@@ -833,7 +871,7 @@ document.addEventListener('keydown',function(e){
   $('cutPlay').addEventListener('click',function(){ playEdited(); });
   $('cutCancel').addEventListener('click',function(){ requestCancel(); });
   $('cutConfirm').addEventListener('click',function(){ confirmCut(); });
-  $('cutGrid').addEventListener('click',function(e){ var el=e.target.closest('.cut-tok'); if(!el||!st)return; st.caret=+el.getAttribute('data-i'); clearSel(); afterNav(false); G.focus(); });
+  $('cutGrid').addEventListener('click',function(e){ var el=e.target.closest('.cut-tok'); if(!el||!st)return; st.caret=+el.getAttribute('data-i'); clearSel(); afterNav(false,true); G.focus(); });
 })();
 // Tell the host the page has loaded (the worker waits on this before opening the
 // cut-by-text editor modal, so it isn't injected before openCutEditor exists).
@@ -875,9 +913,14 @@ try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'ui:ready'})); }cat
         };
         #[cfg(not(windows))]
         let data_dir: Option<PathBuf> = None;
-        let mut web_context = WebContext::new(data_dir);
+        // wry requires the WebContext to OUTLIVE the WebView: dropping it while the
+        // webview is still alive breaks custom protocols (notably on macOS). It used
+        // to be a local that died at the end of this function. The pane lives for the
+        // process, so leak it deliberately — one small allocation per webview build,
+        // and builds happen at most once per REAPER session.
+        let web_context: &'static mut WebContext = Box::leak(Box::new(WebContext::new(data_dir)));
 
-        WebViewBuilder::new_with_web_context(&mut web_context)
+        WebViewBuilder::new_with_web_context(web_context)
             .with_bounds(bounds(x, y, w, h))
             .with_html(BASE_HTML)
             .with_transparent(false)

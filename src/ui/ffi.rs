@@ -18,7 +18,6 @@ extern "C" {
     fn ui_show(parent_hwnd: *mut c_void);
     fn ui_append_output(utf8: *const c_char);
     fn ui_set_status(utf8: *const c_char);
-    fn ui_close();
     fn ui_add_menu_item(hmenu: *mut c_void, label: *const c_char, command_id: c_int);
     fn ui_create_submenu() -> *mut c_void;
     fn ui_attach_submenu(parent_hmenu: *mut c_void, submenu: *mut c_void, title: *const c_char);
@@ -137,12 +136,11 @@ pub fn progress_close() {
     unsafe { ui_progress_close() }
 }
 
-/// Destroy the dialog window. Currently unused (the window persists for the
-/// process; see the webview `ManuallyDrop` note in `output.rs`).
-#[allow(dead_code)]
-pub fn close() {
-    unsafe { ui_close() }
-}
+// NOTE: the shim also exports `ui_close()` (DestroyWindow), deliberately NOT bound
+// here. Closing the dialog HIDES it (see ui_shim.cpp) so the conversation AND the
+// built webview survive — destroying it would force a full WebView2 cold start (a
+// multi-second stall) on the next open. If you ever need a real teardown, bind it
+// then, and know you are forfeiting the session's warm pane.
 
 /// The dialog's native window handle (null if the dialog isn't created yet).
 pub fn get_hwnd() -> *mut c_void {
