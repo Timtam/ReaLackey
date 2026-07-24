@@ -73,6 +73,13 @@ void ui_focus_after_webview(int forward);
 int ui_window_rect(void* hwnd, int* x, int* y, int* w, int* h);
 void ui_window_to_front(void* hwnd);
 
+// Hide the assistant window (webview Close button / Cmd+W); same path as [x].
+void ui_request_close(void);
+// System-clipboard bridge for the webview composer (macOS lacks native Cmd+C/V
+// in the SWELL-hosted WKWebView). Text is UTF-8.
+void ui_clipboard_set_text(const char* utf8);
+int  ui_clipboard_get_text(char* buf, int bufsz);
+
 // Find the first visible top-level window whose title contains `needle`
 // (case-insensitive), as a void* HWND, or NULL if none. Used to locate REAPER's
 // floating Video window (which has no API-exposed handle) for capture.

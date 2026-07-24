@@ -572,8 +572,9 @@ details.help li{margin:2px 0;}
 <textarea id="msg" rows="1" aria-label="Message the assistant" placeholder="Ask the assistant…"></textarea>
 <button id="preset" type="button" aria-label="Insert a saved prompt preset">Presets</button>
 <button id="send" type="submit">Send</button>
+<button id="closewin" type="button" aria-label="Close the assistant window">Close</button>
 </form>
-<details class="help"><summary>Keyboard shortcuts</summary><ul><li>Enter sends; Shift+Enter starts a new line.</li><li>Alt+1 through Alt+0 read that message; press the same combo again quickly to copy it.</li><li>Alt+P inserts a saved prompt preset.</li><li>Escape stops the assistant while it is working.</li></ul></details>
+<details class="help"><summary>Keyboard shortcuts</summary><ul><li>Enter sends; Shift+Enter starts a new line.</li><li>Alt+1 through Alt+0 read that message; press the same combo again quickly to copy it.</li><li>Alt+P inserts a saved prompt preset.</li><li>Escape stops the assistant while it is working.</li><li>Command/Ctrl+W closes the window (it keeps your conversation and reopens instantly).</li></ul></details>
 <div id="cutModal" hidden role="dialog" aria-modal="true" aria-label="Cut by text editor">
   <div class="cut-card">
     <div class="cut-head">
@@ -655,6 +656,20 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
   var f=document.getElementById('composer'),m=document.getElementById('msg');
   function send(){var t=m.value;if(!t.trim())return;m.value='';grow();window.ipc.postMessage(JSON.stringify({t:'submit',text:t}));}
   f.addEventListener('submit',function(e){e.preventDefault();send();});
+  // Bridge clipboard for the composer. A SWELL-hosted WKWebView on macOS doesn't
+  // get native Cmd+C/X/V, so route the Cmd variants (metaKey) through the host,
+  // which reads/writes the system pasteboard. Ctrl variants (Windows) fall through
+  // to the webview's own, already-working native editing.
+  function selText(){ return m.value.substring(m.selectionStart,m.selectionEnd); }
+  function clipKey(e){
+    if(!e.metaKey||e.ctrlKey||e.altKey) return false;
+    var k=(e.key||'').toLowerCase();
+    if(k==='c'||k==='x'){ var s=selText(); if(s){ window.ipc.postMessage(JSON.stringify({t:'clip:set',text:s}));
+        if(k==='x'){ var a=m.selectionStart,b=m.selectionEnd; m.value=m.value.slice(0,a)+m.value.slice(b); m.selectionStart=m.selectionEnd=a; grow(); } }
+      e.preventDefault(); return true; }
+    if(k==='v'){ window.ipc.postMessage(JSON.stringify({t:'clip:paste'})); e.preventDefault(); return true; }
+    return false;
+  }
   m.addEventListener('keydown',function(e){
     // Enter sends; Shift+Enter is a newline. Skip while an IME composition is
     // in progress (isComposing) so committing the composition doesn't submit.
@@ -662,9 +677,17 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
     // Escape stops an in-flight turn — but only while generating, so a stray/
     // reflexive Escape at rest does nothing.
     else if(e.key==='Escape'&&generating){e.preventDefault();window.ipc.postMessage(JSON.stringify({t:'cancel'}));}
+    else clipKey(e);
   });
   m.addEventListener('input',grow);
   var pbtn=document.getElementById('preset');if(pbtn)pbtn.addEventListener('click',pickPreset);
+  var xbtn=document.getElementById('closewin');if(xbtn)xbtn.addEventListener('click',function(){window.ipc.postMessage(JSON.stringify({t:'window:close'}));});
+  // Cmd/Ctrl+W closes the window everywhere (works even when the webview has focus,
+  // which on macOS is the only reliable way for a VoiceOver user to close it).
+  document.addEventListener('keydown',function(e){
+    if((e.metaKey||e.ctrlKey)&&!e.altKey&&!e.shiftKey&&(e.key||'').toLowerCase()==='w'){
+      e.preventDefault(); if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'window:close'})); }
+  });
   grow();focusInput();
 })();
 // Links open in the user's default browser; the chat pane must never navigate

@@ -100,6 +100,22 @@ pub fn on_webview_message(json: &str) {
         // The webview page finished loading — the worker waits on this before it
         // injects the cut-by-text editor modal.
         Some("ui:ready") => crate::ui::output::set_webview_ready(),
+        // The webview's Close button / Cmd+W: hide the window (same as the [x]).
+        Some("window:close") => crate::ui::ffi::request_close(),
+        // Composer clipboard bridge (macOS lacks native Cmd+C/V in the WKWebview):
+        // copy/cut hand us the selection to put on the system clipboard; paste asks
+        // us to read it and splice it in at the caret.
+        Some("clip:set") => {
+            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                crate::ui::ffi::clipboard_set(text);
+            }
+        }
+        Some("clip:paste") => {
+            let text = crate::ui::ffi::clipboard_get();
+            if !text.is_empty() {
+                crate::ui::output::insert_preset(&text); // splices at the composer caret
+            }
+        }
         // Cut-by-text editor: the user confirmed (with the per-word keep flags) or
         // cancelled. Hand the outcome to the worker awaiting it.
         Some("cut:save") => {

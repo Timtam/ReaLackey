@@ -21,6 +21,7 @@
   #define RAAI_DLGRET INT_PTR
 #endif
 
+#include <cstring>       // strlen/memcpy for the clipboard bridge
 #include "resource.h"
 #include "ui_shim.h"
 
@@ -781,6 +782,81 @@ extern "C" void ui_window_to_front(void* hwnd) {
   if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
 #endif
   SetForegroundWindow(h);
+}
+
+// ---- window close + clipboard bridge (macOS composer editing) ---------------
+// On macOS the WKWebView owns the whole window and swallows keys, so the SWELL
+// dialog never sees Esc/close and there is no reachable close affordance. The
+// webview's Close button / Cmd+W posts here; route through WM_CLOSE so it takes
+// the same hide-not-destroy path as the native [x], keeping the warm webview and
+// the conversation history.
+extern "C" void ui_request_close() {
+  if (g_dlg) SendMessage(g_dlg, WM_CLOSE, 0, 0);
+}
+
+// Put UTF-8 text on the SYSTEM clipboard. A SWELL-hosted WKWebView doesn't get
+// native Cmd-key editing, so the composer routes Cmd+C/X here. On SWELL this
+// writes NSPasteboard; on Windows the native path already works but this stays
+// correct (CF_UNICODETEXT so umlauts survive).
+extern "C" void ui_clipboard_set_text(const char* utf8) {
+  if (!utf8) return;
+  if (!OpenClipboard(g_dlg)) return;
+  EmptyClipboard();
+#ifdef _WIN32
+  std::wstring w = to_wide(utf8);
+  size_t bytes = (w.size() + 1) * sizeof(wchar_t);
+  HANDLE h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+  if (h) {
+    void* p = GlobalLock(h);
+    if (p) { memcpy(p, w.c_str(), bytes); GlobalUnlock(h); SetClipboardData(CF_UNICODETEXT, h); }
+    else GlobalFree(h);
+  }
+#else
+  size_t bytes = strlen(utf8) + 1;
+  HANDLE h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+  if (h) {
+    void* p = GlobalLock(h);
+    // SetClipboardData takes ownership on success (freed by SWELL/Win32) — don't free.
+    if (p) { memcpy(p, utf8, bytes); GlobalUnlock(h); SetClipboardData(CF_TEXT, h); }
+    else GlobalFree(h);
+  }
+#endif
+  CloseClipboard();
+}
+
+// Read the system clipboard as UTF-8 into `buf` (NUL-terminated). Returns bytes
+// written excluding the NUL; 0 if empty/unavailable/too small.
+extern "C" int ui_clipboard_get_text(char* buf, int bufsz) {
+  if (buf && bufsz > 0) buf[0] = 0;
+  if (!buf || bufsz <= 1) return 0;
+  if (!OpenClipboard(g_dlg)) return 0;
+  int written = 0;
+#ifdef _WIN32
+  HANDLE h = GetClipboardData(CF_UNICODETEXT);
+  if (h) {
+    const wchar_t* w = (const wchar_t*)GlobalLock(h);
+    if (w) {
+      std::string s = to_utf8(w);
+      int n = (int)s.size();
+      if (n > bufsz - 1) n = bufsz - 1;
+      memcpy(buf, s.data(), (size_t)n); buf[n] = 0; written = n;
+      GlobalUnlock(h);
+    }
+  }
+#else
+  HANDLE h = GetClipboardData(CF_TEXT);
+  if (h) {
+    const char* p = (const char*)GlobalLock(h);
+    if (p) {
+      int n = (int)strlen(p);
+      if (n > bufsz - 1) n = bufsz - 1;
+      memcpy(buf, p, (size_t)n); buf[n] = 0; written = n;
+      GlobalUnlock(h);
+    }
+  }
+#endif
+  CloseClipboard();
+  return written;
 }
 
 // Find the first VISIBLE top-level window whose title contains `needle`

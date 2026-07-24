@@ -22,6 +22,9 @@ extern "C" {
     fn ui_create_submenu() -> *mut c_void;
     fn ui_attach_submenu(parent_hmenu: *mut c_void, submenu: *mut c_void, title: *const c_char);
     fn ui_get_hwnd() -> *mut c_void;
+    fn ui_request_close();
+    fn ui_clipboard_set_text(utf8: *const c_char);
+    fn ui_clipboard_get_text(buf: *mut c_char, buf_sz: c_int) -> c_int;
     fn ui_output_bounds(x: *mut c_int, y: *mut c_int, w: *mut c_int, h: *mut c_int) -> c_int;
     fn ui_set_webview_active(active: c_int);
     fn ui_translate_accel(msg: *mut c_void) -> c_int;
@@ -145,6 +148,32 @@ pub fn progress_close() {
 /// The dialog's native window handle (null if the dialog isn't created yet).
 pub fn get_hwnd() -> *mut c_void {
     unsafe { ui_get_hwnd() }
+}
+
+/// Hide the assistant window (from the webview's Close button / Cmd+W). Same path
+/// as the native `[x]`: the window + webview + history survive.
+pub fn request_close() {
+    unsafe { ui_request_close() }
+}
+
+/// Put `text` on the system clipboard (webview composer Cmd+C/X).
+pub fn clipboard_set(text: &str) {
+    if let Some(c) = to_cstring(text) {
+        unsafe { ui_clipboard_set_text(c.as_ptr()) }
+    }
+}
+
+/// Read the system clipboard as text (webview composer Cmd+V). Empty if unavailable.
+pub fn clipboard_get() -> String {
+    // Composer pastes are small; one generous buffer, truncate an absurd paste.
+    const CAP: usize = 1024 * 1024;
+    let mut buf = vec![0u8; CAP];
+    let n = unsafe { ui_clipboard_get_text(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
+    if n <= 0 {
+        return String::new();
+    }
+    let end = (n as usize).min(CAP - 1);
+    String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
 /// Find the first visible top-level window whose title contains `needle`
