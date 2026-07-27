@@ -26,7 +26,12 @@ reaper-macros = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "955
 # --- Async worker + HTTP/SSE (no Anthropic SDK; raw reqwest+serde) -----------
 tokio        = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 tokio-util   = { version = "0.7", default-features = false }   # CancellationToken
-reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
+# `rustls-tls-native-roots` ADDS the OS trust store on top of the bundled Mozilla
+# roots (reqwest loads both). Without it we trust only webpki-roots, so any
+# TLS-inspecting middlebox — corporate proxy, antivirus (Kaspersky/ESET/360), a
+# captive network — fails the handshake even though the same URL works in a
+# browser, because its private root lives in the OS store. See GitHub issue #3.
+reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "stream", "json", "multipart"] }
 futures-util = { version = "0.3", default-features = false }
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"

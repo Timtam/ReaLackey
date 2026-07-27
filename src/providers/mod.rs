@@ -15,6 +15,43 @@ use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
+/// Render a network error with its CAUSE, not just the outer message.
+///
+/// reqwest's `Display` stops at "error sending request for url (…)", which tells a
+/// user nothing — the actionable part (DNS failure, TLS handshake / unknown issuer,
+/// connection refused, timeout, proxy) lives in the `source()` chain. We walk it and
+/// append each distinct link, then add a hint for the causes users can act on.
+pub fn http_error_detail(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut src = err.source();
+    while let Some(e) = src {
+        let s = e.to_string();
+        // Skip links that just repeat their parent (common in wrapped IO errors).
+        if !out.contains(&s) {
+            out.push_str(": ");
+            out.push_str(&s);
+        }
+        src = e.source();
+    }
+    let low = out.to_lowercase();
+    if low.contains("certificate")
+        || low.contains("unknownissuer")
+        || low.contains("tls")
+        || low.contains("handshake")
+    {
+        out.push_str(
+            "\n\nHint: the TLS certificate wasn't trusted. This usually means an antivirus, \
+             firewall or corporate proxy is inspecting HTTPS traffic. Its root certificate must \
+             be installed in the operating system's trust store.",
+        );
+    } else if low.contains("dns") || low.contains("resolve") {
+        out.push_str("\n\nHint: the host name could not be resolved — check the base URL, your DNS, or a VPN/proxy.");
+    } else if low.contains("timed out") || low.contains("timeout") {
+        out.push_str("\n\nHint: the server didn't answer in time — check connectivity, a VPN, or a proxy that blocks the request.");
+    }
+    out
+}
+
 /// Model capabilities that gate features (vision, direct audio). Cross-cut per
 /// design §kap-capabilities. Surfaced in the UI from Phase 5.
 #[allow(dead_code)]
@@ -251,5 +288,54 @@ pub fn build_provider_with_key(
         registry::AdapterKind::PerplexityAgent => Box::new(
             perplexity_agent::PerplexityAgentProvider::with_key(key, true),
         ),
+    }
+}
+
+#[cfg(test)]
+mod error_detail_tests {
+    use super::http_error_detail;
+    use std::error::Error;
+    use std::fmt;
+
+    #[derive(Debug)]
+    struct Chained(&'static str, Option<Box<Chained>>);
+    impl fmt::Display for Chained {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl Error for Chained {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.1.as_deref().map(|e| e as &(dyn Error + 'static))
+        }
+    }
+
+    #[test]
+    fn appends_the_source_chain_and_a_tls_hint() {
+        // The shape reqwest produces: an opaque outer message hiding the real cause.
+        let err = Chained(
+            "error sending request for url (https://api.example.com/v1/models)",
+            Some(Box::new(Chained(
+                "invalid peer certificate: UnknownIssuer",
+                None,
+            ))),
+        );
+        let s = http_error_detail(&err);
+        assert!(s.contains("error sending request"), "{s}");
+        assert!(s.contains("UnknownIssuer"), "cause must be surfaced: {s}");
+        assert!(s.contains("antivirus"), "TLS hint expected: {s}");
+    }
+
+    #[test]
+    fn hints_on_dns_and_timeout_and_skips_repeats() {
+        let dns = Chained("error sending request", Some(Box::new(Chained("dns error", None))));
+        assert!(http_error_detail(&dns).contains("resolved"));
+
+        let to = Chained("operation timed out", None);
+        assert!(http_error_detail(&to).contains("didn't answer in time"));
+
+        // A source that merely repeats its parent adds nothing.
+        let dup = Chained("same text", Some(Box::new(Chained("same text", None))));
+        assert_eq!(http_error_detail(&dup), "same text");
     }
 }

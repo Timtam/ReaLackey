@@ -90,14 +90,22 @@ async fn fetch_async(
         }
     };
 
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    // Report the underlying cause (TLS/DNS/connect), not just reqwest's opaque
+    // "error sending request for url (…)" — see GitHub issue #3.
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| crate::providers::http_error_detail(&e))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         let snippet: String = body.chars().take(300).collect();
         return Err(format!("HTTP {status}: {snippet}"));
     }
-    let val: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let val: Value = resp
+        .json()
+        .await
+        .map_err(|e| crate::providers::http_error_detail(&e))?;
     parse_models(&val)
 }
 

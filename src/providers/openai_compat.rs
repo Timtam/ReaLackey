@@ -119,7 +119,10 @@ impl LlmProvider for OpenAiCompatProvider {
 
             let resp = tokio::select! {
                 _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
-                r = send => r.map_err(|e| ProviderError::Http { status: None, message: e.to_string() })?,
+                r = send => r.map_err(|e| ProviderError::Http {
+                    status: None,
+                    message: crate::providers::http_error_detail(&e),
+                })?,
             };
 
             if resp.status().is_success() {

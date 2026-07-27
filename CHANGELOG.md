@@ -85,6 +85,17 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Fixed
 
+- **Connections behind antivirus / corporate proxies now work.** ReaLackey trusted
+  only its own bundled list of certificate authorities, so on machines where security
+  software or a company proxy inspects HTTPS traffic (common with Kaspersky, ESET,
+  360, Zscaler and similar), every request failed with an unhelpful "error sending
+  request" — even though the same URL opened fine in a browser. It now also trusts the
+  certificates installed in your **operating system's** store, like your browser does.
+  ([#3](https://github.com/Timtam/ReaLackey/issues/3))
+- **Network errors now say what actually went wrong.** Instead of just "error sending
+  request for url (…)", the message names the real cause — an untrusted certificate, a
+  DNS failure, a refused connection, a timeout — and adds a hint for the ones you can
+  act on. This applies to fetching models and to chat/transcription requests.
 - **Fetch models** now authenticates with the **top (highest-priority) key from the
   key list** — the one that would actually be used to send — instead of the "Add
   key" input field or the stale saved key. Reordering or editing the key list and
