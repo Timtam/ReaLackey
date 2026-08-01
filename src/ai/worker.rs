@@ -1659,6 +1659,54 @@ async fn run_cut_editor(
     CutEditorOutcome::Done { removed_seconds, cut: cut_result }
 }
 
+/// Render the cutter's boundary measurements as readable lines for the chat pane.
+///
+/// All times are seconds from the item's audio start, the same timeline the
+/// transcript uses, so "asked" and the measured values can be compared directly:
+/// if a word's attack survives a cut, either the measurement is late or the
+/// placement threw the margin away, and these numbers say which.
+fn cut_analysis_lines(cut: &Value) -> Vec<String> {
+    let Some(rows) = cut.get("analysis").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let num = |v: Option<&Value>| v.and_then(|x| x.as_f64()).unwrap_or(f64::NAN);
+    let pair = |v: Option<&Value>| {
+        let a = v.and_then(|x| x.as_array());
+        (
+            num(a.and_then(|x| x.first())),
+            num(a.and_then(|x| x.get(1))),
+        )
+    };
+    let mut out = vec![format!("Cut boundary analysis ({} cut(s)):", rows.len())];
+    for (i, r) in rows.iter().enumerate() {
+        let (a0, a1) = pair(r.get("asked"));
+        let (n0, n1) = pair(r.get("anchors"));
+        let (w0, w1) = pair(r.get("removed_word"));
+        out.push(format!(
+            "  {}. transcript said {a0:.3}–{a1:.3} · anchors {n0:.3}/{n1:.3} · \
+             previous word ends {:.3} · removed word measured {w0:.3}–{w1:.3} · \
+             next word starts {:.3}",
+            i + 1,
+            num(r.get("prev_word_ends")),
+            num(r.get("next_word_starts")),
+        ));
+    }
+    if let Some(n) = cut.get("joins_without_pause").and_then(|v| v.as_u64()) {
+        if n > 0 {
+            out.push(format!("  {n} join(s) had no pause to cut in (connected speech)."));
+        }
+    }
+    if let Some(n) = cut.get("snaps_rejected").and_then(|v| v.as_u64()) {
+        if n > 0 {
+            out.push(format!("  {n} boundary placement(s) declined; transcript times kept."));
+        }
+    }
+    out
+}
+
 /// Build the `ranges` argument for `remove_item_time_ranges`, carrying each span's
 /// SEARCH LIMITS: the end of the previous kept word and the start of the next one.
 ///
@@ -1706,7 +1754,14 @@ async fn handle_open_cut_editor_action(
 ) {
     let _ = ui_tx.send(UiEvent::Announce("Opening the cut-by-text editor\u{2026}".into()));
     match run_cut_editor(ui_tx, op_tx, task_rx, json!({}), true).await {
-        CutEditorOutcome::Done { removed_seconds, .. } => {
+        CutEditorOutcome::Done { removed_seconds, cut } => {
+            // The boundary measurements go into the chat pane, where they can be read
+            // and copied. Without this they lived only in the tool result, which this
+            // path discards — so the numbers that explain a mis-placed cut were
+            // invisible exactly when running the editor as an action.
+            for line in cut_analysis_lines(&cut) {
+                let _ = ui_tx.send(UiEvent::Notice(line));
+            }
             let _ = ui_tx.send(UiEvent::Announce(format!(
                 "Cut applied — {removed_seconds:.1} seconds removed."
             )));
