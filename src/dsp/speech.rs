@@ -31,12 +31,13 @@ use super::{percentile, Biquad};
 /// Analysis frame hop. 10 ms is the universal speech-analysis rate and puts the
 /// ±5 ms quantisation an order of magnitude below transcript error.
 const HOP: f64 = 0.010;
-/// Analysis window. Needs ≥4 pitch periods for a stable level estimate; 32 ms covers
-/// a 125 Hz male voice. (A lower voice gets a slightly ripplier envelope, which the
-/// smoothing below absorbs.)
-const WIN: f64 = 0.032;
-/// Envelope smoothing, from auditory temporal integration — the criterion is whether
-/// a splice is *audible*, not the raw RMS. Also bridges vocal-fry inter-pulse gaps.
+/// Analysis window. 20 ms resolves the 30-60 ms gaps that separate words in fast
+/// speech — a longer window plus smoothing spans more than such a gap and makes it
+/// invisible, which is exactly how an earlier version failed to see word boundaries
+/// at all. Pitch ripple is handled by smoothing the nucleus band only (below).
+const WIN: f64 = 0.020;
+/// Smoothing applied to the NUCLEUS band only: bridges glottal-pulse ripple so one
+/// vowel yields one syllable. Never applied to the level bands — see WIN.
 const SMOOTH: f64 = 0.030;
 /// A nucleus must stand this far above its flanking dips (de Jong & Wempe's
 /// validated syllable-nuclei method).
@@ -45,8 +46,6 @@ const NUCLEUS_PROMINENCE_DB: f64 = 2.0;
 /// can't be required: a run above the speech/silence split at least this long. Below
 /// the shortest vowel nucleus in fast speech (~60-80 ms), so it still rejects clicks.
 const MIN_UNVOICED_NUCLEUS: f64 = 0.040;
-/// A quiet run terminated by a burst within this long is a stop release, not a pause.
-const BURST_WINDOW: f64 = 0.040;
 
 /// How a boundary should be joined once placed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,16 +54,6 @@ pub enum Join {
     Butt,
     /// No silence exists here (connected speech). Splice anyway, but crossfade.
     Crossfade,
-}
-
-/// Result of placing one cut edge.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Splice {
-    /// Move the edge to this time (seconds from the analysed slice's start).
-    At(f64, Join),
-    /// The material gives no defensible answer — keep the caller's original time.
-    /// Reported, never silently swallowed.
-    Refused(Refusal),
 }
 
 /// Why a boundary could not be placed. Surfaced to the user: a detector that goes
@@ -89,14 +78,9 @@ pub struct SpeechAnalysis {
     bb: Vec<f64>,
     vb: Vec<f64>,
     hf: Vec<f64>,
-    /// Positive frame-to-frame rise, a cheap transient measure (burst detection).
-    flux: Vec<f64>,
-    flux_p90: f64,
     floor_bb: f64,
     floor_vb: f64,
     floor_hf: f64,
-    /// Otsu split between the silence and speech classes, in dB.
-    t_split: f64,
     contrast: f64,
     /// Nucleus times, ascending.
     pub nuclei: Vec<f64>,
@@ -125,9 +109,12 @@ impl SpeechAnalysis {
         let vb_sig = bandpass(&base, sample_rate, 60.0, 350.0);
         let hf_sig = highpass(&base, sample_rate, 3000.0_f64.min(nyq * 0.8));
 
-        let bb = smooth_db(&frame_db(&base, win, hop), hop, sample_rate);
-        let vb = smooth_db(&frame_db(&vb_sig, win, hop), hop, sample_rate);
-        let hf = smooth_db(&frame_db(&hf_sig, win, hop), hop, sample_rate);
+        // Level bands are NOT smoothed: smoothing spans a short inter-word gap and
+        // hides it. Only the nucleus band is smoothed, where pitch ripple would
+        // otherwise split one vowel into several syllables.
+        let bb = frame_db(&base, win, hop);
+        let vb = frame_db(&vb_sig, win, hop);
+        let hf = frame_db(&hf_sig, win, hop);
         // MID (300-3000 Hz) is where sonorant nuclei live; used only for nuclei.
         let mid = smooth_db(
             &frame_db(&bandpass(&base, sample_rate, 300.0, 3000.0_f64.min(nyq * 0.9)), win, hop),
@@ -138,14 +125,6 @@ impl SpeechAnalysis {
             return None;
         }
 
-        let flux: Vec<f64> = std::iter::once(0.0)
-            .chain(bb.windows(2).map(|w| (w[1] - w[0]).max(0.0)))
-            .collect();
-        let flux_p90 = {
-            let mut s = flux.clone();
-            s.sort_by(|a, b| a.total_cmp(b));
-            percentile(&s, 90.0).max(1e-6)
-        };
 
         let floor_bb = noise_floor_db(&bb);
         let floor_vb = noise_floor_db(&vb);
@@ -168,12 +147,9 @@ impl SpeechAnalysis {
             bb,
             vb,
             hf,
-            flux,
-            flux_p90,
             floor_bb,
             floor_vb,
             floor_hf,
-            t_split,
             contrast,
             nuclei,
             syllable_period,
@@ -187,25 +163,34 @@ impl SpeechAnalysis {
         k as f64 * self.hop
     }
 
-    /// The LAST nucleus belonging to the word spanning `[start, end]`, by nearest
-    /// centre — robust to a span that is shifted by more than its own length, which
-    /// "the loudest frame inside the span" is not.
-    pub fn last_nucleus_of(&self, start: f64, end: f64) -> Option<f64> {
-        self.nuclei_of(start, end).last().copied()
-    }
-    /// The FIRST nucleus belonging to that word.
-    pub fn first_nucleus_of(&self, start: f64, end: f64) -> Option<f64> {
-        self.nuclei_of(start, end).first().copied()
-    }
-
-    fn nuclei_of(&self, start: f64, end: f64) -> Vec<f64> {
-        let centre = (start + end) / 2.0;
-        let half = ((end - start).abs() / 2.0).max(self.syllable_period);
-        self.nuclei
-            .iter()
-            .copied()
-            .filter(|n| (n - centre).abs() <= half)
-            .collect()
+    /// The two anchoring nuclei for a removal, by NEAREST-CENTRE assignment over the
+    /// three spans involved: the previous kept word, the removed run, and the next
+    /// kept word.
+    ///
+    /// Assigning by "is it within some window of this word" is not good enough — a
+    /// window wide enough to survive the transcript's timing error also reaches into
+    /// the neighbouring word, and then the removed word's own nucleus gets used as an
+    /// anchor and the band collapses. Comparing distances to all three centres is
+    /// both simpler and robust to a span shifted by more than its own length, since
+    /// only the RELATIVE order of the centres matters.
+    pub fn anchors(
+        &self,
+        prev: Option<(f64, f64)>,
+        removed: (f64, f64),
+        next: Option<(f64, f64)>,
+    ) -> (Option<f64>, Option<f64>) {
+        let mid = |(a, b): (f64, f64)| (a + b) / 2.0;
+        let cr = mid(removed);
+        let cp = prev.map(mid);
+        let cn = next.map(mid);
+        let owns = |n: f64, own: f64| {
+            (n - own).abs() <= (n - cr).abs()
+                && cp.map_or(true, |c| c == own || (n - own).abs() <= (n - c).abs())
+                && cn.map_or(true, |c| c == own || (n - own).abs() <= (n - c).abs())
+        };
+        let a_prev = cp.and_then(|c| self.nuclei.iter().copied().rfind(|&n| owns(n, c)));
+        let a_next = cn.and_then(|c| self.nuclei.iter().copied().find(|&n| owns(n, c)));
+        (a_prev, a_next)
     }
 
     /// Count nuclei strictly inside a band — the caller uses this to check the word
@@ -215,76 +200,130 @@ impl SpeechAnalysis {
         self.nuclei.iter().filter(|&&n| n > a && n < b).count()
     }
 
-    /// Place one cut edge inside the band `[a_prev, a_next]` (the two anchoring
-    /// nuclei), preferring a time near `want`.
-    ///
-    /// The cost is continuous — there is no threshold that decides "pause" vs "not
-    /// pause", precisely because no such threshold generalises. A frame is cheap only
-    /// when EVERY band is quiet (`max` over the three, never a broadband sum): that
-    /// is what stops a weak fricative or a devoiced mora, whose broadband level
-    /// collapses but whose HF does not, from being mistaken for silence.
-    pub fn splice(&self, a_prev: f64, a_next: f64, want: f64) -> Splice {
-        // A band far longer than the speaker's own rhythm means the nuclei were
-        // mis-assigned; guessing inside it would be worse than declining.
-        let max_band = (1.5 * self.syllable_period).clamp(0.150, 0.400) * 2.0;
-        if a_next <= a_prev || (a_next - a_prev) > max_band.max(0.400) {
-            return Splice::Refused(Refusal::BandTooWide);
-        }
-        let (lo, hi) = (self.frame_at(a_prev), self.frame_at(a_next));
-        if hi <= lo + 1 {
-            return Splice::Refused(Refusal::NoMinimum);
-        }
-        let sigma = (0.5 * self.syllable_period).max(0.020);
-        let mut best = lo;
-        let mut best_cost = f64::INFINITY;
-        let mut costs = Vec::with_capacity(hi - lo + 1);
-        for k in lo..=hi {
-            let level = (self.bb[k] - self.floor_bb)
-                .max(self.vb[k] - self.floor_vb)
-                .max(self.hf[k] - self.floor_hf)
-                .max(0.0);
-            let dt = (self.time_of(k) - want) / sigma;
-            let c = level
-                + 6.0 * (self.flux[k] / self.flux_p90).clamp(0.0, 2.0)
-                + 24.0 * f64::from(u8::from(self.is_closure(k)))
-                + 0.5 * dt * dt;
-            costs.push(level); // acceptance is judged on LEVEL, not the priors
-            if c < best_cost {
-                best_cost = c;
-                best = k;
-            }
-        }
-        let level_at_best = costs[best - lo];
-        let t = self.time_of(best);
-        // A real pause: quiet relative to this item's own speech/silence contrast.
-        if level_at_best <= 0.25 * self.contrast {
-            return Splice::At(t, Join::Butt);
-        }
-        // No silence anywhere (Spanish resyllabification, French liaison, fast
-        // Japanese — the common case in syllable-timed languages). Splice anyway if
-        // there is a genuine local minimum, but crossfade it.
-        let mut sorted = costs.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
-        let median = percentile(&sorted, 50.0);
-        if median - level_at_best >= 3.0 {
-            return Splice::At(t, Join::Crossfade);
-        }
-        Splice::Refused(Refusal::NoMinimum)
+    /// Level at a frame, in dB above the noise floor, taken as the MAX across the
+    /// three bands: a frame is quiet only when EVERY band is quiet. This is what
+    /// stops a fricative — whose broadband level collapses but whose HF does not —
+    /// counting as silence.
+    fn level(&self, k: usize) -> f64 {
+        (self.bb[k] - self.floor_bb)
+            .max(self.vb[k] - self.floor_vb)
+            .max(self.hf[k] - self.floor_hf)
+            .max(0.0)
     }
 
-    /// Is this frame part of a stop closure rather than a pause? Two universal cues:
-    /// a release burst just after it, or a voice bar (LF energy with no HF).
-    fn is_closure(&self, k: usize) -> bool {
-        if self.bb[k] > self.t_split {
-            return false;
+    /// Walk FORWARD from a nucleus to where that word's audio actually ends.
+    ///
+    /// The nucleus is a safe starting point (it is inside the word by construction),
+    /// so walking out from it cannot land in a neighbour. A brief intra-word dip — a
+    /// stop closure — does not end the walk, because the level must stay down for a
+    /// run; and a trailing fricative does not end it either, because [`Self::level`]
+    /// still sees its HF energy.
+    pub fn decay_after(&self, anchor: f64, limit: f64) -> f64 {
+        let quiet = self.quiet_level();
+        let need = self.run_frames();
+        let (from, to) = (self.frame_at(anchor), self.frame_at(limit));
+        let mut run = 0usize;
+        for k in from..=to {
+            if self.level(k) <= quiet {
+                run += 1;
+                if run >= need {
+                    return self.time_of(k + 1 - run);
+                }
+            } else {
+                run = 0;
+            }
         }
-        let ahead = ((BURST_WINDOW / self.hop).round() as usize).max(1);
-        let burst = ((k + 1)..=(k + ahead).min(self.flux.len() - 1))
-            .any(|j| self.flux[j] > self.flux_p90);
-        let voice_bar =
-            self.vb[k] > self.floor_vb + 10.0 && self.hf[k] <= self.floor_hf + 3.0;
-        burst || voice_bar
+        self.time_of(to)
     }
+
+    /// Walk BACKWARD from a nucleus to where that word's audio actually starts. This
+    /// is what finds a word-initial fricative ("sch-") that the transcript missed:
+    /// the walk passes straight through it because its HF energy keeps the level up.
+    pub fn onset_before(&self, anchor: f64, limit: f64) -> f64 {
+        let quiet = self.quiet_level();
+        let need = self.run_frames();
+        let (from, to) = (self.frame_at(anchor), self.frame_at(limit));
+        let mut run = 0usize;
+        for k in (to..=from).rev() {
+            if self.level(k) <= quiet {
+                run += 1;
+                if run >= need {
+                    return self.time_of(k + run - 1);
+                }
+            } else {
+                run = 0;
+            }
+        }
+        self.time_of(to)
+    }
+
+    /// "Quiet" as a share of this item's own speech/silence contrast — self-calibrating,
+    /// so it means the same thing in a whisper and in a shout.
+    fn quiet_level(&self) -> f64 {
+        (0.15 * self.contrast).clamp(3.0, 12.0)
+    }
+    /// How long the level must stay down to end a word: a fraction of the speaker's own
+    /// syllable period, so it scales with speaking rate instead of assuming one.
+    fn run_frames(&self) -> usize {
+        // Kept small deliberately: a fast read separates words by only 30-50 ms, and
+        // requiring a longer run than the gap itself makes every boundary invisible.
+        // Two frames is the resolution floor (one analysis window of quiet).
+        ((0.10 * self.syllable_period / self.hop).round() as usize).clamp(2, 4)
+    }
+
+    /// Place BOTH edges of a removal between two anchoring nuclei.
+    ///
+    /// Everything between the previous kept word's decay and the next kept word's
+    /// onset is deletable — it is either the removed word or the pauses around it —
+    /// so the edges are placed from those measured points, NOT from the transcript's
+    /// idea of where the removed word begins. That distinction is the whole fix: a
+    /// late-reported onset (very common: Whisper puts the start of "ständig" at the
+    /// /t/, past the "sch") would otherwise drag the cut in behind the fricative and
+    /// leave it behind.
+    ///
+    /// Returns `(start, end, join)` in analysis time, leaving one natural-sounding
+    /// gap at the join.
+    pub fn place_removal(&self, a_prev: f64, a_next: f64) -> Option<(f64, f64, Join)> {
+        if a_next <= a_prev {
+            return None;
+        }
+        let d = self.decay_after(a_prev, a_next); // previous word really ends here
+        let o = self.onset_before(a_next, a_prev); // next word really starts here
+        if o <= d {
+            // Connected speech: no silence between them at all. Splice at the midpoint
+            // and let the caller crossfade.
+            let mid = (d + o) / 2.0;
+            return Some((mid, mid, Join::Crossfade));
+        }
+        // The removed word's own extent inside the band: the first and last frames
+        // above the quiet level. The cut must COVER it entirely — the gap we leave
+        // has to come out of the silence at the two edges, never out of the middle,
+        // or both the head and the tail of the deleted word survive.
+        let quiet = self.quiet_level();
+        let (kd, ko) = (self.frame_at(d), self.frame_at(o));
+        let w0 = (kd..=ko).find(|&k| self.level(k) > quiet).map(|k| self.time_of(k));
+        let w1 = (kd..=ko).rev().find(|&k| self.level(k) > quiet).map(|k| self.time_of(k));
+        let (w0, w1) = match (w0, w1) {
+            (Some(a), Some(b)) if b >= a => (a, b),
+            _ => (d, o), // nothing but silence between the anchors
+        };
+        // Spare silence on each side, and the gap we want at the join.
+        let avail_l = (w0 - d).max(0.0);
+        let avail_r = (o - w1).max(0.0);
+        let spare = avail_l + avail_r;
+        let target = (0.5 * self.syllable_period).clamp(0.040, 0.220);
+        let extra = target.min(spare);
+        // Proportional, not 50/50: with a 40 ms gap on one side and 600 ms on the
+        // other, an even split would put an edge inside the removed word.
+        let take_l = if spare > 0.0 { extra * avail_l / spare } else { 0.0 };
+        let take_r = extra - take_l;
+        Some((
+            (d + take_l).min(w0),
+            (o - take_r).max(w1),
+            if spare > 0.005 { Join::Butt } else { Join::Crossfade },
+        ))
+    }
+
 }
 
 /// RMS per frame, in dB.
@@ -658,20 +697,14 @@ mod tests {
     fn cut_never_reaches_past_the_previous_words_last_nucleus() {
         let (sig, _ja, pan, japan_end, sch) = japan_staendig();
         let a = SpeechAnalysis::new(&sig, SR).expect("analysable");
-        let a_prev = a
-            .last_nucleus_of(0.30, japan_end)
-            .expect("Japan has a nucleus");
+        let (ap, an_) = a.anchors(Some((0.30, japan_end)), (japan_end, sch), Some((sch, sch + 0.45)));
+        let a_prev = ap.expect("Japan has a nucleus");
         // The anchor is in "pan", i.e. after the /p/ closure.
         assert!(a_prev > pan - 0.02, "anchor {a_prev} should be in 'pan' (>= {pan})");
-        let a_next = a
-            .first_nucleus_of(sch, sch + 0.40)
-            .expect("ständig has a nucleus");
-        match a.splice(a_prev, a_next, japan_end) {
-            Splice::At(t, _) => {
-                assert!(t >= a_prev, "cut at {t} landed before the anchor {a_prev}");
-                assert!(t <= a_next, "cut at {t} landed past the next anchor {a_next}");
-            }
-            Splice::Refused(_) => { /* declining is always safe */ }
+        let a_next = an_.expect("ständig has a nucleus");
+        if let Some((cut_s, cut_e, _)) = a.place_removal(a_prev, a_next) {
+            assert!(cut_s >= a_prev, "cut at {cut_s} landed before the anchor {a_prev}");
+            assert!(cut_e <= a_next, "cut at {cut_e} landed past the next anchor {a_next}");
         }
     }
 
@@ -694,14 +727,13 @@ mod tests {
                     let w2_end = s.at();
                     s.quiet(0.25);
                     let Some(a) = SpeechAnalysis::new(&s.s, SR) else { continue };
-                    let (Some(p), Some(n)) = (
-                        a.last_nucleus_of(w1, w1_end),
-                        a.first_nucleus_of(w2, w2_end),
-                    ) else { continue };
-                    if let Splice::At(t, _) = a.splice(p, n, w1_end) {
+                    let (Some(p), Some(n)) =
+                        a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)))
+                    else { continue };
+                    if let Some((cs, ce, _)) = a.place_removal(p, n) {
                         assert!(
-                            t >= p && t <= n,
-                            "f0={f0} amp={amp} gap={gap}: cut {t} outside band [{p}, {n}]"
+                            cs >= p && ce <= n && ce >= cs,
+                            "f0={f0} amp={amp} gap={gap}: cut [{cs}, {ce}] outside band [{p}, {n}]"
                         );
                     }
                 }
@@ -709,8 +741,9 @@ mod tests {
         }
     }
 
-    /// A fricative must not read as silence: with "sch" between the anchors, the
-    /// chosen splice must not sit inside it (that is what left the "sch" behind).
+    /// The complement of the reported bug: when the NEXT kept word begins with a
+    /// fricative, the cut must stop before it — otherwise deleting a word clips the
+    /// head off the word that was kept.
     #[test]
     fn a_fricative_is_not_mistaken_for_a_pause() {
         let mut s = Syn::new();
@@ -719,24 +752,87 @@ mod tests {
         s.vowel(0.18, 120.0, 0.5);
         let w1_end = s.at();
         s.quiet(0.05);
+        let rem = s.at();
+        s.vowel(0.16, 120.0, 0.5); // the word being deleted
+        let rem_end = s.at();
+        s.quiet(0.05);
         let fric_start = s.at();
-        s.fricative(0.12, 0.06);
-        let fric_end = s.at();
-        let w2 = s.at();
+        s.fricative(0.12, 0.06); // the NEXT kept word's initial fricative
         s.vowel(0.20, 120.0, 0.5);
         let w2_end = s.at();
         s.quiet(0.25);
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
-        let (p, n) = (
-            a.last_nucleus_of(w1, w1_end).expect("w1 nucleus"),
-            a.first_nucleus_of(w2, w2_end).expect("w2 nucleus"),
+        let (p, n) = a.anchors(
+            Some((w1, w1_end)),
+            (rem, rem_end),
+            Some((fric_start, w2_end)),
         );
-        if let Splice::At(t, _) = a.splice(p, n, fric_start) {
-            assert!(
-                !(t > fric_start + 0.02 && t < fric_end - 0.02),
-                "cut at {t} landed inside the fricative [{fric_start}, {fric_end}]"
-            );
-        }
+        let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
+        let (_, cut_e, _) = a.place_removal(p, n).expect("placed");
+        assert!(
+            cut_e <= fric_start + 0.02,
+            "cut ends at {cut_e}, inside the next word's fricative starting {fric_start}"
+        );
+        assert!(cut_e >= rem_end - 0.02, "cut at {cut_e} left the deleted word's tail");
+    }
+
+    /// THE REPORTED BUG: deleting "ständig" left its initial "sch" behind, because
+    /// the transcript puts the word's start at the /t/, past the fricative. The
+    /// placement must be driven by where the PREVIOUS word's audio actually ends —
+    /// after which everything, fricative included, is deletable.
+    #[test]
+    fn removal_starts_before_a_word_initial_fricative() {
+        let mut s = Syn::new();
+        s.quiet(0.25);
+        let w1 = s.at();
+        s.vowel(0.18, 120.0, 0.5); // "Japan" (last syllable)
+        let w1_end = s.at();
+        s.quiet(0.06); // the true gap
+        let fric = s.at();
+        s.fricative(0.11, 0.06); // "sch" — the part that kept surviving
+        s.burst(0.22); // /t/
+        let w2 = s.at();
+        s.vowel(0.20, 120.0, 0.5); // "-ändig"
+        let w2_end = s.at();
+        s.quiet(0.25);
+        let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
+        let (p, n) = a.anchors(Some((w1, w1_end)), (fric, w2), Some((w2, w2_end)));
+        let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
+        let (cut_s, cut_e, _) = a.place_removal(p, n).expect("placed");
+        assert!(
+            cut_s <= fric + 0.015,
+            "cut starts at {cut_s}, after the fricative at {fric} — the 'sch' survives"
+        );
+        assert!(cut_s >= w1_end - 0.05, "cut at {cut_s} bit into the previous word (ends {w1_end})");
+        assert!(cut_e >= cut_s, "degenerate range");
+    }
+
+    /// The mirror: a word-FINAL fricative must be taken with the word, not left as a
+    /// hiss at the head of the next one.
+    #[test]
+    fn removal_ends_after_a_word_final_fricative() {
+        let mut s = Syn::new();
+        s.quiet(0.25);
+        let w1 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w1_end = s.at();
+        s.quiet(0.05);
+        s.vowel(0.14, 120.0, 0.5); // removed word...
+        s.fricative(0.10, 0.06); // ...ending in "-s"
+        let fric_end = s.at();
+        s.quiet(0.06);
+        let w2 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w2_end = s.at();
+        s.quiet(0.25);
+        let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
+        let (p, n) = a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)));
+        let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
+        let (_, cut_e, _) = a.place_removal(p, n).expect("placed");
+        assert!(
+            cut_e >= fric_end - 0.015,
+            "cut ends at {cut_e}, before the trailing fricative ends at {fric_end}"
+        );
     }
 
     #[test]
@@ -744,7 +840,7 @@ mod tests {
         let mut s = Syn::new();
         s.quiet(0.5);
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
-        assert!(a.last_nucleus_of(0.0, 0.5).is_none());
+        assert!(a.anchors(Some((0.0, 0.5)), (0.5, 0.5), None).0.is_none());
     }
 
     #[test]
@@ -767,3 +863,4 @@ mod tests {
         }
     }
 }
+

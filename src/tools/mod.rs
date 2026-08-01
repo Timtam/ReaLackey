@@ -7459,42 +7459,31 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
             let rel = |t: f64| acc_start + t - r0; // item time -> analysis time
             let original = project_removes.clone();
             for ((r, orig), src) in project_removes.iter_mut().zip(&original).zip(&ranges) {
-                let a_prev = src
-                    .prev_word
-                    .and_then(|(s, e)| an.last_nucleus_of(rel(s), rel(e)))
-                    .unwrap_or(0.0);
-                let a_next = src
-                    .next_word
-                    .and_then(|(s, e)| an.first_nucleus_of(rel(s), rel(e)))
-                    .unwrap_or(r1 - r0);
-                let want_a = rel(src.start);
-                let want_b = rel(src.end);
-                let place = |want: f64| an.splice(a_prev, a_next, want);
+                // Nearest-centre assignment over all three spans, so the removed
+                // word's own nucleus can never be mistaken for an anchor.
+                let (ap, an_) = an.anchors(
+                    src.prev_word.map(|(s, e)| (rel(s), rel(e))),
+                    (rel(src.start), rel(src.end)),
+                    src.next_word.map(|(s, e)| (rel(s), rel(e))),
+                );
+                // A removal at the very start/end of the item has no neighbour to
+                // anchor to; the item edge is then the natural bound.
+                let a_prev = ap.unwrap_or(0.0);
+                let a_next = an_.unwrap_or(r1 - r0);
                 // analysis time -> project time
                 let abs = |t: f64| r0 + t;
-                let mut moved = false;
-                if let crate::dsp::speech::Splice::At(t, join) = place(want_a) {
-                    // Outward only: eating extra silence is nearly free, leaving the
-                    // head of a deleted word audible is not.
-                    r.0 = abs(t).min(orig.0);
-                    moved = true;
-                    if join == crate::dsp::speech::Join::Crossfade {
-                        crossfaded += 1;
+                match an.place_removal(a_prev, a_next) {
+                    Some((s, e, join)) => {
+                        // Outward only: eating extra silence is nearly free, leaving
+                        // the head or tail of a deleted word audible is not.
+                        r.0 = abs(s).min(orig.0);
+                        r.1 = abs(e).max(orig.1);
+                        snapped += 1;
+                        if join == crate::dsp::speech::Join::Crossfade {
+                            crossfaded += 1;
+                        }
                     }
-                } else {
-                    snap_rejected += 1;
-                }
-                if let crate::dsp::speech::Splice::At(t, join) = place(want_b) {
-                    r.1 = abs(t).max(orig.1);
-                    moved = true;
-                    if join == crate::dsp::speech::Join::Crossfade {
-                        crossfaded += 1;
-                    }
-                } else {
-                    snap_rejected += 1;
-                }
-                if moved {
-                    snapped += 1;
+                    None => snap_rejected += 1,
                 }
                 if r.1 - r.0 <= CUT_EPSILON {
                     *r = *orig; // degenerate — keep the caller's range
