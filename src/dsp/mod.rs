@@ -9,6 +9,8 @@
 //! Everything is computed at a fixed 48 kHz analysis rate (the accessor
 //! resamples for us) so the BS.1770 K-weighting coefficients below are exact.
 
+pub mod speech;
+
 use serde::Serialize;
 
 /// Amplitude floor reported as a finite dBFS value instead of -inf.
@@ -304,7 +306,7 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
 // ---- integrated loudness (ITU-R BS.1770-4) ----------------------------------
 
 /// A single second-order section, applied via Direct-Form II transposed.
-struct Biquad {
+pub(crate) struct Biquad {
     b0: f64,
     b1: f64,
     b2: f64,
@@ -313,7 +315,7 @@ struct Biquad {
 }
 
 impl Biquad {
-    fn apply(&self, x: &[f64]) -> Vec<f64> {
+    pub(crate) fn apply(&self, x: &[f64]) -> Vec<f64> {
         let mut y = vec![0.0f64; x.len()];
         let (mut z1, mut z2) = (0.0f64, 0.0f64);
         for (xi, yi) in x.iter().zip(y.iter_mut()) {
@@ -508,7 +510,7 @@ fn energy_mean_loudness(ls: &[f64]) -> f64 {
 }
 
 /// Percentile (0..100) of a pre-sorted ascending slice, linearly interpolated.
-fn percentile(sorted: &[f64], p: f64) -> f64 {
+pub(crate) fn percentile(sorted: &[f64], p: f64) -> f64 {
     match sorted.len() {
         0 => f64::NAN,
         1 => sorted[0],

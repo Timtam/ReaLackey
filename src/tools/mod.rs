@@ -7305,12 +7305,14 @@ fn parse_cut_ranges(input: &Value) -> Result<Vec<CutRange>, String> {
         .ok_or_else(|| "missing 'ranges' array of {start, end} seconds".to_string())?;
     let mut out = Vec::with_capacity(arr.len());
     for (i, r) in arr.iter().enumerate() {
-        let (s, e, ls, le) = if let Some(o) = r.as_object() {
+        let (s, e, ls, le, pw, nw) = if let Some(o) = r.as_object() {
             (
                 o.get("start").and_then(|v| v.as_f64()),
                 o.get("end").and_then(|v| v.as_f64()),
                 o.get("limit_start").and_then(|v| v.as_f64()),
                 o.get("limit_end").and_then(|v| v.as_f64()),
+                opt_span(o, "prev_word"),
+                opt_span(o, "next_word"),
             )
         } else if let Some(pair) = r.as_array() {
             (
@@ -7318,9 +7320,11 @@ fn parse_cut_ranges(input: &Value) -> Result<Vec<CutRange>, String> {
                 pair.get(1).and_then(|v| v.as_f64()),
                 None,
                 None,
+                None,
+                None,
             )
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None, None)
         };
         match (s, e) {
             (Some(s), Some(e)) => out.push(CutRange {
@@ -7328,6 +7332,8 @@ fn parse_cut_ranges(input: &Value) -> Result<Vec<CutRange>, String> {
                 end: e,
                 limit_start: ls,
                 limit_end: le,
+                prev_word: pw,
+                next_word: nw,
             }),
             _ => return Err(format!("range {i} must have a numeric start and end")),
         }
@@ -7347,6 +7353,17 @@ struct CutRange {
     limit_start: Option<f64>,
     /// Latest time the END edge may move to.
     limit_end: Option<f64>,
+    /// Approximate span of the previous KEPT word, used to find its last syllabic
+    /// nucleus — the real anchor a cut may not cross.
+    prev_word: Option<(f64, f64)>,
+    /// Approximate span of the next kept word (its first nucleus anchors the far side).
+    next_word: Option<(f64, f64)>,
+}
+
+/// Read a `[start, end]` pair from a JSON field.
+fn opt_span(o: &serde_json::Map<String, Value>, key: &str) -> Option<(f64, f64)> {
+    let a = o.get(key)?.as_array()?;
+    Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))
 }
 
 /// Cut one or more time ranges out of a media item and close the gaps.
@@ -7419,7 +7436,77 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     // inaudible. Boundaries in continuous speech/music are left alone.
     let mut snapped = 0usize;
     let mut snap_rejected = 0usize;
-    if snap_to_silence {
+    let mut crossfaded = 0usize;
+    // Nuclei-anchored placement: analyse the edit region ONCE, then place each edge
+    // inside the band bounded by the neighbouring kept words' syllabic nuclei. This
+    // supersedes the level-based snap below wherever the caller supplied the
+    // neighbouring word spans (i.e. both cut-by-text paths).
+    let mut placed_by_nuclei = false;
+    let have_word_spans = ranges.iter().any(|r| r.prev_word.is_some() || r.next_word.is_some());
+    if snap_to_silence && have_word_spans {
+        let lo = ranges.iter().map(|r| r.start).fold(f64::INFINITY, f64::min);
+        let hi = ranges.iter().map(|r| r.end).fold(f64::NEG_INFINITY, f64::max);
+        // Enough context either side for the calibration to see real silence, capped
+        // so a long item can't blow up memory.
+        let r0 = (acc_start + lo - 2.0).max(acc_start);
+        let r1 = (acc_start + hi + 2.0).min(acc_end).min(r0 + 180.0);
+        let (samples, read_error) =
+            read_accessor_samples_at(low, acc, 1, SNAP_SR, r0, (r1 - r0).max(0.0));
+        let analysis = (!read_error && !samples.is_empty())
+            .then(|| crate::dsp::speech::SpeechAnalysis::new(&samples, SNAP_SR as f64))
+            .flatten();
+        if let Some(an) = analysis {
+            let rel = |t: f64| acc_start + t - r0; // item time -> analysis time
+            let original = project_removes.clone();
+            for ((r, orig), src) in project_removes.iter_mut().zip(&original).zip(&ranges) {
+                let a_prev = src
+                    .prev_word
+                    .and_then(|(s, e)| an.last_nucleus_of(rel(s), rel(e)))
+                    .unwrap_or(0.0);
+                let a_next = src
+                    .next_word
+                    .and_then(|(s, e)| an.first_nucleus_of(rel(s), rel(e)))
+                    .unwrap_or(r1 - r0);
+                let want_a = rel(src.start);
+                let want_b = rel(src.end);
+                let place = |want: f64| an.splice(a_prev, a_next, want);
+                // analysis time -> project time
+                let abs = |t: f64| r0 + t;
+                let mut moved = false;
+                if let crate::dsp::speech::Splice::At(t, join) = place(want_a) {
+                    // Outward only: eating extra silence is nearly free, leaving the
+                    // head of a deleted word audible is not.
+                    r.0 = abs(t).min(orig.0);
+                    moved = true;
+                    if join == crate::dsp::speech::Join::Crossfade {
+                        crossfaded += 1;
+                    }
+                } else {
+                    snap_rejected += 1;
+                }
+                if let crate::dsp::speech::Splice::At(t, join) = place(want_b) {
+                    r.1 = abs(t).max(orig.1);
+                    moved = true;
+                    if join == crate::dsp::speech::Join::Crossfade {
+                        crossfaded += 1;
+                    }
+                } else {
+                    snap_rejected += 1;
+                }
+                if moved {
+                    snapped += 1;
+                }
+                if r.1 - r.0 <= CUT_EPSILON {
+                    *r = *orig; // degenerate — keep the caller's range
+                    snap_rejected += 1;
+                }
+            }
+            placed_by_nuclei = true;
+        }
+    }
+    // Legacy level-based snap: only where the caller gave no word spans (a bare
+    // `remove_item_time_ranges` call from the model, with no transcript context).
+    if snap_to_silence && !placed_by_nuclei {
         // Snapping must never make a removal SMALLER — that leaves the head or tail
         // of the word the user deleted audible. Each edge may only move outward.
         let original = project_removes.clone();
@@ -7563,6 +7650,10 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         // Honest reporting: a snap that was discarded (degenerate, or it would have
         // eaten a kept word) used to be invisible, so the count implied success.
         "snaps_rejected": snap_rejected,
+        // Edges placed where the speaker never paused (connected speech): the cut is
+        // still correct, but the join wants a crossfade rather than a butt splice.
+        "joins_without_pause": crossfaded,
+        "placed_by_nuclei": placed_by_nuclei,
     }))
 }
 

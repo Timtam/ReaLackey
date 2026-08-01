@@ -1683,10 +1683,14 @@ fn cut_ranges_json(words: &[crate::providers::transcription::Word], spans: &[cra
             if s.first_word > 0 {
                 if let Some(prev) = words.get(s.first_word - 1) {
                     r["limit_start"] = json!(prev.start + 0.5 * (prev.end - prev.start).max(0.0));
+                    // The word's approximate span, so the cutter can find its last
+                    // syllabic nucleus — the anchor a cut must never cross.
+                    r["prev_word"] = json!([prev.start, prev.end]);
                 }
             }
             if let Some(next) = words.get(s.last_word + 1) {
                 r["limit_end"] = json!(next.start + 0.5 * (next.end - next.start).max(0.0));
+                r["next_word"] = json!([next.start, next.end]);
             }
             r
         })
