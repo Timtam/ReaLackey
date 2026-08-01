@@ -1010,7 +1010,13 @@ pub fn nearest_pause_centre(
     from_seconds: f64,
     direction: PauseDir,
     ratio: f64,
+    max_move: f64,
 ) -> Option<f64> {
+    /// Longest quiet run we'll treat as ONE pause. Past this the run is almost
+    /// certainly several pauses plus the quiet speech between them, and its centre
+    /// would be meaningless.
+    const MAX_RUN_SECONDS: f64 = 0.30;
+
     if sample_rate <= 0.0 || window_seconds <= 0.0 {
         return None;
     }
@@ -1035,27 +1041,51 @@ pub fn nearest_pause_centre(
     if peak <= 1e-6 {
         return None;
     }
-    let thresh = peak * ratio;
+    // Threshold: the STRICTER of "a bit above the local noise floor" and the old
+    // share-of-peak. Share-of-peak alone is far too generous on fast speech — one
+    // loud plosive sets the peak, and then quiet consonants, decay tails and
+    // unstressed words all fall under it and read as "pause". Taking the min keeps
+    // the old behaviour where the floor is unknown, and tightens it sharply
+    // wherever there is real silence to measure.
+    let floor = {
+        let mut sorted = frames.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        percentile(&sorted, 10.0)
+    };
+    let thresh = (floor * 3.0).min(peak * ratio);
     let frame_time = |idx: usize| (idx as f64 * hop as f64 + win as f64 / 2.0) / sample_rate;
     let start_idx = (((from_seconds * sample_rate) - win as f64 / 2.0) / hop as f64)
         .round()
         .clamp(0.0, (frames.len() - 1) as f64) as usize;
-    // Walk outward to the first quiet frame...
+    // Walk outward to the first quiet frame — but never further than `max_move`,
+    // so the search can't stride past a neighbouring word into a distant pause.
+    let reach = ((max_move * sample_rate) / hop as f64).ceil().max(1.0) as usize;
     let found = match direction {
-        PauseDir::Backward => (0..=start_idx).rev().find(|&j| frames[j] <= thresh),
-        PauseDir::Forward => (start_idx..frames.len()).find(|&j| frames[j] <= thresh),
+        PauseDir::Backward => (start_idx.saturating_sub(reach)..=start_idx)
+            .rev()
+            .find(|&j| frames[j] <= thresh),
+        PauseDir::Forward => {
+            ((start_idx)..frames.len().min(start_idx + reach + 1)).find(|&j| frames[j] <= thresh)
+        }
     }?;
-    // ...then span the whole contiguous quiet run and take its centre.
+    // ...then span the contiguous quiet run, BOUNDED. Unbounded extension was the
+    // bug: on fast speech the run swallowed neighbouring quiet words and its centre
+    // landed inside one of them.
+    let max_run = ((MAX_RUN_SECONDS * sample_rate) / hop as f64).ceil().max(1.0) as usize;
     let mut lo = found;
-    while lo > 0 && frames[lo - 1] <= thresh {
+    while lo > 0 && frames[lo - 1] <= thresh && found - lo < max_run {
         lo -= 1;
     }
     let mut hi = found;
-    while hi + 1 < frames.len() && frames[hi + 1] <= thresh {
+    while hi + 1 < frames.len() && frames[hi + 1] <= thresh && hi - found < max_run {
         hi += 1;
     }
-    Some((frame_time(lo) + frame_time(hi)) / 2.0)
+    // Half of the pause stays on each side, so one natural gap survives the join —
+    // then clamp, so a mis-detected run can never drag the cut far from the word.
+    let centre = (frame_time(lo) + frame_time(hi)) / 2.0;
+    Some(centre.clamp(from_seconds - max_move, from_seconds + max_move))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1081,7 +1111,7 @@ mod tests {
     fn nearest_pause_backward_from_inside_a_word() {
         let s = word_pause_word();
         // Boundary at 0.25 s = 50 ms INTO the second tone (a "late" word start).
-        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.25, PauseDir::Backward, 0.25)
+        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.25, PauseDir::Backward, 0.25, 0.25)
             .expect("a pause precedes the word");
         assert!(c > 0.10 && c < 0.20, "centre {c} should be inside the pause");
         assert!((c - 0.15).abs() < 0.02, "centre {c} should be mid-pause");
@@ -1092,7 +1122,7 @@ mod tests {
     fn nearest_pause_forward_from_inside_a_word() {
         let s = word_pause_word();
         // Boundary at 0.05 s = inside the FIRST tone.
-        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.05, PauseDir::Forward, 0.25)
+        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.05, PauseDir::Forward, 0.25, 0.25)
             .expect("a pause follows the word");
         assert!((c - 0.15).abs() < 0.02, "centre {c} should be mid-pause");
     }
@@ -1101,8 +1131,49 @@ mod tests {
     #[test]
     fn nearest_pause_from_inside_the_pause() {
         let s = word_pause_word();
-        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.12, PauseDir::Backward, 0.25).unwrap();
+        let c = nearest_pause_centre(&s, 16_000.0, 0.02, 0.12, PauseDir::Backward, 0.25, 0.25).unwrap();
         assert!((c - 0.15).abs() < 0.02, "centre {c} should be mid-pause");
+    }
+
+    /// REGRESSION: a QUIET kept word must not be swallowed. The old code thresholded
+    /// at 25% of the slice peak and then extended the quiet run without limit, so a
+    /// word 15 dB below its neighbours read as "pause" and the returned centre landed
+    /// inside it — deleting a word the user kept.
+    #[test]
+    fn nearest_pause_does_not_swallow_a_quiet_word() {
+        let sr = 16_000.0;
+        let seg = (sr * 0.1) as usize;
+        let gap = (sr * 0.04) as usize; // 40 ms gaps (a fast read)
+        let tone = |i: usize, amp: f64| (2.0 * PI * 440.0 * i as f64 / sr).sin() * amp;
+        // LOUD word | gap | QUIET word (-15 dB) | gap | LOUD word
+        let mut s = Vec::new();
+        s.extend((0..seg).map(|i| tone(i, 0.5)));
+        s.extend(std::iter::repeat_n(0.0, gap));
+        let quiet_start = s.len() as f64 / sr;
+        s.extend((0..seg).map(|i| tone(i, 0.5 * 0.178))); // -15 dB
+        let quiet_end = s.len() as f64 / sr;
+        s.extend(std::iter::repeat_n(0.0, gap));
+        s.extend((0..seg).map(|i| tone(i, 0.5)));
+
+        // Boundary just inside the third word, searching backward for its pause.
+        let from = quiet_end + 0.04 + 0.02;
+        let c = nearest_pause_centre(&s, sr, 0.02, from, PauseDir::Backward, 0.25, 0.25).unwrap();
+        assert!(
+            c >= quiet_end,
+            "landed at {c}, inside the quiet word [{quiet_start}, {quiet_end}] — it was swallowed"
+        );
+    }
+
+    /// The result may never stray further than `max_move` from the original point,
+    /// so a mis-detection can't drag a cut far from the word.
+    #[test]
+    fn nearest_pause_respects_max_move() {
+        let s = word_pause_word();
+        let from = 0.29; // deep in the third segment
+        let c = nearest_pause_centre(&s, 16_000.0, 0.02, from, PauseDir::Backward, 0.25, 0.05);
+        if let Some(c) = c {
+            assert!((c - from).abs() <= 0.05 + 1e-9, "moved {} s", (c - from).abs());
+        }
     }
 
     /// Continuous speech (no pause) and uniform silence both mean "don't move".
@@ -1113,12 +1184,12 @@ mod tests {
         let tone: Vec<f64> = (0..n)
             .map(|i| (2.0 * PI * 440.0 * i as f64 / sr).sin() * 0.5)
             .collect();
-        assert!(nearest_pause_centre(&tone, sr, 0.02, 0.15, PauseDir::Backward, 0.25).is_none());
+        assert!(nearest_pause_centre(&tone, sr, 0.02, 0.15, PauseDir::Backward, 0.25, 0.25).is_none());
         let silence = vec![0.0; n];
-        assert!(nearest_pause_centre(&silence, sr, 0.02, 0.15, PauseDir::Forward, 0.25).is_none());
+        assert!(nearest_pause_centre(&silence, sr, 0.02, 0.15, PauseDir::Forward, 0.25, 0.25).is_none());
         // Too short to analyse / nonsense rate.
-        assert!(nearest_pause_centre(&[0.0; 10], sr, 0.02, 0.0, PauseDir::Forward, 0.25).is_none());
-        assert!(nearest_pause_centre(&tone, 0.0, 0.02, 0.0, PauseDir::Forward, 0.25).is_none());
+        assert!(nearest_pause_centre(&[0.0; 10], sr, 0.02, 0.0, PauseDir::Forward, 0.25, 0.25).is_none());
+        assert!(nearest_pause_centre(&tone, 0.0, 0.02, 0.0, PauseDir::Forward, 0.25, 0.25).is_none());
     }
 
     fn sine(freq: f64, amp: f64, secs: f64, sr: f64) -> Vec<f64> {

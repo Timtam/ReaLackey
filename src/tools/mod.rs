@@ -7282,6 +7282,7 @@ fn snap_boundary<A>(
         t - start,
         dir,
         SNAP_RATIO,
+        SNAP_OUT,
     ) {
         Some(off) => (start + off).clamp(lo, hi),
         None => t,
@@ -7372,10 +7373,14 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     // as a bonus, puts REAPER's split auto-fades over near-silence where they're
     // inaudible. Boundaries in continuous speech/music are left alone.
     let mut snapped = 0usize;
+    let mut snap_rejected = 0usize;
     if snap_to_silence {
-        for r in project_removes.iter_mut() {
-            let a = snap_boundary(low, acc, acc_start, acc_end, r.0, true);
-            let b = snap_boundary(low, acc, acc_start, acc_end, r.1, false);
+        // Snapping must never make a removal SMALLER — that leaves the head or tail
+        // of the word the user deleted audible. Each edge may only move outward.
+        let original = project_removes.clone();
+        for (r, orig) in project_removes.iter_mut().zip(&original) {
+            let a = snap_boundary(low, acc, acc_start, acc_end, r.0, true).min(orig.0);
+            let b = snap_boundary(low, acc, acc_start, acc_end, r.1, false).max(orig.1);
             if b - a > CUT_EPSILON {
                 if (a - r.0).abs() > CUT_EPSILON {
                     snapped += 1;
@@ -7384,6 +7389,24 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                     snapped += 1;
                 }
                 *r = (a, b);
+            } else {
+                snap_rejected += 1;
+            }
+        }
+        // Two removals either side of a short kept word can each drift toward it and
+        // erase it. Where snapping closed a gap that the ORIGINAL ranges kept open,
+        // pull both edges back to the originals — the user's kept word wins.
+        const MIN_KEEP: f64 = 0.060;
+        let mut order: Vec<usize> = (0..project_removes.len()).collect();
+        order.sort_by(|&i, &j| project_removes[i].0.total_cmp(&project_removes[j].0));
+        for w in order.windows(2) {
+            let (i, j) = (w[0], w[1]);
+            let gap_now = project_removes[j].0 - project_removes[i].1;
+            let gap_orig = original[j].0 - original[i].1;
+            if gap_now < MIN_KEEP && gap_orig >= MIN_KEEP {
+                project_removes[i].1 = original[i].1;
+                project_removes[j].0 = original[j].0;
+                snap_rejected += 1;
             }
         }
     }
@@ -7492,6 +7515,9 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         "rippled_track_items": ripple_targets.len(),
         "new_item_end_seconds": plan.kept_end(acc_start) - acc_start,
         "boundaries_snapped_to_silence": snapped,
+        // Honest reporting: a snap that was discarded (degenerate, or it would have
+        // eaten a kept word) used to be invisible, so the count implied success.
+        "snaps_rejected": snap_rejected,
     }))
 }
 

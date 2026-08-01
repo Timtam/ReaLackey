@@ -815,25 +815,62 @@ document.addEventListener('keydown',function(e){
   // so they run a few tens of ms early/late and clip onsets. Pad each snippet a
   // little (and a bit more at the tail) so you hear the WHOLE word — this only
   // affects preview playback, never where the cut lands.
-  var PAD_IN=0.04,PAD_OUT=0.09;
-  function playRange(s,e){ if(!ctx||!buf)return; stopSnip();
-    try{ var o=Math.max(0,s-PAD_IN), d=Math.max(0.02,(e-o)+PAD_OUT);
+  // Pads are capped at HALF the actual gap to the neighbouring word, so a fixed pad
+  // can't bleed into the next word on a fast read with short breaks (the old fixed
+  // 90 ms tail played ~60 ms of the next word whenever the gap was 30 ms). Floors
+  // keep a minimum pad, because the pad exists to stop Whisper's tight boundaries
+  // clipping the onset — deriving it purely from the gap would collapse it to zero
+  // exactly on the connected speech that needs it most.
+  var PAD_IN=0.04,PAD_OUT=0.09,PAD_IN_MIN=0.015,PAD_OUT_MIN=0.02,FADE=0.012;
+  function playRange(s,e,i){
+    if(!ctx||!buf)return; stopSnip();
+    try{
+      var lead=PAD_IN,tail=PAD_OUT;
+      if(st&&typeof i==='number'&&st.words){
+        var p=st.words[i-1],nx=st.words[i+1];
+        if(p) lead=Math.min(PAD_IN,Math.max(PAD_IN_MIN,0.5*(s-p.end)));
+        if(nx) tail=Math.min(PAD_OUT,Math.max(PAD_OUT_MIN,0.5*(nx.start-e)));
+      }
+      var o=Math.max(0,s-lead), d=Math.max(0.02,(e-o)+tail);
       if(buf.duration) d=Math.min(d,Math.max(0.02,buf.duration-o));
-      var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination); n.start(0,o,d); curSrc=n; }catch(_){} }
+      var n=ctx.createBufferSource(); n.buffer=buf;
+      // Short fade-out so any residual bleed reads as decay, and a hard stop
+      // mid-waveform can't click.
+      var g=ctx.createGain(); n.connect(g); g.connect(ctx.destination);
+      var t0=ctx.currentTime, f=Math.min(FADE,d/3);
+      g.gain.setValueAtTime(1,t0+Math.max(0,d-f));
+      g.gain.linearRampToValueAtTime(0.0001,t0+d);
+      n.start(0,o,d); curSrc=n;
+    }catch(_){} }
   // `fast` = a single deliberate keypress: start the audio NOW. Only auto-repeat
   // (holding an arrow) settles first, so holding a key doesn't machine-gun the
   // audio. The old code delayed EVERY press by 140 ms, which is what made single
   // arrow presses feel sluggish.
-  function snippet(s,e,fast){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); if(st.mode==='spoken')return;
-    if(fast){ playRange(s,e); return; }
-    playTimer=setTimeout(function(){ playRange(s,e); },110); }
+  function snippet(s,e,fast,i){ if(playTimer){clearTimeout(playTimer);playTimer=null;} stopSnip(); if(st.mode==='spoken')return;
+    if(fast){ playRange(s,e,i); return; }
+    playTimer=setTimeout(function(){ playRange(s,e,i); },110); }
+  // Preview the edited result. A kept run is broken ONLY where a word was actually
+  // removed — never on a duration threshold. The old code split runs at any gap over
+  // 50 ms, which silently deleted every natural pause from the preview, so the
+  // preview was always tighter than the real cut and could never be trusted to judge
+  // it. Pauses BETWEEN kept words are part of the audio and stay.
   function playEdited(){ if(!ctx||!buf){ announce('No audio to preview'); return; } resume(); stopAll();
     var ranges=[],cur=null;
-    for(var i=0;i<st.words.length;i++){ var w=st.words[i]; if(!w.rm){ if(cur && w.start<=cur.e+0.05) cur.e=Math.max(cur.e,w.end); else { if(cur)ranges.push(cur); cur={s:w.start,e:w.end}; } } }
+    for(var i=0;i<st.words.length;i++){ var w=st.words[i];
+      if(w.rm){ if(cur){ranges.push(cur);cur=null;} continue; }
+      if(cur) cur.e=Math.max(cur.e,w.end); else cur={s:w.start,e:w.end};
+    }
     if(cur)ranges.push(cur);
     if(!ranges.length){ announce('Everything is removed'); return; }
+    // Butt the kept runs together — that IS the cut. Half the pause on each side of
+    // a removed span survives the real cut, so approximate that here too.
     var at=ctx.currentTime+0.03;
-    ranges.forEach(function(r){ try{ var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination); var d=Math.max(0.02,r.e-r.s); n.start(at,Math.max(0,r.s),d); preview.push(n); at+=d; }catch(_){} });
+    ranges.forEach(function(r,k){ try{
+      var lead=(k===0)?0:0.03, o=Math.max(0,r.s-lead);
+      var d=Math.max(0.02,(r.e-o)+0.03);
+      if(buf.duration) d=Math.min(d,Math.max(0.02,buf.duration-o));
+      var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination);
+      n.start(at,o,d); preview.push(n); at+=d; }catch(_){} });
     announce('Playing the edited result');
   }
 
@@ -849,7 +886,7 @@ document.addEventListener('keydown',function(e){
 
   function afterNav(sentence,fast){ paint(); var w=st.words[st.caret];
     if(st.mode!=='audio') announce(sentence?sentText(w.s):stWord());
-    snippet(w.start,w.end,fast!==false); }
+    snippet(w.start,w.end,fast!==false,st.caret); }
 
   function focusables(){ return Array.prototype.slice.call(document.querySelectorAll('#cutModal button, #cutGrid')); }
   function postCancel(){ try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:cancel'})); }catch(e){} closeCutEditor(); }
@@ -889,7 +926,7 @@ document.addEventListener('keydown',function(e){
     else if(k==='ArrowUp'){ st.caret=firstOf(Math.max(0,st.words[st.caret].s-1)); clearSel(); afterNav(true,fast); }
     else if(k==='Home'){ st.caret=firstOf(st.words[st.caret].s); clearSel(); afterNav(false,fast); }
     else if(k==='End'){ st.caret=lastOf(st.words[st.caret].s); clearSel(); afterNav(false,fast); }
-    else if(k===' '||k==='Spacebar'){ var w=st.words[st.caret]; w.sel=!w.sel; st.anchor=w.sel?st.caret:null; paint(); if(st.mode!=='audio') announce(bare(w.t)+(w.sel?', selected':', deselected')); snippet(w.start,w.end,true); }
+    else if(k===' '||k==='Spacebar'){ var w=st.words[st.caret]; w.sel=!w.sel; st.anchor=w.sel?st.caret:null; paint(); if(st.mode!=='audio') announce(bare(w.t)+(w.sel?', selected':', deselected')); snippet(w.start,w.end,true,st.caret); }
     else if(k==='Delete'||k==='Backspace'){ toggleRemove(); paint(); announce('Removed. '+rmSummary()); }
     else if(k==='Escape'){ var anySel=st.words.some(function(w){return w.sel;}); if(anySel){ clearSel(); paint(); announce('Selection cleared'); } else { requestCancel(); } }
     else handled=false;
