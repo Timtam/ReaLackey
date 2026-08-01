@@ -79,12 +79,13 @@ pub struct SpeechAnalysis {
     hop: f64,
     /// Smoothed per-frame levels in dB, broadband / voice-bar / high-frequency.
     bb: Vec<f64>,
-    vb: Vec<f64>,
     hf: Vec<f64>,
     floor_bb: f64,
-    floor_vb: f64,
     floor_hf: f64,
-    contrast: f64,
+    /// Each band's own speech-to-floor range, so levels can be compared between
+    /// bands with very different noise floors.
+    contrast_bb: f64,
+    contrast_hf: f64,
     /// Nucleus times, ascending.
     pub nuclei: Vec<f64>,
     /// Median interval between nuclei — the speaker's own syllable period. Every
@@ -109,14 +110,12 @@ impl SpeechAnalysis {
         // rumble, DC and pops that would otherwise dominate a level measurement.
         let base = highpass(samples, sample_rate, 60.0);
         let nyq = sample_rate / 2.0;
-        let vb_sig = bandpass(&base, sample_rate, 60.0, 350.0);
         let hf_sig = highpass(&base, sample_rate, 3000.0_f64.min(nyq * 0.8));
 
         // Level bands are NOT smoothed: smoothing spans a short inter-word gap and
         // hides it. Only the nucleus band is smoothed, where pitch ripple would
         // otherwise split one vowel into several syllables.
         let bb = frame_db(&base, win, hop);
-        let vb = frame_db(&vb_sig, win, hop);
         let hf = frame_db(&hf_sig, win, hop);
         // MID (300-3000 Hz) is where sonorant nuclei live; used only for nuclei.
         let mid = smooth_db(
@@ -130,10 +129,10 @@ impl SpeechAnalysis {
 
 
         let floor_bb = noise_floor_db(&bb);
-        let floor_vb = noise_floor_db(&vb);
         let floor_hf = noise_floor_db(&hf);
         let (t_split, speech_level) = otsu_split(&bb);
-        let contrast = (speech_level - floor_bb).max(0.0);
+        let contrast_bb = (speech_level - floor_bb).max(0.0);
+        let contrast_hf = (otsu_split(&hf).1 - floor_hf).max(0.0);
 
         let hop_s = hop as f64 / sample_rate;
         let nuclei = find_nuclei(&mid, &base, hop, win, sample_rate, t_split, hop_s);
@@ -148,12 +147,11 @@ impl SpeechAnalysis {
         Some(Self {
             hop: hop_s,
             bb,
-            vb,
             hf,
             floor_bb,
-            floor_vb,
             floor_hf,
-            contrast,
+            contrast_bb,
+            contrast_hf,
             nuclei,
             syllable_period,
         })
@@ -203,15 +201,23 @@ impl SpeechAnalysis {
         self.nuclei.iter().filter(|&&n| n > a && n < b).count()
     }
 
-    /// Level at a frame, in dB above the noise floor, taken as the MAX across the
-    /// three bands: a frame is quiet only when EVERY band is quiet. This is what
-    /// stops a fricative — whose broadband level collapses but whose HF does not —
-    /// counting as silence.
+    /// How "loud" a frame is, as a FRACTION of each band's own dynamic range, taken
+    /// as the max across bands. A frame is quiet only when every band is quiet — that
+    /// is what stops a fricative, whose broadband level collapses but whose HF does
+    /// not, from counting as silence.
+    ///
+    /// Normalising per band is essential: a narrow band has a much lower noise floor
+    /// than a wide one, so raw "dB above my own floor" is not comparable between
+    /// them, and a max() over those raw numbers lets the narrowest band veto every
+    /// gap. (That bug made real inter-word silences invisible: broadband sat 0.2 dB
+    /// over its floor while a 60-350 Hz band read 9 dB over its own — mostly filter
+    /// ringing and the previous vowel's fundamental decaying.)
     fn level(&self, k: usize) -> f64 {
-        (self.bb[k] - self.floor_bb)
-            .max(self.vb[k] - self.floor_vb)
-            .max(self.hf[k] - self.floor_hf)
-            .max(0.0)
+        let f = |v: f64, floor: f64, contrast: f64| {
+            if contrast > 1.0 { ((v - floor) / contrast).max(0.0) } else { 0.0 }
+        };
+        f(self.bb[k], self.floor_bb, self.contrast_bb)
+            .max(f(self.hf[k], self.floor_hf, self.contrast_hf))
     }
 
     /// Walk FORWARD from a nucleus to where that word's audio actually ends.
@@ -263,13 +269,13 @@ impl SpeechAnalysis {
     /// "Quiet" as a share of this item's own speech/silence contrast — self-calibrating,
     /// so it means the same thing in a whisper and in a shout.
     fn quiet_level(&self) -> f64 {
-        (0.15 * self.contrast).clamp(3.0, 12.0)
+        0.15
     }
     /// The bar for "this frame is part of a word at all" — deliberately far lower
     /// than [`Self::quiet_level`], so a word's onset ramp and its decaying tail are
     /// both counted as belonging to the word rather than to the surrounding pause.
     fn edge_level(&self) -> f64 {
-        (0.04 * self.contrast).clamp(1.5, 4.0)
+        0.04
     }
     /// How long the level must stay down to end a word: a fraction of the speaker's own
     /// syllable period, so it scales with speaking rate instead of assuming one.
@@ -856,11 +862,7 @@ mod tests {
     /// over a few tens of ms, and finding the word's extent with the same threshold
     /// used to detect gaps starts it late and leaves the attack behind, whatever
     /// sound the attack happens to be.
-    /// STATUS: RED — this reproduces the reported bug and does NOT yet pass. It is
-    /// kept (ignored) as the executable reproduction: the cut still starts ~110 ms
-    /// after the word's onset, so its attack survives. Remove the ignore when fixed.
     #[test]
-    #[ignore = "reproduces an unfixed bug: cut starts after a gradual onset"]
     fn removal_covers_a_gradual_vowel_onset() {
         let sr = SR;
         let mut s = Syn::new();
@@ -923,4 +925,5 @@ mod tests {
         }
     }
 }
+
 
