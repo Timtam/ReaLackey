@@ -1671,13 +1671,22 @@ fn cut_ranges_json(words: &[crate::providers::transcription::Word], spans: &[cra
         .iter()
         .map(|s| {
             let mut r = json!({ "start": s.start, "end": s.end });
+            // Limit each edge at the neighbouring word's MIDPOINT, not its reported
+            // boundary. Transcript boundaries are wrong by 50-200 ms (and Whisper's
+            // DTW makes one word's end identical to the next word's start), so
+            // bounding by them either gives no room at all — leaving a late-detected
+            // onset like the "sch" of "ständig" behind — or has to be loosened until
+            // it reaches into the previous word. A word's DURATION is far better
+            // estimated than its edges, and its midpoint is inside it for any
+            // plausible error, so this gives roughly half a word of room without ever
+            // reaching that word's previous syllable.
             if s.first_word > 0 {
                 if let Some(prev) = words.get(s.first_word - 1) {
-                    r["limit_start"] = json!(prev.end);
+                    r["limit_start"] = json!(prev.start + 0.5 * (prev.end - prev.start).max(0.0));
                 }
             }
             if let Some(next) = words.get(s.last_word + 1) {
-                r["limit_end"] = json!(next.start);
+                r["limit_end"] = json!(next.start + 0.5 * (next.end - next.start).max(0.0));
             }
             r
         })

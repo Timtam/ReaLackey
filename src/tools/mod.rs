@@ -7233,6 +7233,11 @@ const SNAP_OUT: f64 = 0.25;
 const SNAP_IN: f64 = 0.08;
 /// Analysis window for the snap — short enough to fit inside a brief pause.
 const SNAP_WINDOW: f64 = 0.02;
+/// Sample rate for boundary analysis. NOT the 16 kHz transcription rate: that
+/// Nyquist-limits at 8 kHz, and a female /s/ peaks at 6-9 kHz (a child's higher
+/// still), so for many voices the evidence that a sibilant is present simply isn't
+/// in the buffer — and a word-final "s" then reads as silence.
+const SNAP_SR: c_int = 32_000;
 /// A pause is a window at or below this share of the loudest window nearby.
 const SNAP_RATIO: f64 = 0.25;
 
@@ -7266,7 +7271,7 @@ fn snap_boundary<A>(
         return t;
     }
     let (samples, read_error) =
-        read_accessor_samples_at(low, acc, 1, TRANSCRIBE_SR, start, end - start);
+        read_accessor_samples_at(low, acc, 1, SNAP_SR, start, end - start);
     if read_error || samples.is_empty() {
         return t;
     }
@@ -7277,7 +7282,7 @@ fn snap_boundary<A>(
     };
     match crate::dsp::nearest_pause_centre(
         &samples,
-        TRANSCRIBE_SR as f64,
+        SNAP_SR as f64,
         SNAP_WINDOW,
         t - start,
         dir,
@@ -7389,18 +7394,18 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         .map(|r| (acc_start + r.start, acc_start + r.end))
         .collect();
     // Per-edge search limits from the caller's transcript knowledge, in project time.
-    // A small tolerance past a neighbouring word's reported boundary absorbs the
-    // transcript's own timing error without reaching that word's previous syllable.
-    const LIMIT_SLACK: f64 = 0.06;
+    // The caller supplies the neighbouring words' MIDPOINTS (see cut_ranges_json):
+    // already inside those words for any plausible transcript error, so no extra
+    // slack is wanted here — adding some would reach toward their previous syllable.
     let limits: Vec<(f64, f64)> = ranges
         .iter()
         .map(|r| {
             (
                 r.limit_start
-                    .map(|v| (acc_start + v - LIMIT_SLACK).max(acc_start))
+                    .map(|v| (acc_start + v).clamp(acc_start, acc_end))
                     .unwrap_or(acc_start),
                 r.limit_end
-                    .map(|v| (acc_start + v + LIMIT_SLACK).min(acc_end))
+                    .map(|v| (acc_start + v).clamp(acc_start, acc_end))
                     .unwrap_or(acc_end),
             )
         })

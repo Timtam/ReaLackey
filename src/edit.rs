@@ -264,7 +264,9 @@ pub fn plan_item_cut(
     norm.sort_by(|x, y| x.0.total_cmp(&y.0));
 
     // Merge overlapping / near-touching ranges so the gaps between them can't
-    // become sub-epsilon kept slivers.
+    // become sub-epsilon kept slivers. (This keeps the pieces tiling the item
+    // exactly. Protecting a real kept word from two converging removals is done
+    // upstream, before the ranges get here — see the snap guard in the executor.)
     let mut merged: Vec<(f64, f64)> = Vec::new();
     for (a, b) in norm {
         match merged.last_mut() {
