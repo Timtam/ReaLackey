@@ -36,9 +36,11 @@ const HOP: f64 = 0.010;
 /// invisible, which is exactly how an earlier version failed to see word boundaries
 /// at all. Pitch ripple is handled by smoothing the nucleus band only (below).
 const WIN: f64 = 0.020;
-/// Extra margin taken outside the measured word edges. Cutting a few ms of
-/// near-silence is inaudible; leaving a word's attack is not — so err outward.
-const GUARD: f64 = 0.025;
+/// Extra margin taken outside the measured word edges. The costs are asymmetric —
+/// removing a few ms of near-silence is inaudible, leaving a word's attack is
+/// immediately obvious — so err outward. Bounded by the silence actually available,
+/// per side, so it never eats into a kept word.
+const GUARD: f64 = 0.040;
 /// Smoothing applied to the NUCLEUS band only: bridges glottal-pulse ripple so one
 /// vowel yields one syllable. Never applied to the level bands — see WIN.
 const SMOOTH: f64 = 0.030;
@@ -316,14 +318,35 @@ impl SpeechAnalysis {
         // the word late and leaves its first syllable behind — which is exactly the
         // "the initial sound is still there" failure, whatever that sound happens to
         // be (a fricative in "ständig", a vowel in "ungefähr").
-        let edge = self.edge_level();
-        let (kd, ko) = (self.frame_at(d), self.frame_at(o));
-        let w0 = (kd..=ko).find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
-        let w1 = (kd..=ko).rev().find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
-        let (w0, w1) = match (w0, w1) {
-            (Some(a), Some(b)) if b >= a => (a, b),
-            _ => (d, o), // nothing but silence between the anchors
+        // Prefer to measure the removed word the same way we measure the kept ones:
+        // anchor on ITS nucleus and walk outward. A threshold crossing finds a word
+        // late, because an onset ramps up over tens of milliseconds before it passes
+        // any fixed bar — which is exactly how a word's attack keeps surviving the
+        // cut. Walking out from the nucleus stops at silence instead, so it captures
+        // the whole ramp.
+        let inner: Vec<f64> = self
+            .nuclei
+            .iter()
+            .copied()
+            .filter(|&n| n > a_prev && n < a_next)
+            .collect();
+        let (w0, w1) = match (inner.first(), inner.last()) {
+            (Some(&f), Some(&l)) => (self.onset_before(f, d), self.decay_after(l, o)),
+            _ => {
+                // No nucleus between the anchors (an unvoiced word, or the removal is
+                // only silence): fall back to a low threshold crossing.
+                let edge = self.edge_level();
+                let (kd, ko) = (self.frame_at(d), self.frame_at(o));
+                let a = (kd..=ko).find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
+                let b = (kd..=ko).rev().find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
+                match (a, b) {
+                    (Some(a), Some(b)) if b >= a => (a, b),
+                    _ => (d, o),
+                }
+            }
         };
+        let (w0, w1) = (w0.clamp(d, o), w1.clamp(d, o));
+        let (w0, w1) = if w1 >= w0 { (w0, w1) } else { (d, o) };
         // Spare silence on each side, and the gap we want at the join.
         let avail_l = (w0 - d).max(0.0);
         let avail_r = (o - w1).max(0.0);
@@ -338,10 +361,12 @@ impl SpeechAnalysis {
         // near-silence is inaudible, while leaving the attack of a deleted word is
         // immediately obvious. So bias outward past the measured edges, bounded by
         // the space actually available.
-        let guard = GUARD.min(avail_l.max(0.0)).min(avail_r.max(0.0));
+        // Per side: a tight gap on the right must not shrink the margin on the left.
+        let guard_l = GUARD.min(avail_l.max(0.0));
+        let guard_r = GUARD.min(avail_r.max(0.0));
         Some((
-            (d + take_l).min(w0 - guard).max(d),
-            (o - take_r).max(w1 + guard).min(o),
+            (d + take_l).min(w0 - guard_l).max(d),
+            (o - take_r).max(w1 + guard_r).min(o),
             if spare > 0.005 { Join::Butt } else { Join::Crossfade },
         ))
     }
