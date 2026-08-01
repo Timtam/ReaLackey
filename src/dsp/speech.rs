@@ -36,11 +36,6 @@ const HOP: f64 = 0.010;
 /// invisible, which is exactly how an earlier version failed to see word boundaries
 /// at all. Pitch ripple is handled by smoothing the nucleus band only (below).
 const WIN: f64 = 0.020;
-/// Extra margin taken outside the measured word edges. The costs are asymmetric —
-/// removing a few ms of near-silence is inaudible, leaving a word's attack is
-/// immediately obvious — so err outward. Bounded by the silence actually available,
-/// per side, so it never eats into a kept word.
-const GUARD: f64 = 0.040;
 /// Smoothing applied to the NUCLEUS band only: bridges glottal-pulse ripple so one
 /// vowel yields one syllable. Never applied to the level bands — see WIN.
 const SMOOTH: f64 = 0.030;
@@ -94,6 +89,7 @@ pub struct SpeechAnalysis {
     /// duration downstream is expressed in units of this, never in milliseconds,
     /// because syllable rate varies by ~2x across languages and as much again
     /// between talkers.
+    #[allow(dead_code)] // reported by tests; kept as the material's own rhythm
     pub syllable_period: f64,
 }
 
@@ -222,72 +218,10 @@ impl SpeechAnalysis {
             .max(f(self.hf[k], self.floor_hf, self.contrast_hf))
     }
 
-    /// Walk FORWARD from a nucleus to where that word's audio actually ends.
-    ///
-    /// The nucleus is a safe starting point (it is inside the word by construction),
-    /// so walking out from it cannot land in a neighbour. A brief intra-word dip — a
-    /// stop closure — does not end the walk, because the level must stay down for a
-    /// run; and a trailing fricative does not end it either, because [`Self::level`]
-    /// still sees its HF energy.
-    pub fn decay_after(&self, anchor: f64, limit: f64) -> f64 {
-        let quiet = self.quiet_level();
-        let need = self.run_frames();
-        let (from, to) = (self.frame_at(anchor), self.frame_at(limit));
-        let mut run = 0usize;
-        for k in from..=to {
-            if self.level(k) <= quiet {
-                run += 1;
-                if run >= need {
-                    return self.time_of(k + 1 - run);
-                }
-            } else {
-                run = 0;
-            }
-        }
-        self.time_of(to)
-    }
-
-    /// Walk BACKWARD from a nucleus to where that word's audio actually starts. This
-    /// is what finds a word-initial fricative ("sch-") that the transcript missed:
-    /// the walk passes straight through it because its HF energy keeps the level up.
-    pub fn onset_before(&self, anchor: f64, limit: f64) -> f64 {
-        let quiet = self.quiet_level();
-        let need = self.run_frames();
-        let (from, to) = (self.frame_at(anchor), self.frame_at(limit));
-        let mut run = 0usize;
-        for k in (to..=from).rev() {
-            if self.level(k) <= quiet {
-                run += 1;
-                if run >= need {
-                    return self.time_of(k + run - 1);
-                }
-            } else {
-                run = 0;
-            }
-        }
-        self.time_of(to)
-    }
-
     /// "Quiet" as a share of this item's own speech/silence contrast — self-calibrating,
     /// so it means the same thing in a whisper and in a shout.
     fn quiet_level(&self) -> f64 {
         0.15
-    }
-    /// The bar for "this frame is part of a word at all" — deliberately far lower
-    /// than [`Self::quiet_level`] (2% vs 15% of a band's range), so a word's onset
-    /// ramp and its decaying tail both count as belonging to the word rather than to
-    /// the surrounding pause. Set low on purpose: over-including a little room tone
-    /// is inaudible once cut, while under-including clips the attack.
-    fn edge_level(&self) -> f64 {
-        0.02
-    }
-    /// How long the level must stay down to end a word: a fraction of the speaker's own
-    /// syllable period, so it scales with speaking rate instead of assuming one.
-    fn run_frames(&self) -> usize {
-        // Kept small deliberately: a fast read separates words by only 30-50 ms, and
-        // requiring a longer run than the gap itself makes every boundary invisible.
-        // Two frames is the resolution floor (one analysis window of quiet).
-        ((0.10 * self.syllable_period / self.hop).round() as usize).clamp(2, 4)
     }
 
     /// Place BOTH edges of a removal between two anchoring nuclei.
@@ -302,120 +236,87 @@ impl SpeechAnalysis {
     ///
     /// Returns `(start, end, join)` in analysis time, leaving one natural-sounding
     /// gap at the join.
-    /// The measured intermediate values behind one placement, for diagnostics. Real
+    /// The measured intermediate values behind one placement, for diagnostics: the
+    /// removed word's own syllable nuclei, and the two chosen cut points. Real
     /// recordings are the only way to know whether the analysis matches what a
     /// listener hears, so the tool surfaces these rather than making the user guess.
-    pub fn explain(&self, a_prev: f64, a_next: f64) -> (f64, f64, f64, f64) {
-        let d = self.decay_after(a_prev, a_next);
-        let o = self.onset_before(a_next, a_prev);
+    pub fn explain(&self, a_prev: f64, a_next: f64) -> (f64, f64, usize) {
         let inner: Vec<f64> = self
             .nuclei
             .iter()
             .copied()
             .filter(|&n| n > a_prev && n < a_next)
             .collect();
-        let edge = self.edge_level();
-        let (kd, ko) = (self.frame_at(d), self.frame_at(o));
-        let sf = (kd..=ko)
-            .find(|&k| self.level(k) > edge)
-            .map(|k| self.time_of(k))
-            .unwrap_or(d);
-        let sl = (kd..=ko)
-            .rev()
-            .find(|&k| self.level(k) > edge)
-            .map(|k| self.time_of(k))
-            .unwrap_or(o);
-        let (w0, w1) = match (inner.first(), inner.last()) {
-            (Some(&f), Some(&l)) => (
-                self.onset_before(f, d).min(sf),
-                self.decay_after(l, o).max(sl),
-            ),
-            _ => (sf, sl),
+        let first = inner.first().copied().unwrap_or((a_prev + a_next) / 2.0);
+        let last = inner.last().copied().unwrap_or(first);
+        (first, last, inner.len())
+    }
+
+    /// The best cut point between two syllabic nuclei: the EARLIEST frame whose level
+    /// is within `tol` of the quietest in the range (or the latest, per `prefer_late`).
+    ///
+    /// A minimum always exists, so unlike a threshold this can never "find nothing" —
+    /// which matters because in connected speech the level between two words often
+    /// never approaches the noise floor at all (room tone, breath, reverb tail), and
+    /// a fixed bar then silently fails on the majority of real material.
+    ///
+    /// Taking the earliest near-minimum rather than the global one is deliberate: a
+    /// stop closure inside the removed word's onset (the /t/ of "ständig") is quieter
+    /// than the fricative in front of it, so a plain argmin would cut after the "sch"
+    /// and leave it behind. The earliest equally-quiet point is the true word gap.
+    fn best_cut_between(&self, from: f64, to: f64, prefer_late: bool) -> f64 {
+        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
+        if hi <= lo {
+            return self.time_of(lo);
+        }
+        let min = (lo..=hi).map(|k| self.level(k)).fold(f64::INFINITY, f64::min);
+        // Within 3% of a band's range counts as "equally quiet".
+        let tol = min + 0.03;
+        let pick = if prefer_late {
+            (lo..=hi).rev().find(|&k| self.level(k) <= tol)
+        } else {
+            (lo..=hi).find(|&k| self.level(k) <= tol)
         };
-        (d, w0, w1, o)
+        self.time_of(pick.unwrap_or(lo))
     }
 
     pub fn place_removal(&self, a_prev: f64, a_next: f64) -> Option<(f64, f64, Join)> {
         if a_next <= a_prev {
             return None;
         }
-        let d = self.decay_after(a_prev, a_next); // previous word really ends here
-        let o = self.onset_before(a_next, a_prev); // next word really starts here
-        if o <= d {
-            // Connected speech: no silence between them at all. Splice at the midpoint
-            // and let the caller crossfade.
-            let mid = (d + o) / 2.0;
-            return Some((mid, mid, Join::Crossfade));
-        }
-        // The removed word's own extent inside the band. Found with a much LOWER
-        // threshold than gap detection uses: a word's onset ramps up over a few tens
-        // of milliseconds, so anything set high enough to call a gap "quiet" starts
-        // the word late and leaves its first syllable behind — which is exactly the
-        // "the initial sound is still there" failure, whatever that sound happens to
-        // be (a fricative in "ständig", a vowel in "ungefähr").
-        // Prefer to measure the removed word the same way we measure the kept ones:
-        // anchor on ITS nucleus and walk outward. A threshold crossing finds a word
-        // late, because an onset ramps up over tens of milliseconds before it passes
-        // any fixed bar — which is exactly how a word's attack keeps surviving the
-        // cut. Walking out from the nucleus stops at silence instead, so it captures
-        // the whole ramp.
+        // The removed word's own syllables: they lie between the two anchors by
+        // construction. Each cut edge is then placed in the quietest part of the
+        // stretch between a KEPT word's nucleus and the removed word's nearest one —
+        // that stretch contains the word boundary and nothing else worth keeping.
         let inner: Vec<f64> = self
             .nuclei
             .iter()
             .copied()
             .filter(|&n| n > a_prev && n < a_next)
             .collect();
-        // Two independent estimates of where the removed run starts and ends; take
-        // the more conservative (outermost) of each. They fail in different
-        // directions, so the pair is far more robust than either alone:
-        //
-        // * Scanning OUTWARD-IN from the neighbouring silence finds the first sound
-        //   there is — including a leading fricative — but a low bar is needed to
-        //   catch a gradual onset.
-        // * Walking back from the removed word's own nucleus tracks the ramp
-        //   properly, but stops at any quiet patch INSIDE the word: a stop closure is
-        //   20-50 ms of real silence, so an onset in front of one (the "sch" before
-        //   the /t/ of "ständig") would be left behind.
-        let edge = self.edge_level();
-        let (kd, ko) = (self.frame_at(d), self.frame_at(o));
-        let scan_first = (kd..=ko).find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
-        let scan_last = (kd..=ko).rev().find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
-        let (w0, w1) = match (inner.first(), inner.last()) {
-            (Some(&f), Some(&l)) => (
-                self.onset_before(f, d).min(scan_first.unwrap_or(d)),
-                self.decay_after(l, o).max(scan_last.unwrap_or(o)),
-            ),
-            // No nucleus between the anchors (an unvoiced word, or the removal is
-            // only silence): the scan is all we have.
-            _ => match (scan_first, scan_last) {
-                (Some(a), Some(b)) if b >= a => (a, b),
-                _ => (d, o),
-            },
+        let (first_in, last_in) = match (inner.first(), inner.last()) {
+            (Some(&f), Some(&l)) => (f, l),
+            // No nucleus between the anchors (unvoiced or silence-only removal):
+            // treat the middle of the band as the removed content.
+            _ => {
+                let m = (a_prev + a_next) / 2.0;
+                (m, m)
+            }
         };
-        let (w0, w1) = (w0.clamp(d, o), w1.clamp(d, o));
-        let (w0, w1) = if w1 >= w0 { (w0, w1) } else { (d, o) };
-        // Spare silence on each side, and the gap we want at the join.
-        let avail_l = (w0 - d).max(0.0);
-        let avail_r = (o - w1).max(0.0);
-        let spare = avail_l + avail_r;
-        let target = (0.5 * self.syllable_period).clamp(0.040, 0.220);
-        let extra = target.min(spare);
-        // Proportional, not 50/50: with a 40 ms gap on one side and 600 ms on the
-        // other, an even split would put an edge inside the removed word.
-        let take_l = if spare > 0.0 { extra * avail_l / spare } else { 0.0 };
-        let take_r = extra - take_l;
-        // Guard band. The costs are asymmetric: cutting a few extra milliseconds of
-        // near-silence is inaudible, while leaving the attack of a deleted word is
-        // immediately obvious. So bias outward past the measured edges, bounded by
-        // the space actually available.
-        // Per side: a tight gap on the right must not shrink the margin on the left.
-        let guard_l = GUARD.min(avail_l.max(0.0));
-        let guard_r = GUARD.min(avail_r.max(0.0));
-        Some((
-            (d + take_l).min(w0 - guard_l).max(d),
-            (o - take_r).max(w1 + guard_r).min(o),
-            if spare > 0.005 { Join::Butt } else { Join::Crossfade },
-        ))
+        let start = self.best_cut_between(a_prev, first_in, false);
+        let end = self.best_cut_between(last_in, a_next, true);
+        let (start, end) = if end >= start { (start, end) } else { (start, start) };
+        // If both chosen points really are near silence the fragments can abut;
+        // otherwise this is connected speech and the join needs a crossfade.
+        let quiet = self.quiet_level();
+        let join = if self.level(self.frame_at(start)) <= quiet
+            && self.level(self.frame_at(end)) <= quiet
+        {
+            Join::Butt
+        } else {
+            Join::Crossfade
+        };
+        Some((start, end, join))
     }
 
 }

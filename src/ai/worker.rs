@@ -1680,18 +1680,19 @@ fn cut_analysis_lines(cut: &Value) -> Vec<String> {
             num(a.and_then(|x| x.get(1))),
         )
     };
-    let mut out = vec![format!("Cut boundary analysis ({} cut(s)):", rows.len())];
+    let mut out = vec![format!(
+        "Cut boundary analysis ({} cut(s)) — all times in seconds from the item start:",
+        rows.len()
+    )];
     for (i, r) in rows.iter().enumerate() {
         let (a0, a1) = pair(r.get("asked"));
         let (n0, n1) = pair(r.get("anchors"));
-        let (w0, w1) = pair(r.get("removed_word"));
+        let (s0, s1) = pair(r.get("removed_span"));
+        let (c0, c1) = pair(r.get("cut"));
         out.push(format!(
-            "  {}. transcript said {a0:.3}–{a1:.3} · anchors {n0:.3}/{n1:.3} · \
-             previous word ends {:.3} · removed word measured {w0:.3}–{w1:.3} · \
-             next word starts {:.3}",
+            "  {}. transcript {a0:.3}-{a1:.3} · anchors {n0:.3}/{n1:.3} ·              {} syllable(s) at {s0:.3}-{s1:.3} · CUT {c0:.3}-{c1:.3}",
             i + 1,
-            num(r.get("prev_word_ends")),
-            num(r.get("next_word_starts")),
+            r.get("removed_syllables").and_then(|v| v.as_u64()).unwrap_or(0),
         ));
     }
     if let Some(n) = cut.get("joins_without_pause").and_then(|v| v.as_u64()) {

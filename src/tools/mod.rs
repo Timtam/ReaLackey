@@ -7477,14 +7477,18 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                 // know whether these measurements match what a listener hears, so
                 // report them instead of asking the user to guess at a symptom.
                 {
-                    let (d, w0, w1, o) = an.explain(a_prev, a_next);
-                    let r2 = |x: f64| (x * 1000.0).round() / 1000.0;
+                    // Everything reported in ITEM time, the same timeline the
+                    // transcript uses, so the numbers can be compared directly.
+                    let (syl_a, syl_b, n_syl) = an.explain(a_prev, a_next);
+                    let itm = |t: f64| r0 + t - acc_start;
+                    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+                    let placed = an.place_removal(a_prev, a_next);
                     diagnostics.push(json!({
-                        "asked": [r2(src.start), r2(src.end)],
-                        "anchors": [r2(a_prev), r2(a_next)],
-                        "prev_word_ends": r2(d),
-                        "removed_word": [r2(w0), r2(w1)],
-                        "next_word_starts": r2(o),
+                        "asked": [r3(src.start), r3(src.end)],
+                        "anchors": [r3(itm(a_prev)), r3(itm(a_next))],
+                        "removed_syllables": n_syl,
+                        "removed_span": [r3(itm(syl_a)), r3(itm(syl_b))],
+                        "cut": placed.map(|(s, e, _)| json!([r3(itm(s)), r3(itm(e))])),
                     }));
                 }
                 match an.place_removal(a_prev, a_next) {
