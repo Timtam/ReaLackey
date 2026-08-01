@@ -274,10 +274,12 @@ impl SpeechAnalysis {
         0.15
     }
     /// The bar for "this frame is part of a word at all" — deliberately far lower
-    /// than [`Self::quiet_level`], so a word's onset ramp and its decaying tail are
-    /// both counted as belonging to the word rather than to the surrounding pause.
+    /// than [`Self::quiet_level`] (2% vs 15% of a band's range), so a word's onset
+    /// ramp and its decaying tail both count as belonging to the word rather than to
+    /// the surrounding pause. Set low on purpose: over-including a little room tone
+    /// is inaudible once cut, while under-including clips the attack.
     fn edge_level(&self) -> f64 {
-        0.04
+        0.02
     }
     /// How long the level must stay down to end a word: a fraction of the speaker's own
     /// syllable period, so it scales with speaking rate instead of assuming one.
@@ -300,6 +302,39 @@ impl SpeechAnalysis {
     ///
     /// Returns `(start, end, join)` in analysis time, leaving one natural-sounding
     /// gap at the join.
+    /// The measured intermediate values behind one placement, for diagnostics. Real
+    /// recordings are the only way to know whether the analysis matches what a
+    /// listener hears, so the tool surfaces these rather than making the user guess.
+    pub fn explain(&self, a_prev: f64, a_next: f64) -> (f64, f64, f64, f64) {
+        let d = self.decay_after(a_prev, a_next);
+        let o = self.onset_before(a_next, a_prev);
+        let inner: Vec<f64> = self
+            .nuclei
+            .iter()
+            .copied()
+            .filter(|&n| n > a_prev && n < a_next)
+            .collect();
+        let edge = self.edge_level();
+        let (kd, ko) = (self.frame_at(d), self.frame_at(o));
+        let sf = (kd..=ko)
+            .find(|&k| self.level(k) > edge)
+            .map(|k| self.time_of(k))
+            .unwrap_or(d);
+        let sl = (kd..=ko)
+            .rev()
+            .find(|&k| self.level(k) > edge)
+            .map(|k| self.time_of(k))
+            .unwrap_or(o);
+        let (w0, w1) = match (inner.first(), inner.last()) {
+            (Some(&f), Some(&l)) => (
+                self.onset_before(f, d).min(sf),
+                self.decay_after(l, o).max(sl),
+            ),
+            _ => (sf, sl),
+        };
+        (d, w0, w1, o)
+    }
+
     pub fn place_removal(&self, a_prev: f64, a_next: f64) -> Option<(f64, f64, Join)> {
         if a_next <= a_prev {
             return None;
@@ -330,20 +365,32 @@ impl SpeechAnalysis {
             .copied()
             .filter(|&n| n > a_prev && n < a_next)
             .collect();
+        // Two independent estimates of where the removed run starts and ends; take
+        // the more conservative (outermost) of each. They fail in different
+        // directions, so the pair is far more robust than either alone:
+        //
+        // * Scanning OUTWARD-IN from the neighbouring silence finds the first sound
+        //   there is — including a leading fricative — but a low bar is needed to
+        //   catch a gradual onset.
+        // * Walking back from the removed word's own nucleus tracks the ramp
+        //   properly, but stops at any quiet patch INSIDE the word: a stop closure is
+        //   20-50 ms of real silence, so an onset in front of one (the "sch" before
+        //   the /t/ of "ständig") would be left behind.
+        let edge = self.edge_level();
+        let (kd, ko) = (self.frame_at(d), self.frame_at(o));
+        let scan_first = (kd..=ko).find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
+        let scan_last = (kd..=ko).rev().find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
         let (w0, w1) = match (inner.first(), inner.last()) {
-            (Some(&f), Some(&l)) => (self.onset_before(f, d), self.decay_after(l, o)),
-            _ => {
-                // No nucleus between the anchors (an unvoiced word, or the removal is
-                // only silence): fall back to a low threshold crossing.
-                let edge = self.edge_level();
-                let (kd, ko) = (self.frame_at(d), self.frame_at(o));
-                let a = (kd..=ko).find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
-                let b = (kd..=ko).rev().find(|&k| self.level(k) > edge).map(|k| self.time_of(k));
-                match (a, b) {
-                    (Some(a), Some(b)) if b >= a => (a, b),
-                    _ => (d, o),
-                }
-            }
+            (Some(&f), Some(&l)) => (
+                self.onset_before(f, d).min(scan_first.unwrap_or(d)),
+                self.decay_after(l, o).max(scan_last.unwrap_or(o)),
+            ),
+            // No nucleus between the anchors (an unvoiced word, or the removal is
+            // only silence): the scan is all we have.
+            _ => match (scan_first, scan_last) {
+                (Some(a), Some(b)) if b >= a => (a, b),
+                _ => (d, o),
+            },
         };
         let (w0, w1) = (w0.clamp(d, o), w1.clamp(d, o));
         let (w0, w1) = if w1 >= w0 { (w0, w1) } else { (d, o) };
@@ -879,6 +926,40 @@ mod tests {
         assert!(
             cut_e >= fric_end - 0.015,
             "cut ends at {cut_e}, before the trailing fricative ends at {fric_end}"
+        );
+    }
+
+    /// "ständig" in full: /ʃ/ then a /t/ CLOSURE then the vowel. Walking back from
+    /// the vowel's nucleus stops at that closure — it is 20-50 ms of real silence,
+    /// indistinguishable from a word gap — which leaves the "sch" in front of it
+    /// outside the cut. The word's start must be found by scanning FORWARD from the
+    /// previous word's decay, where the first sound encountered is the fricative.
+    #[test]
+    fn removal_covers_an_onset_before_an_internal_closure() {
+        let mut s = Syn::new();
+        s.quiet(0.25);
+        let w1 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w1_end = s.at();
+        s.quiet(0.07); // the true word gap
+        let rem = s.at();
+        s.fricative(0.09, 0.06); // "sch"
+        s.quiet(0.035); // /t/ closure — looks exactly like a gap
+        s.burst(0.22); // /t/ release
+        s.vowel(0.16, 120.0, 0.5); // "-ändig"
+        let rem_end = s.at();
+        s.quiet(0.07);
+        let w2 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w2_end = s.at();
+        s.quiet(0.25);
+        let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
+        let (p, n) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
+        let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
+        let (cut_s, _, _) = a.place_removal(p, n).expect("placed");
+        assert!(
+            cut_s <= rem + 0.015,
+            "cut starts at {cut_s}, after the fricative at {rem} — the 'sch' survives"
         );
     }
 

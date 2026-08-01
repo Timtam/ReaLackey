@@ -7437,6 +7437,7 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     let mut snapped = 0usize;
     let mut snap_rejected = 0usize;
     let mut crossfaded = 0usize;
+    let mut diagnostics: Vec<Value> = Vec::new();
     // Nuclei-anchored placement: analyse the edit region ONCE, then place each edge
     // inside the band bounded by the neighbouring kept words' syllabic nuclei. This
     // supersedes the level-based snap below wherever the caller supplied the
@@ -7472,6 +7473,20 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                 let a_next = an_.unwrap_or(r1 - r0);
                 // analysis time -> project time
                 let abs = |t: f64| r0 + t;
+                // Diagnostics in the tool result: a real recording is the only way to
+                // know whether these measurements match what a listener hears, so
+                // report them instead of asking the user to guess at a symptom.
+                {
+                    let (d, w0, w1, o) = an.explain(a_prev, a_next);
+                    let r2 = |x: f64| (x * 1000.0).round() / 1000.0;
+                    diagnostics.push(json!({
+                        "asked": [r2(src.start), r2(src.end)],
+                        "anchors": [r2(a_prev), r2(a_next)],
+                        "prev_word_ends": r2(d),
+                        "removed_word": [r2(w0), r2(w1)],
+                        "next_word_starts": r2(o),
+                    }));
+                }
                 match an.place_removal(a_prev, a_next) {
                     Some((s, e, join)) => {
                         // Outward only: eating extra silence is nearly free, leaving
@@ -7643,6 +7658,8 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         // still correct, but the join wants a crossfade rather than a butt splice.
         "joins_without_pause": crossfaded,
         "placed_by_nuclei": placed_by_nuclei,
+        // Measured boundary analysis per cut, for diagnosing a mis-placed edit.
+        "analysis": diagnostics,
     }))
 }
 
