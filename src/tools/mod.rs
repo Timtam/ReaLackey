@@ -7293,32 +7293,55 @@ fn snap_boundary<A>(
 /// `{start, end}` objects (or `[start, end]` pairs), each in SECONDS FROM THE
 /// ITEM'S AUDIO START. Out-of-range / inverted values are tolerated — the planner
 /// clamps and drops them.
-fn parse_cut_ranges(input: &Value) -> Result<Vec<(f64, f64)>, String> {
+fn parse_cut_ranges(input: &Value) -> Result<Vec<CutRange>, String> {
     let arr = input
         .get("ranges")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "missing 'ranges' array of {start, end} seconds".to_string())?;
     let mut out = Vec::with_capacity(arr.len());
     for (i, r) in arr.iter().enumerate() {
-        let (s, e) = if let Some(o) = r.as_object() {
+        let (s, e, ls, le) = if let Some(o) = r.as_object() {
             (
                 o.get("start").and_then(|v| v.as_f64()),
                 o.get("end").and_then(|v| v.as_f64()),
+                o.get("limit_start").and_then(|v| v.as_f64()),
+                o.get("limit_end").and_then(|v| v.as_f64()),
             )
         } else if let Some(pair) = r.as_array() {
             (
                 pair.first().and_then(|v| v.as_f64()),
                 pair.get(1).and_then(|v| v.as_f64()),
+                None,
+                None,
             )
         } else {
-            (None, None)
+            (None, None, None, None)
         };
         match (s, e) {
-            (Some(s), Some(e)) => out.push((s, e)),
+            (Some(s), Some(e)) => out.push(CutRange {
+                start: s,
+                end: e,
+                limit_start: ls,
+                limit_end: le,
+            }),
             _ => return Err(format!("range {i} must have a numeric start and end")),
         }
     }
     Ok(out)
+}
+
+/// One span to cut, with optional limits on how far its edges may be nudged when
+/// snapping to silence. The caller knows the transcript, so it can say "this cut may
+/// not reach back past the previous kept word" — without that, the search can find a
+/// plosive closure INSIDE the preceding word (e.g. the /p/ in "Ja-pan") and take that
+/// word's last syllable with it.
+struct CutRange {
+    start: f64,
+    end: f64,
+    /// Earliest time the START edge may move to (seconds, same timeline as `start`).
+    limit_start: Option<f64>,
+    /// Latest time the END edge may move to.
+    limit_end: Option<f64>,
 }
 
 /// Cut one or more time ranges out of a media item and close the gaps.
@@ -7363,7 +7386,24 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     // Map ranges (item-relative) to project time.
     let mut project_removes: Vec<(f64, f64)> = ranges
         .iter()
-        .map(|&(s, e)| (acc_start + s, acc_start + e))
+        .map(|r| (acc_start + r.start, acc_start + r.end))
+        .collect();
+    // Per-edge search limits from the caller's transcript knowledge, in project time.
+    // A small tolerance past a neighbouring word's reported boundary absorbs the
+    // transcript's own timing error without reaching that word's previous syllable.
+    const LIMIT_SLACK: f64 = 0.06;
+    let limits: Vec<(f64, f64)> = ranges
+        .iter()
+        .map(|r| {
+            (
+                r.limit_start
+                    .map(|v| (acc_start + v - LIMIT_SLACK).max(acc_start))
+                    .unwrap_or(acc_start),
+                r.limit_end
+                    .map(|v| (acc_start + v + LIMIT_SLACK).min(acc_end))
+                    .unwrap_or(acc_end),
+            )
+        })
         .collect();
 
     // Nudge each boundary into the nearest pause. Speech-recognition word timings
@@ -7378,9 +7418,9 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         // Snapping must never make a removal SMALLER — that leaves the head or tail
         // of the word the user deleted audible. Each edge may only move outward.
         let original = project_removes.clone();
-        for (r, orig) in project_removes.iter_mut().zip(&original) {
-            let a = snap_boundary(low, acc, acc_start, acc_end, r.0, true).min(orig.0);
-            let b = snap_boundary(low, acc, acc_start, acc_end, r.1, false).max(orig.1);
+        for ((r, orig), lim) in project_removes.iter_mut().zip(&original).zip(&limits) {
+            let a = snap_boundary(low, acc, lim.0, lim.1, r.0, true).min(orig.0);
+            let b = snap_boundary(low, acc, lim.0, lim.1, r.1, false).max(orig.1);
             if b - a > CUT_EPSILON {
                 if (a - r.0).abs() > CUT_EPSILON {
                     snapped += 1;

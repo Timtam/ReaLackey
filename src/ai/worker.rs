@@ -1363,11 +1363,7 @@ async fn cut_item_by_text(
     // 4. Cut via the shared executor. The remove spans are in the transcript timeline
     // (seconds from the item start), which the executor maps to project time. Track
     // the item by GUID so a project edit during transcription can't hit the wrong one.
-    let ranges: Vec<Value> = plan
-        .remove
-        .iter()
-        .map(|s| json!({ "start": s.start, "end": s.end }))
-        .collect();
+    let ranges = cut_ranges_json(&t.transcript.words, &plan.remove);
     let removed_seconds = plan.removed_seconds();
     let removed_words: usize = plan.remove.iter().map(|s| s.words()).sum();
     let cut = exec_tool(
@@ -1649,10 +1645,7 @@ async fn run_cut_editor(
         return CutEditorOutcome::NothingToCut;
     }
     let removed_seconds: f64 = spans.iter().map(|s| (s.end - s.start).max(0.0)).sum();
-    let ranges: Vec<Value> = spans
-        .iter()
-        .map(|s| json!({ "start": s.start, "end": s.end }))
-        .collect();
+    let ranges = cut_ranges_json(&t.transcript.words, &spans);
     let cut = exec_tool(
         op_tx,
         "remove_item_time_ranges".to_string(),
@@ -1664,6 +1657,31 @@ async fn run_cut_editor(
     }
     let cut_result: Value = serde_json::from_str(&cut.content).unwrap_or_default();
     CutEditorOutcome::Done { removed_seconds, cut: cut_result }
+}
+
+/// Build the `ranges` argument for `remove_item_time_ranges`, carrying each span's
+/// SEARCH LIMITS: the end of the previous kept word and the start of the next one.
+///
+/// Without them the executor's silence-snap can reach past a neighbouring word into
+/// a plosive closure inside it (the /p/ in "Ja-pan" is genuine silence) and take that
+/// word's last syllable with the cut. The transcript is the only thing that knows
+/// where the neighbouring words are, so the limits have to come from here.
+fn cut_ranges_json(words: &[crate::providers::transcription::Word], spans: &[crate::edit::Span]) -> Vec<Value> {
+    spans
+        .iter()
+        .map(|s| {
+            let mut r = json!({ "start": s.start, "end": s.end });
+            if s.first_word > 0 {
+                if let Some(prev) = words.get(s.first_word - 1) {
+                    r["limit_start"] = json!(prev.end);
+                }
+            }
+            if let Some(next) = words.get(s.last_word + 1) {
+                r["limit_end"] = json!(next.start);
+            }
+            r
+        })
+        .collect()
 }
 
 /// A bindable REAPER action: open the cut-by-text editor on the selected item, then

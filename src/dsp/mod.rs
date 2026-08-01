@@ -1060,13 +1060,21 @@ pub fn nearest_pause_centre(
     // Walk outward to the first quiet frame — but never further than `max_move`,
     // so the search can't stride past a neighbouring word into a distant pause.
     let reach = ((max_move * sample_rate) / hop as f64).ceil().max(1.0) as usize;
+    // A pause must also be long enough. A stop closure INSIDE a word (the /p/ in
+    // "Ja-pan") is real silence, so level alone can't tell it from a word gap; but a
+    // closure dip is brief, and requiring a couple of quiet frames in a row skips the
+    // shortest of them.
+    let min_run = 2usize;
+    let quiet_from = |j: usize| -> bool {
+        (j..(j + min_run).min(frames.len())).all(|k| frames[k] <= thresh)
+            && j + min_run <= frames.len()
+    };
     let found = match direction {
         PauseDir::Backward => (start_idx.saturating_sub(reach)..=start_idx)
             .rev()
-            .find(|&j| frames[j] <= thresh),
-        PauseDir::Forward => {
-            ((start_idx)..frames.len().min(start_idx + reach + 1)).find(|&j| frames[j] <= thresh)
-        }
+            .find(|&j| frames[j] <= thresh && (quiet_from(j) || quiet_from(j.saturating_sub(1)))),
+        PauseDir::Forward => ((start_idx)..frames.len().min(start_idx + reach + 1))
+            .find(|&j| frames[j] <= thresh && quiet_from(j.saturating_sub(1))),
     }?;
     // ...then span the contiguous quiet run, BOUNDED. Unbounded extension was the
     // bug: on fast speech the run swallowed neighbouring quiet words and its centre
@@ -1161,6 +1169,38 @@ mod tests {
         assert!(
             c >= quiet_end,
             "landed at {c}, inside the quiet word [{quiet_start}, {quiet_end}] — it was swallowed"
+        );
+    }
+
+    /// REGRESSION ("Ja-pan"): a plosive CLOSURE inside the previous word is genuine
+    /// silence, so level alone can't tell it from a word gap. Searching backward from
+    /// the next word must not land in it — that cut takes the previous word's last
+    /// syllable ("Japan ständig" -> cutting "ständig" also ate "pan"). The caller
+    /// bounds the search at the previous word's end; this checks the DSP side, that a
+    /// very brief closure dip doesn't qualify as a pause.
+    #[test]
+    fn nearest_pause_ignores_a_brief_stop_closure() {
+        let sr = 16_000.0;
+        let tone = |n: usize, amp: f64| {
+            (0..n).map(move |i| (2.0 * PI * 440.0 * i as f64 / sr).sin() * amp)
+        };
+        let ms = |t: f64| (sr * t) as usize;
+        // "Ja" | 20ms /p/ closure | "pan" | 40ms word gap | "ständig"
+        let mut s = Vec::new();
+        s.extend(tone(ms(0.12), 0.5)); // "Ja"
+        s.extend(std::iter::repeat_n(0.0, ms(0.02))); // brief closure — NOT a pause
+        let pan_start = s.len() as f64 / sr;
+        s.extend(tone(ms(0.15), 0.5)); // "pan"
+        s.extend(std::iter::repeat_n(0.0, ms(0.04))); // the real word gap
+        let next_start = s.len() as f64 / sr;
+        s.extend(tone(ms(0.20), 0.5)); // "ständig"
+
+        // Boundary just inside "ständig", searching back for its preceding pause.
+        let c = nearest_pause_centre(&s, sr, 0.02, next_start + 0.02, PauseDir::Backward, 0.25, 0.25)
+            .unwrap();
+        assert!(
+            c > pan_start,
+            "landed at {c}, at/before the closure at {pan_start} — 'pan' would be cut off"
         );
     }
 
