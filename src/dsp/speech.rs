@@ -46,6 +46,29 @@ const NUCLEUS_PROMINENCE_DB: f64 = 2.0;
 /// can't be required: a run above the speech/silence split at least this long. Below
 /// the shortest vowel nucleus in fast speech (~60-80 ms), so it still rejects clicks.
 const MIN_UNVOICED_NUCLEUS: f64 = 0.040;
+/// A band with less range than this says nothing useful and is excluded.
+const MIN_BAND_RANGE: f64 = 6.0;
+/// A search stretch with less dynamic range than this has no measurable boundary —
+/// a music bed, a long reverb tail, crosstalk. Refuse rather than guess.
+const MIN_STRETCH_RANGE: f64 = 6.0;
+/// Floor on the "equally quiet" tolerance, so it can never be finer than the
+/// measurement's own jitter.
+const MIN_TOL_DB: f64 = 1.0;
+/// Ceiling on the same tolerance, so a noisy estimate can never widen "equally
+/// quiet" far enough to swallow a word's decay.
+const MAX_TOL_DB: f64 = 6.0;
+
+/// Where a removal's two edges go, and how they should be joined.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub start: f64,
+    pub end: f64,
+    /// Equal-power fade length for the join, in seconds.
+    pub fade: f64,
+    /// The pause left at the join — the single number that exposes a placement which
+    /// swallowed the silence, so it is reported.
+    pub gap: f64,
+}
 
 /// How a boundary should be joined once placed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,23 +222,30 @@ impl SpeechAnalysis {
         self.nuclei.iter().filter(|&&n| n > a && n < b).count()
     }
 
-    /// How "loud" a frame is, as a FRACTION of each band's own dynamic range, taken
-    /// as the max across bands. A frame is quiet only when every band is quiet — that
-    /// is what stops a fricative, whose broadband level collapses but whose HF does
-    /// not, from counting as silence.
+    /// How loud a frame is, in dB above the noise floor, as the max over the bands
+    /// that have enough range to be meaningful.
     ///
-    /// Normalising per band is essential: a narrow band has a much lower noise floor
-    /// than a wide one, so raw "dB above my own floor" is not comparable between
-    /// them, and a max() over those raw numbers lets the narrowest band veto every
-    /// gap. (That bug made real inter-word silences invisible: broadband sat 0.2 dB
-    /// over its floor while a 60-350 Hz band read 9 dB over its own — mostly filter
-    /// ringing and the previous vowel's fundamental decaying.)
+    /// dB, not a fraction of the range: `tol` downstream is then a physical quantity
+    /// rather than "3% of whatever this item's contrast happened to be", which was
+    /// 1.7 dB on a clean recording and 0.36 dB on a phone call — below the noise of
+    /// the estimate itself, so the comparison degenerated into picking estimator
+    /// artefacts. A band with under MIN_BAND_RANGE of range says nothing and is
+    /// excluded rather than contributing a near-zero denominator.
     fn level(&self, k: usize) -> f64 {
-        let f = |v: f64, floor: f64, contrast: f64| {
-            if contrast > 1.0 { ((v - floor) / contrast).max(0.0) } else { 0.0 }
-        };
-        f(self.bb[k], self.floor_bb, self.contrast_bb)
-            .max(f(self.hf[k], self.floor_hf, self.contrast_hf))
+        let mut m = 0.0f64;
+        if self.contrast_bb >= MIN_BAND_RANGE {
+            m = m.max((self.bb[k] - self.floor_bb).clamp(0.0, self.contrast_bb));
+        }
+        if self.contrast_hf >= MIN_BAND_RANGE {
+            m = m.max((self.hf[k] - self.floor_hf).clamp(0.0, self.contrast_hf));
+        }
+        m
+    }
+
+    /// True when no band has enough range to measure anything (a music bed, a very
+    /// reverberant room, heavy compression). The caller must refuse rather than cut.
+    fn bands_unusable(&self) -> bool {
+        self.contrast_bb < MIN_BAND_RANGE && self.contrast_hf < MIN_BAND_RANGE
     }
 
     /// "Quiet" as a share of this item's own speech/silence contrast — self-calibrating,
@@ -236,6 +266,74 @@ impl SpeechAnalysis {
     ///
     /// Returns `(start, end, join)` in analysis time, leaving one natural-sounding
     /// gap at the join.
+
+    /// Contiguous runs of "as quiet as it gets here" within `[from, to]`, as frame
+    /// index ranges, with stop closures removed.
+    ///
+    /// The baseline is the 10th percentile, NOT the sample minimum: over ~50 frames a
+    /// minimum is biased low by two or three standard deviations, so selecting an
+    /// extreme relative to it is extreme-value statistics on measurement noise. The
+    /// tolerance scales with the material's own frame-to-frame jitter (MAD), so it can
+    /// never be finer than the measurement.
+    fn quiet_runs(&self, from: f64, to: f64) -> Vec<(usize, usize)> {
+        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
+        if hi < lo + 2 {
+            return Vec::new();
+        }
+        let mut lv: Vec<f64> = (lo..=hi).map(|k| self.level(k)).collect();
+        lv.sort_by(|a, b| a.total_cmp(b));
+        let base = percentile(&lv, 10.0);
+        // Median absolute deviation over the quieter half — the jitter of the floor
+        // estimate itself, not of the speech.
+        // Jitter estimated over the lowest QUARTILE, not the lower half: a short
+        // stretch is mostly speech, so half of it still contains the word's decay and
+        // the MAD then measures the fall of the voice rather than the noise of the
+        // floor — which inflated the tolerance to ~15 dB and swept the kept word's
+        // tail into the "quiet" run. Capped for the same reason.
+        let q = &lv[..(lv.len() / 4).max(2)];
+        let med = percentile(q, 50.0);
+        let mut dev: Vec<f64> = q.iter().map(|v| (v - med).abs()).collect();
+        dev.sort_by(|a, b| a.total_cmp(b));
+        let tol = (2.0 * 1.4826 * percentile(&dev, 50.0)).clamp(MIN_TOL_DB, MAX_TOL_DB);
+        let bar = base + tol;
+
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut cur: Option<usize> = None;
+        for k in lo..=hi {
+            if self.level(k) <= bar {
+                cur.get_or_insert(k);
+            } else if let Some(s) = cur.take() {
+                runs.push((s, k - 1));
+            }
+        }
+        if let Some(s) = cur {
+            runs.push((s, hi));
+        }
+        // NOTE: a burst test to separate a stop CLOSURE from a word gap belongs here
+        // (a closure is followed by its release). It is not implemented: the obvious
+        // form — "followed by a large rise" — fires on every gap too, since a gap is
+        // followed by the next word starting, and separating a transient release from
+        // a sustained onset needs validation on real speech that has not been done.
+        // Without it, run granularity plus earliest/latest still handles the common
+        // cases; a word-final released stop on a kept monosyllable is the known gap.
+        runs.retain(|&(a, b)| b >= a + 1);
+        runs
+    }
+
+    /// Is there a measurable boundary in this stretch at all? A continuous background
+    /// (music bed, long reverb tail, crosstalk) has no dynamic range to work with, and
+    /// guessing inside it is worse than saying so.
+    fn stretch_measurable(&self, from: f64, to: f64) -> bool {
+        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
+        if hi < lo + 2 {
+            return false;
+        }
+        let mut lv: Vec<f64> = (lo..=hi).map(|k| self.level(k)).collect();
+        lv.sort_by(|a, b| a.total_cmp(b));
+        percentile(&lv, 90.0) - percentile(&lv, 10.0) >= MIN_STRETCH_RANGE
+    }
+
+
     /// The measured intermediate values behind one placement, for diagnostics: the
     /// removed word's own syllable nuclei, and the two chosen cut points. Real
     /// recordings are the only way to know whether the analysis matches what a
@@ -280,14 +378,18 @@ impl SpeechAnalysis {
         self.time_of(pick.unwrap_or(lo))
     }
 
-    pub fn place_removal(&self, a_prev: f64, a_next: f64) -> Option<(f64, f64, Join)> {
-        if a_next <= a_prev {
-            return None;
+    /// Place both edges of a removal between two anchoring nuclei.
+    ///
+    /// Three separable steps, deliberately: min-seeking LOCATES a region, an existence
+    /// test decides whether that region is real, and only then is a pause ALLOCATED
+    /// out of it. Collapsing those (choosing a point directly from the minimum) is
+    /// what made every pause vanish: at the floor all frames tie exactly, so the
+    /// extremes of the tie set are the frames touching the neighbouring words, and the
+    /// cut swallowed the whole silence on both sides.
+    pub fn place_removal(&self, a_prev: f64, a_next: f64) -> Result<Placement, Refusal> {
+        if a_next <= a_prev || self.bands_unusable() {
+            return Err(Refusal::NoMinimum);
         }
-        // The removed word's own syllables: they lie between the two anchors by
-        // construction. Each cut edge is then placed in the quietest part of the
-        // stretch between a KEPT word's nucleus and the removed word's nearest one —
-        // that stretch contains the word boundary and nothing else worth keeping.
         let inner: Vec<f64> = self
             .nuclei
             .iter()
@@ -296,27 +398,63 @@ impl SpeechAnalysis {
             .collect();
         let (first_in, last_in) = match (inner.first(), inner.last()) {
             (Some(&f), Some(&l)) => (f, l),
-            // No nucleus between the anchors (unvoiced or silence-only removal):
-            // treat the middle of the band as the removed content.
             _ => {
                 let m = (a_prev + a_next) / 2.0;
                 (m, m)
             }
         };
-        let start = self.best_cut_between(a_prev, first_in, false);
-        let end = self.best_cut_between(last_in, a_next, true);
-        let (start, end) = if end >= start { (start, end) } else { (start, start) };
-        // If both chosen points really are near silence the fragments can abut;
-        // otherwise this is connected speech and the join needs a crossfade.
-        let quiet = self.quiet_level();
-        let join = if self.level(self.frame_at(start)) <= quiet
-            && self.level(self.frame_at(end)) <= quiet
-        {
-            Join::Butt
-        } else {
-            Join::Crossfade
+        // Far more syllables between the anchors than the removal can account for
+        // means the anchors are mis-assigned (a second speaker, a dropped word).
+        let expected = ((last_in - first_in) / self.syllable_period).ceil().max(1.0) as usize + 1;
+        if inner.len() > expected + 1 {
+            return Err(Refusal::BandTooWide);
+        }
+        if !self.stretch_measurable(a_prev, first_in) || !self.stretch_measurable(last_in, a_next) {
+            return Err(Refusal::NoMinimum);
+        }
+        let left = self.quiet_runs(a_prev, first_in);
+        let right = self.quiet_runs(last_in, a_next);
+        // Earliest surviving run on the left, latest on the right — at RUN
+        // granularity, where the preference is meaningful, rather than at frame
+        // granularity, where it just picks whatever touches the neighbouring speech.
+        let (&(l0, l1), &(r0, r1)) = match (left.first(), right.last()) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return Err(Refusal::NoMinimum),
         };
-        Some((start, end, join))
+        let (lt0, lt1) = (self.time_of(l0), self.time_of(l1));
+        let (rt0, rt1) = (self.time_of(r0), self.time_of(r1));
+
+        // Allocate a pause out of the silence the runs actually revealed.
+        let s_l = (lt1 - lt0).max(0.0);
+        let s_r = (rt1 - rt0).max(0.0);
+        let mut target = s_l.min(s_r);
+        // A markedly long pause on either side is a prosodic boundary — a phrase or
+        // sentence break. Keep it, rather than butting two sentences together.
+        if s_l.max(s_r) > 1.5 * self.syllable_period {
+            target = s_l.max(s_r);
+        }
+        target = target.min(2.0 * self.syllable_period);
+        let total = s_l + s_r;
+        let (g_l, g_r) = if total > 0.0 {
+            let g = target * s_l / total;
+            (g, target - g)
+        } else {
+            (0.0, 0.0)
+        };
+        let start = (lt0 + g_l).clamp(lt0, lt1);
+        let end = (rt1 - g_r).clamp(rt0, rt1);
+        // Fade length on a continuum rather than a butt/crossfade branch that can pick
+        // the wrong side: over true silence a 5 ms equal-power fade is indistinguishable
+        // from an abutment, so nothing is lost and the discrete failure mode goes away.
+        let q = (self.level(self.frame_at(start)).max(self.level(self.frame_at(end)))
+            / self.contrast_bb.max(1.0))
+        .clamp(0.0, 1.0);
+        Ok(Placement {
+            start,
+            end,
+            fade: 0.005 + 0.020 * q,
+            gap: (start - lt0) + (rt1 - end),
+        })
     }
 
 }
@@ -697,7 +835,7 @@ mod tests {
         // The anchor is in "pan", i.e. after the /p/ closure.
         assert!(a_prev > pan - 0.02, "anchor {a_prev} should be in 'pan' (>= {pan})");
         let a_next = an_.expect("ständig has a nucleus");
-        if let Some((cut_s, cut_e, _)) = a.place_removal(a_prev, a_next) {
+        if let Ok(pl) = a.place_removal(a_prev, a_next) { let (cut_s, cut_e) = (pl.start, pl.end);
             assert!(cut_s >= a_prev, "cut at {cut_s} landed before the anchor {a_prev}");
             assert!(cut_e <= a_next, "cut at {cut_e} landed past the next anchor {a_next}");
         }
@@ -725,7 +863,7 @@ mod tests {
                     let (Some(p), Some(n)) =
                         a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)))
                     else { continue };
-                    if let Some((cs, ce, _)) = a.place_removal(p, n) {
+                    if let Ok(pl) = a.place_removal(p, n) { let (cs, ce) = (pl.start, pl.end);
                         assert!(
                             cs >= p && ce <= n && ce >= cs,
                             "f0={f0} amp={amp} gap={gap}: cut [{cs}, {ce}] outside band [{p}, {n}]"
@@ -763,7 +901,8 @@ mod tests {
             Some((fric_start, w2_end)),
         );
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let (_, cut_e, _) = a.place_removal(p, n).expect("placed");
+        let pl = a.place_removal(p, n).expect("placed");
+        let (_, cut_e) = (pl.start, pl.end);
         assert!(
             cut_e <= fric_start + 0.02,
             "cut ends at {cut_e}, inside the next word's fricative starting {fric_start}"
@@ -793,7 +932,8 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
         let (p, n) = a.anchors(Some((w1, w1_end)), (fric, w2), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let (cut_s, cut_e, _) = a.place_removal(p, n).expect("placed");
+        let pl = a.place_removal(p, n).expect("placed");
+        let (cut_s, cut_e) = (pl.start, pl.end);
         assert!(
             cut_s <= fric + 0.015,
             "cut starts at {cut_s}, after the fricative at {fric} — the 'sch' survives"
@@ -823,7 +963,8 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
         let (p, n) = a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let (_, cut_e, _) = a.place_removal(p, n).expect("placed");
+        let pl = a.place_removal(p, n).expect("placed");
+        let (_, cut_e) = (pl.start, pl.end);
         assert!(
             cut_e >= fric_end - 0.015,
             "cut ends at {cut_e}, before the trailing fricative ends at {fric_end}"
@@ -857,7 +998,8 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
         let (p, n) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let (cut_s, _, _) = a.place_removal(p, n).expect("placed");
+        let pl = a.place_removal(p, n).expect("placed");
+        let (cut_s, _) = (pl.start, pl.end);
         assert!(
             cut_s <= rem + 0.015,
             "cut starts at {cut_s}, after the fricative at {rem} — the 'sch' survives"
@@ -896,7 +1038,8 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, sr).expect("analysable");
         let (p, n2) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let (p, n2) = (p.expect("prev nucleus"), n2.expect("next nucleus"));
-        let (cut_s, _, _) = a.place_removal(p, n2).expect("placed");
+        let pl = a.place_removal(p, n2).expect("placed");
+        let (cut_s, _) = (pl.start, pl.end);
         assert!(
             cut_s <= rem + 0.015,
             "cut starts at {cut_s}, after the word's onset at {rem} — its attack survives"
