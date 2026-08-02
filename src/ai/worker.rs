@@ -1687,12 +1687,20 @@ fn cut_analysis_lines(cut: &Value) -> Vec<String> {
     for (i, r) in rows.iter().enumerate() {
         let (a0, a1) = pair(r.get("asked"));
         let (n0, n1) = pair(r.get("anchors"));
+        if let Some(why) = r.get("declined").and_then(|v| v.as_str()) {
+            out.push(format!(
+                "  {}. transcript {a0:.3}-{a1:.3} · DECLINED ({why}) — transcript times kept",
+                i + 1
+            ));
+            continue;
+        }
         let (s0, s1) = pair(r.get("removed_span"));
         let (c0, c1) = pair(r.get("cut"));
         out.push(format!(
-            "  {}. transcript {a0:.3}-{a1:.3} · anchors {n0:.3}/{n1:.3} ·              {} syllable(s) at {s0:.3}-{s1:.3} · CUT {c0:.3}-{c1:.3}",
+            "  {}. transcript {a0:.3}-{a1:.3} · anchors {n0:.3}/{n1:.3} ·              {} syllable(s) at {s0:.3}-{s1:.3} · CUT {c0:.3}-{c1:.3} (gap {:.3}s)",
             i + 1,
             r.get("removed_syllables").and_then(|v| v.as_u64()).unwrap_or(0),
+            num(r.get("gap_left")),
         ));
     }
     if let Some(n) = cut.get("joins_without_pause").and_then(|v| v.as_u64()) {

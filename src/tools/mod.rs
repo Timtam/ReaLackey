@@ -7490,8 +7490,18 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         // limits the damage of every other failure. It was computed
                         // and then read only by the legacy path, so this branch was
                         // unbounded.
-                        let s_abs = (r0 + p.start).max(lim.0);
-                        let e_abs = (r0 + p.end).min(lim.1);
+                        // Outward-only against the TRANSCRIPT span. The measured
+                        // stretch runs from a kept word's nucleus to the removed
+                        // word's nucleus, so a word's onset consonants lie inside it;
+                        // when room tone keeps the gap level up, a fricative onset
+                        // falls within tolerance of the gap, joins the same quiet run,
+                        // and the cut gets placed inside it (measured: the "sch" of
+                        // "schwarzen" survived by 73 ms). The transcript is an
+                        // INDEPENDENT estimate of the word edge and was right there.
+                        // Erring outward costs a few ms of silence; erring inward
+                        // leaves the attack, so take whichever is further out.
+                        let s_abs = (r0 + p.start).min(orig.0).max(lim.0);
+                        let e_abs = (r0 + p.end).max(orig.1).min(lim.1);
                         let clamped = s_abs > r0 + p.start || e_abs < r0 + p.end;
                         if e_abs > s_abs {
                             r.0 = s_abs;
