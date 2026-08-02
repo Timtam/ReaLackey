@@ -70,15 +70,6 @@ pub struct Placement {
     pub gap: f64,
 }
 
-/// How a boundary should be joined once placed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Join {
-    /// A real pause was found; the fragments can simply abut.
-    Butt,
-    /// No silence exists here (connected speech). Splice anyway, but crossfade.
-    Crossfade,
-}
-
 /// Why a boundary could not be placed. Surfaced to the user: a detector that goes
 /// quietly inert for a whole class of material is the worst failure mode, because
 /// nobody can report what they can't perceive.
@@ -248,11 +239,6 @@ impl SpeechAnalysis {
         self.contrast_bb < MIN_BAND_RANGE && self.contrast_hf < MIN_BAND_RANGE
     }
 
-    /// "Quiet" as a share of this item's own speech/silence contrast — self-calibrating,
-    /// so it means the same thing in a whisper and in a shout.
-    fn quiet_level(&self) -> f64 {
-        0.15
-    }
 
     /// Place BOTH edges of a removal between two anchoring nuclei.
     ///
@@ -265,8 +251,6 @@ impl SpeechAnalysis {
     /// leave it behind.
     ///
     /// Returns `(start, end, join)` in analysis time, leaving one natural-sounding
-    /// gap at the join.
-
     /// Contiguous runs of "as quiet as it gets here" within `[from, to]`, as frame
     /// index ranges, with stop closures removed.
     ///
@@ -280,17 +264,26 @@ impl SpeechAnalysis {
         if hi < lo + 2 {
             return Vec::new();
         }
-        let mut lv: Vec<f64> = (lo..=hi).map(|k| self.level(k)).collect();
-        lv.sort_by(|a, b| a.total_cmp(b));
-        let base = percentile(&lv, 10.0);
-        // Median absolute deviation over the quieter half — the jitter of the floor
-        // estimate itself, not of the speech.
-        // Jitter estimated over the lowest QUARTILE, not the lower half: a short
-        // stretch is mostly speech, so half of it still contains the word's decay and
-        // the MAD then measures the fall of the voice rather than the noise of the
-        // floor — which inflated the tolerance to ~15 dB and swept the kept word's
-        // tail into the "quiet" run. Capped for the same reason.
-        let q = &lv[..(lv.len() / 4).max(2)];
+        // Rank on a 3-frame MEDIAN of the level, and take its MINIMUM as the
+        // baseline. A percentile is only a floor estimate when the stretch actually
+        // contains a floor: between two nuclei it is mostly speech, so p10 lands ON
+        // the speech (measured: 42.9 dB, right on a fricative) and everything quieter
+        // than that became "equally quiet". The median filter removes the single-frame
+        // estimator dips that make a raw minimum untrustworthy, so the minimum of the
+        // filtered series is both robust and actually near the floor.
+        let raw: Vec<f64> = (lo..=hi).map(|k| self.level(k)).collect();
+        let med3: Vec<f64> = (0..raw.len())
+            .map(|i| {
+                let a = raw[i.saturating_sub(1)];
+                let b = raw[i];
+                let c = raw[(i + 1).min(raw.len() - 1)];
+                a.max(b).min(a.min(b).max(c))
+            })
+            .collect();
+        let base = med3.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut sorted = med3.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let q = &sorted[..(sorted.len() / 4).max(2)];
         let med = percentile(q, 50.0);
         let mut dev: Vec<f64> = q.iter().map(|v| (v - med).abs()).collect();
         dev.sort_by(|a, b| a.total_cmp(b));
@@ -300,7 +293,7 @@ impl SpeechAnalysis {
         let mut runs: Vec<(usize, usize)> = Vec::new();
         let mut cur: Option<usize> = None;
         for k in lo..=hi {
-            if self.level(k) <= bar {
+            if med3[k - lo] <= bar {
                 cur.get_or_insert(k);
             } else if let Some(s) = cur.take() {
                 runs.push((s, k - 1));
@@ -316,7 +309,7 @@ impl SpeechAnalysis {
         // a sustained onset needs validation on real speech that has not been done.
         // Without it, run granularity plus earliest/latest still handles the common
         // cases; a word-final released stop on a kept monosyllable is the known gap.
-        runs.retain(|&(a, b)| b >= a + 1);
+        runs.retain(|&(a, b)| b > a);
         runs
     }
 
@@ -348,34 +341,6 @@ impl SpeechAnalysis {
         let first = inner.first().copied().unwrap_or((a_prev + a_next) / 2.0);
         let last = inner.last().copied().unwrap_or(first);
         (first, last, inner.len())
-    }
-
-    /// The best cut point between two syllabic nuclei: the EARLIEST frame whose level
-    /// is within `tol` of the quietest in the range (or the latest, per `prefer_late`).
-    ///
-    /// A minimum always exists, so unlike a threshold this can never "find nothing" —
-    /// which matters because in connected speech the level between two words often
-    /// never approaches the noise floor at all (room tone, breath, reverb tail), and
-    /// a fixed bar then silently fails on the majority of real material.
-    ///
-    /// Taking the earliest near-minimum rather than the global one is deliberate: a
-    /// stop closure inside the removed word's onset (the /t/ of "ständig") is quieter
-    /// than the fricative in front of it, so a plain argmin would cut after the "sch"
-    /// and leave it behind. The earliest equally-quiet point is the true word gap.
-    fn best_cut_between(&self, from: f64, to: f64, prefer_late: bool) -> f64 {
-        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
-        if hi <= lo {
-            return self.time_of(lo);
-        }
-        let min = (lo..=hi).map(|k| self.level(k)).fold(f64::INFINITY, f64::min);
-        // Within 3% of a band's range counts as "equally quiet".
-        let tol = min + 0.03;
-        let pick = if prefer_late {
-            (lo..=hi).rev().find(|&k| self.level(k) <= tol)
-        } else {
-            (lo..=hi).find(|&k| self.level(k) <= tol)
-        };
-        self.time_of(pick.unwrap_or(lo))
     }
 
     /// Place both edges of a removal between two anchoring nuclei.
@@ -1047,6 +1012,79 @@ mod tests {
         assert!(cut_s >= w1_end - 0.03, "cut at {cut_s} bit into the kept word (ends {w1_end})");
     }
 
+    /// THE REGRESSION THE MAINTAINER CAUGHT. Deleting a word beside a long pause must
+    /// LEAVE a pause. Picking a point straight from the level minimum consumed the
+    /// silence on both sides — at the floor every frame ties exactly, so the extremes
+    /// of the tie set are the frames touching the neighbouring words — and two
+    /// sentences slammed together. No previous test asserted surviving pause length,
+    /// which is why this reached real audio.
+    #[test]
+    fn a_long_pause_survives_the_cut() {
+        let mut s = Syn::new();
+        s.quiet(0.25);
+        let w1 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w1_end = s.at();
+        s.quiet(0.45); // a sentence-boundary pause
+        let rem = s.at();
+        s.vowel(0.16, 120.0, 0.5);
+        let rem_end = s.at();
+        s.quiet(0.45);
+        let w2 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w2_end = s.at();
+        s.quiet(0.25);
+        let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
+        let (p, n) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
+        let pl = a
+            .place_removal(p.expect("prev"), n.expect("next"))
+            .expect("placed");
+        assert!(
+            pl.gap >= 0.150,
+            "only {:.3}s of pause left at the join — a 0.45s pause was available on              each side; the cut swallowed it",
+            pl.gap
+        );
+        assert!(pl.gap <= 0.700, "left {:.3}s, more than the material had", pl.gap);
+    }
+
+    /// Real speech does not fall to the noise floor between words — room tone, breath
+    /// and reverb keep it up. A threshold-based search finds nothing here and fails
+    /// silently; every earlier fixture had gaps that reached the floor, which is why
+    /// they passed while real audio did not.
+    #[test]
+    fn a_gap_that_never_reaches_the_floor_is_still_found() {
+        let sr = SR;
+        let mut s = Syn::new();
+        s.quiet(0.25);
+        let w1 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w1_end = s.at();
+        // "Silence" 18 dB below speech but ~30 dB ABOVE the room floor.
+        let n = (sr * 0.12) as usize;
+        for i in 0..n {
+            let t = i as f64 / sr;
+            s.s.push((2.0 * PI * 150.0 * t).sin() * 0.06);
+        }
+        let rem = s.at();
+        s.vowel(0.16, 120.0, 0.5);
+        let rem_end = s.at();
+        for i in 0..n {
+            let t = i as f64 / sr;
+            s.s.push((2.0 * PI * 150.0 * t).sin() * 0.06);
+        }
+        let w2 = s.at();
+        s.vowel(0.18, 120.0, 0.5);
+        let w2_end = s.at();
+        s.quiet(0.25);
+        let a = SpeechAnalysis::new(&s.s, sr).expect("analysable");
+        let (p, n2) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
+        let pl = a
+            .place_removal(p.expect("prev"), n2.expect("next"))
+            .expect("a boundary exists even though nothing reaches the floor");
+        assert!(pl.start <= rem + 0.02, "cut starts {:.3} after the word at {rem:.3}", pl.start);
+        assert!(pl.end >= rem_end - 0.02, "cut ends {:.3} before the word ends {rem_end:.3}", pl.end);
+    }
+
     #[test]
     fn refuses_when_there_is_no_anchor() {
         let mut s = Syn::new();
@@ -1075,5 +1113,6 @@ mod tests {
         }
     }
 }
+
 
 
