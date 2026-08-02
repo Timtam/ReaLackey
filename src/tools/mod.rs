@@ -7459,7 +7459,9 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         if let Some(an) = analysis {
             let rel = |t: f64| acc_start + t - r0; // item time -> analysis time
             let original = project_removes.clone();
-            for ((r, orig), src) in project_removes.iter_mut().zip(&original).zip(&ranges) {
+            for (((r, orig), src), lim) in
+                project_removes.iter_mut().zip(&original).zip(&ranges).zip(&limits)
+            {
                 // Nearest-centre assignment over all three spans, so the removed
                 // word's own nucleus can never be mistaken for an anchor.
                 let (ap, an_) = an.anchors(
@@ -7467,42 +7469,59 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                     (rel(src.start), rel(src.end)),
                     src.next_word.map(|(s, e)| (rel(s), rel(e))),
                 );
-                // A removal at the very start/end of the item has no neighbour to
-                // anchor to; the item edge is then the natural bound.
-                let a_prev = ap.unwrap_or(0.0);
-                let a_next = an_.unwrap_or(r1 - r0);
-                // analysis time -> project time
-                let abs = |t: f64| r0 + t;
-                // Diagnostics in the tool result: a real recording is the only way to
-                // know whether these measurements match what a listener hears, so
-                // report them instead of asking the user to guess at a symptom.
-                {
-                    // Everything reported in ITEM time, the same timeline the
-                    // transcript uses, so the numbers can be compared directly.
-                    let (syl_a, syl_b, n_syl) = an.explain(a_prev, a_next);
-                    let itm = |t: f64| r0 + t - acc_start;
-                    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
-                    let placed = an.place_removal(a_prev, a_next);
+                // NEVER fabricate an anchor. Substituting the analysis-window edges
+                // let a single missing nucleus delete up to two seconds of audio and
+                // report it as a successful snap — and a missing anchor is routine,
+                // since the first and last word of a transcript have no neighbour.
+                let (Some(a_prev), Some(a_next)) = (ap, an_) else {
+                    snap_rejected += 1;
                     diagnostics.push(json!({
-                        "asked": [r3(src.start), r3(src.end)],
-                        "anchors": [r3(itm(a_prev)), r3(itm(a_next))],
-                        "removed_syllables": n_syl,
-                        "removed_span": [r3(itm(syl_a)), r3(itm(syl_b))],
-                        "cut": placed.map(|(s, e, _)| json!([r3(itm(s)), r3(itm(e))])),
+                        "asked": [src.start, src.end],
+                        "declined": "no syllabic nucleus in a neighbouring word",
                     }));
-                }
+                    continue;
+                };
+                let itm = |t: f64| r0 + t - acc_start;
+                let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+                let (syl_a, syl_b, n_syl) = an.explain(a_prev, a_next);
                 match an.place_removal(a_prev, a_next) {
-                    Some((s, e, join)) => {
-                        // Outward only: eating extra silence is nearly free, leaving
-                        // the head or tail of a deleted word audible is not.
-                        r.0 = abs(s).min(orig.0);
-                        r.1 = abs(e).max(orig.1);
-                        snapped += 1;
-                        if join == crate::dsp::speech::Join::Crossfade {
+                    Ok(p) => {
+                        // Hard TIME bound from the transcript — the one guard that
+                        // limits the damage of every other failure. It was computed
+                        // and then read only by the legacy path, so this branch was
+                        // unbounded.
+                        let s_abs = (r0 + p.start).max(lim.0);
+                        let e_abs = (r0 + p.end).min(lim.1);
+                        let clamped = s_abs > r0 + p.start || e_abs < r0 + p.end;
+                        if e_abs > s_abs {
+                            r.0 = s_abs;
+                            r.1 = e_abs;
+                            snapped += 1;
+                        } else {
+                            snap_rejected += 1;
+                        }
+                        if p.fade > 0.010 {
                             crossfaded += 1;
                         }
+                        diagnostics.push(json!({
+                            "asked": [r3(src.start), r3(src.end)],
+                            "anchors": [r3(itm(a_prev)), r3(itm(a_next))],
+                            "removed_syllables": n_syl,
+                            "removed_span": [r3(itm(syl_a)), r3(itm(syl_b))],
+                            "cut": [r3(itm(p.start)), r3(itm(p.end))],
+                            "gap_left": r3(p.gap),
+                            "fade": r3(p.fade),
+                            "time_limited": clamped,
+                        }));
                     }
-                    None => snap_rejected += 1,
+                    Err(why) => {
+                        snap_rejected += 1;
+                        diagnostics.push(json!({
+                            "asked": [r3(src.start), r3(src.end)],
+                            "anchors": [r3(itm(a_prev)), r3(itm(a_next))],
+                            "declined": format!("{why:?}"),
+                        }));
+                    }
                 }
                 if r.1 - r.0 <= CUT_EPSILON {
                     *r = *orig; // degenerate — keep the caller's range
