@@ -200,8 +200,6 @@ pub struct SpeechAnalysis {
     floor_bb: f64,
     floor_hf: f64,
     floor_vb: f64,
-    /// Clip-wide bar above which a frame counts as friction.
-    fric_bar: f64,
     /// Each band's own speech-to-floor range, so levels can be compared between
     /// bands with very different noise floors.
     contrast_bb: f64,
@@ -262,18 +260,6 @@ impl SpeechAnalysis {
         let floor_bb = noise_floor_db(&bb);
         let floor_hf = noise_floor_db(&hf);
         let floor_vb = noise_floor_db(&vb);
-        // How high-band-dominant a frame must be to count as friction, calibrated on
-        // the WHOLE CLIP rather than on a search window. A window-local outlier test
-        // cannot see a fricative that fills most of the window it is measured against
-        // — the /sch/ in "ihren Schoss" sits near its own window's median, which is
-        // why two threshold formulations in a row detected nothing there. Fricatives
-        // are a modest minority of frames in any speech, so a high percentile over the
-        // clip separates them without asserting a dB figure.
-        let mut bal: Vec<f64> = (0..bb.len())
-            .map(|k| (hf[k] - floor_hf) - (vb[k] - floor_vb))
-            .collect();
-        bal.sort_by(f64::total_cmp);
-        let fric_bar = bal[(bal.len() * 88) / 100];
         let (t_split, speech_level) = otsu_split(&bb);
         let contrast_bb = (speech_level - floor_bb).max(0.0);
         let contrast_hf = (otsu_split(&hf).1 - floor_hf).max(0.0);
@@ -297,7 +283,6 @@ impl SpeechAnalysis {
             floor_bb,
             floor_hf,
             floor_vb,
-            fric_bar,
             contrast_bb,
             contrast_hf,
             contrast_vb,
@@ -381,66 +366,6 @@ impl SpeechAnalysis {
             m = m.max((self.vb[k] - self.floor_vb).clamp(0.0, self.contrast_vb));
         }
         m
-    }
-
-    /// Onset of the fricative belonging to the word whose nucleus is at `owner`.
-    ///
-    /// A sonorant running into a fricative has no energy dip — the level never drops,
-    /// it moves BANDS — so `quiet_runs` settles inside the friction and the boundary
-    /// lands wrong. A labelled listening test over nine junctions showed onset class
-    /// predicts this exactly, and that run LENGTH predicts nothing ("weiche|Fell" and
-    /// "Sie|schaut" fail on runs of 13 and 14 frames), so this is not gated on runs.
-    ///
-    /// Two things an earlier attempt got wrong, both fixed here:
-    ///
-    /// The bar is CLIP-WIDE, not a window outlier test. A fricative filling most of
-    /// its search window sits near that window's own median and becomes undetectable —
-    /// which is precisely what happened at "ihren Schoss".
-    ///
-    /// A region is an ONSET of the later nucleus when its END abuts that nucleus more
-    /// closely than its START abuts the earlier one — which is what "word-initial"
-    /// versus "word-final" means acoustically. Proximity of the region's ONSET cannot
-    /// decide this: a word-initial fricative's onset is ALWAYS nearer the previous
-    /// word's nucleus, since it sits immediately after that word ends. Attributing by
-    /// onset therefore assigns every fricative to the earlier word, which is why the
-    /// previous attempt fixed "auf|ihren" and could not possibly fix "ihren|Schoss".
-    fn fricative_onset(&self, from: f64, to: f64) -> Option<f64> {
-        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
-        let need = ((0.040 / self.hop).round() as usize).max(2);
-        if hi < lo + need + 1 {
-            return None;
-        }
-        let hot = |k: usize| {
-            (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb) > self.fric_bar
-        };
-        let (mut best, mut start) = (None::<usize>, None::<usize>);
-        let (lo_t, hi_t) = (from.min(to), from.max(to));
-        let consider = |a: usize, b: usize, best: &mut Option<usize>| {
-            if b - a < need || a == lo {
-                return; // too short, or its onset began before the window
-            }
-            // Onset of the later nucleus, or coda of the earlier one?
-            if (hi_t - self.time_of(b)) >= (self.time_of(a) - lo_t) {
-                return; // abuts the earlier vowel: a coda, not this word's onset
-            }
-            if best.map_or(true, |c| a < c) {
-                *best = Some(a); // earliest onset: the friction that starts the word
-            }
-        };
-        for k in lo..=hi {
-            match (hot(k), start) {
-                (true, None) => start = Some(k),
-                (false, Some(a)) => {
-                    consider(a, k, &mut best);
-                    start = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(a) = start {
-            consider(a, hi + 1, &mut best);
-        }
-        best.map(|a| self.time_of(a))
     }
 
     /// True when no band has enough range to measure anything (a music bed, a very
@@ -621,15 +546,8 @@ impl SpeechAnalysis {
         // speech, and it has never been observed on real audio.
         let lrun = self.quiet_runs(a_prev, first_in).last().copied();
         let rrun = self.quiet_runs(last_in, a_next).first().copied();
-        // This word's OWN initial friction is where it starts; the NEXT word's is
-        // where this one ends. Both are attributed by nucleus proximity, so a
-        // neighbour's coda cannot claim either edge.
-        let raw_start = lrun.map(|(_, b)| {
-            self.fricative_onset(a_prev, first_in).unwrap_or(self.time_of(b))
-        });
-        let raw_end = rrun.map(|(a, _)| {
-            self.fricative_onset(last_in, a_next).unwrap_or(self.time_of(a))
-        });
+        let raw_start = lrun.map(|(_, b)| self.time_of(b));
+        let raw_end = rrun.map(|(a, _)| self.time_of(a));
         let llen = lrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         let rlen = rrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         // The word's own nucleus MUST lie inside its extent. Nothing forced that
@@ -1153,42 +1071,6 @@ mod tests {
             en - st > 0.04,
             "extent implausibly short for a 100 ms word: {st:.3}-{en:.3}"
         );
-    }
-
-    /// Friction is attributed to the nucleus it is NEAR, not to its position in the
-    /// window. Regression for the previous attempt, which pulled a word's start back
-    /// onto the /f/ of the preceding word because a coda fricative is the last region
-    /// in the window.
-    #[test]
-    fn a_neighbours_coda_fricative_does_not_claim_this_words_start() {
-        let mut syn = Syn::new();
-        syn.quiet(0.30)
-            .vowel(0.20, 120.0, 0.5) // "auf" vowel, nucleus ~0.40
-            .fricative(0.10, 0.7) // its coda /f/ at 0.50 — belongs to the PREVIOUS word
-            .quiet(0.08)
-            .vowel(0.20, 130.0, 0.5) // this word's vowel, nucleus ~0.78
-            .quiet(0.30);
-        let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
-        let (prev_nuc, own_nuc) = (0.40, 0.78);
-        assert_eq!(
-            a.fricative_onset(prev_nuc, own_nuc),
-            None,
-            "the /f/ at 0.50 abuts the PREVIOUS vowel — a coda, not this word's onset"
-        );
-
-        // The mirror image: friction abutting the LATER vowel is that word's onset.
-        let mut on = Syn::new();
-        on.quiet(0.30)
-            .vowel(0.20, 120.0, 0.5) // prev word, nucleus ~0.40
-            .quiet(0.08)
-            .fricative(0.10, 0.7) // its onset at 0.58, abutting the vowel after it
-            .vowel(0.20, 130.0, 0.5) // nucleus ~0.78
-            .quiet(0.30);
-        let b = SpeechAnalysis::new(&on.s, SR).expect("analysable");
-        let f = b
-            .fricative_onset(prev_nuc, own_nuc)
-            .expect("friction abutting the later vowel is its onset");
-        assert!((f - 0.58).abs() < 0.05, "onset {f:.3} should be the friction at 0.580");
     }
 
     struct Syn {
