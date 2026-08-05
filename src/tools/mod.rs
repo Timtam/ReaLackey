@@ -7495,7 +7495,7 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                 let itm = |t: f64| r0 + t - acc_start;
                 let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
                 let (syl_a, syl_b, n_syl) = an.explain(a_prev, a_next);
-                match an.place_removal(a_prev, a_next) {
+                match an.place_removal(a_prev, a_next, (rel(src.start), rel(src.end))) {
                     Ok(p) => {
                         // Hard TIME bound from the transcript — the one guard that
                         // limits the damage of every other failure. It was computed
