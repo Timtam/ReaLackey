@@ -49,8 +49,10 @@ const MIN_UNVOICED_NUCLEUS: f64 = 0.040;
 /// A band with less range than this says nothing useful and is excluded.
 const MIN_BAND_RANGE: f64 = 6.0;
 /// A search stretch with less dynamic range than this has no measurable boundary —
-/// a music bed, a long reverb tail, crosstalk. Refuse rather than guess.
-const MIN_STRETCH_RANGE: f64 = 6.0;
+/// a music bed, a long reverb tail, crosstalk. Refuse rather than guess. Kept low:
+/// at 6 dB most short unstressed words refused, and a refusal falls back to bare
+/// transcript times, which is strictly less information than a shallow measurement.
+const MIN_STRETCH_RANGE: f64 = 3.5;
 /// Floor on the "equally quiet" tolerance, so it can never be finer than the
 /// measurement's own jitter.
 const MIN_TOL_DB: f64 = 1.0;

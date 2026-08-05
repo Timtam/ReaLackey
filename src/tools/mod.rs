@@ -7448,7 +7448,13 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     ///   audible thing there is. Be tight, and additionally never pass that word's
     ///   reported start.
     const START_MARGIN: f64 = 0.060;
-    const END_MARGIN: f64 = 0.010;
+    const END_MARGIN: f64 = 0.025;
+    /// The next word's reported start is the hard stop for the end edge — but with
+    /// DTW timings it is IDENTICAL to the removed word's end, which would force the
+    /// end margin to zero and leave the removed word's tail whenever that boundary
+    /// reads early. A little slack past it keeps a small margin available while
+    /// limiting any encroachment on the next word's attack.
+    const NEXT_WORD_SLACK: f64 = 0.020;
     // Nuclei-anchored placement: analyse the edit region ONCE, then place each edge
     // inside the band bounded by the neighbouring kept words' syllabic nuclei. This
     // supersedes the level-based snap below wherever the caller supplied the
@@ -7525,6 +7531,7 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         let next_start = src
                             .next_word
                             .map(|(s, _)| acc_start + s)
+                            .map(|t| t + NEXT_WORD_SLACK)
                             .unwrap_or(lim.1)
                             .min(lim.1);
                         let e_abs = (r0 + p.end).max(orig.1 + END_MARGIN).min(next_start);
@@ -7563,6 +7570,7 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         let next_start = src
                             .next_word
                             .map(|(s, _)| acc_start + s)
+                            .map(|t| t + NEXT_WORD_SLACK)
                             .unwrap_or(lim.1)
                             .min(lim.1);
                         r.1 = (orig.1 + END_MARGIN).min(next_start);
