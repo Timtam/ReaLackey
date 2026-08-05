@@ -361,6 +361,26 @@ impl SpeechAnalysis {
         m
     }
 
+    /// A run this short is not a pause — it is the flattest point of continuous
+    /// speech, and its position carries no information about where a word ends.
+    const MARGINAL_RUN: usize = 2;
+
+    /// Turn a quiet run into a (start, end) time span, substituting the spectral edge
+    /// when the run is too short to be a pause at all. Zero-length on substitution:
+    /// there is genuinely no silence here, so a caller allocating a gap out of it must
+    /// get nothing to give away.
+    /// `at_end` selects which edge of the run is the boundary being refined: a word's
+    /// START is the run's end, a word's END is the run's start.
+    fn refine_run(&self, run: (usize, usize), from: f64, to: f64, at_end: bool) -> (f64, f64) {
+        if run.1 - run.0 <= Self::MARGINAL_RUN {
+            let near = self.time_of(if at_end { run.1 } else { run.0 });
+            if let Some(t) = self.spectral_edge(from, to, near) {
+                return (t, t);
+            }
+        }
+        (self.time_of(run.0), self.time_of(run.1))
+    }
+
     /// Balance between the high band and the voice bar, in dB. A sonorant sits low
     /// here and a fricative high, so the DERIVATIVE of this locates a boundary that
     /// has no energy dip at all.
@@ -382,7 +402,15 @@ impl SpeechAnalysis {
     /// or another voice. `None` when nothing stands out — a vowel-to-vowel junction
     /// genuinely has no spectral edge either, and inventing one would be worse than
     /// admitting it.
-    fn spectral_edge(&self, from: f64, to: f64) -> Option<f64> {
+    /// Returns the qualifying step NEAREST `near`, not the largest and not the first.
+    /// A search window spans several boundaries — the previous word's offset, this
+    /// word's onset, an internal fricative-to-vowel transition — and picking by size
+    /// or by position gets a different one each time: taking the peak put a cut inside
+    /// the following word's fricative, taking the last let a word-initial "sch"
+    /// survive. The marginal quiet run localises the boundary correctly even though it
+    /// resolves it poorly, so it is the right reference to refine against; using both
+    /// pieces of evidence beats discarding either.
+    fn spectral_edge(&self, from: f64, to: f64, near: f64) -> Option<f64> {
         let w = 3usize; // 30 ms either side: shorter than any phone we care about
         let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
         if hi < lo + 2 * w + 1 {
@@ -395,16 +423,29 @@ impl SpeechAnalysis {
                 (after - before).abs()
             })
             .collect();
-        let (best, &peak) = step
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))?;
         let mut sorted = step.clone();
         sorted.sort_by(f64::total_cmp);
-        let median = sorted[sorted.len() / 2];
         // Must stand clearly above the window's own churn, and be a real shift rather
         // than estimator noise.
-        (peak > (median * 3.0).max(MIN_TOL_DB)).then(|| self.time_of(lo + w + best))
+        let bar = (sorted[sorted.len() / 2] * 3.0).max(MIN_TOL_DB);
+        // Contiguous groups of qualifying frames are single boundaries; take the peak
+        // WITHIN the requested one rather than across the whole window.
+        let mut groups: Vec<(usize, usize)> = Vec::new();
+        for (i, &v) in step.iter().enumerate() {
+            match groups.last_mut() {
+                Some(g) if v > bar && g.1 + 1 == i => g.1 = i,
+                _ if v > bar => groups.push((i, i)),
+                _ => {}
+            }
+        }
+        // Peak of each qualifying group, then the group whose peak sits closest to the
+        // run being refined.
+        let best = groups
+            .iter()
+            .filter_map(|&(g0, g1)| (g0..=g1).max_by(|&a, &b| step[a].total_cmp(&step[b])))
+            .map(|i| self.time_of(lo + w + i))
+            .min_by(|a, b| (a - near).abs().total_cmp(&(b - near).abs()))?;
+        Some(best)
     }
 
     /// True when no band has enough range to measure anything (a music bed, a very
@@ -584,23 +625,14 @@ impl SpeechAnalysis {
         // continuous speech, and its position carries no information about where the
         // word actually ends. Where that happens, ask the spectral balance instead.
         // Longer runs are real silence and are left completely alone.
-        let marginal = 2usize;
-        let left = self.quiet_runs(a_prev, first_in).last().copied();
-        let right = self.quiet_runs(last_in, a_next).first().copied();
-        let raw_start = left.map(|(a, b)| {
-            if b - a <= marginal {
-                self.spectral_edge(a_prev, first_in).unwrap_or(self.time_of(b))
-            } else {
-                self.time_of(b)
-            }
-        });
-        let raw_end = right.map(|(a, b)| {
-            if b - a <= marginal {
-                self.spectral_edge(last_in, a_next).unwrap_or(self.time_of(a))
-            } else {
-                self.time_of(a)
-            }
-        });
+        let raw_start = self
+            .quiet_runs(a_prev, first_in)
+            .last()
+            .map(|&r| self.refine_run(r, a_prev, first_in, true).1);
+        let raw_end = self
+            .quiet_runs(last_in, a_next)
+            .first()
+            .map(|&r| self.refine_run(r, last_in, a_next, false).0);
         // The word's own nucleus MUST lie inside its extent. Nothing forced that
         // before, and the report showed both ways it fails: ~9% of words (nearly all
         // short function words) came back zero-length because the two runs resolved to
@@ -729,8 +761,12 @@ impl SpeechAnalysis {
         // Earliest surviving run on the left, latest on the right — at RUN
         // granularity, where the preference is meaningful, rather than at frame
         // granularity, where it just picks whatever touches the neighbouring speech.
-        let lrun = left.first().map(|&(a, b)| (self.time_of(a), self.time_of(b)));
-        let rrun = right.last().map(|&(a, b)| (self.time_of(a), self.time_of(b)));
+        // Same refinement as word_extent, and this is the path the CUT actually takes:
+        // a one- or two-frame run is not a pause, so a boundary taken from it lands
+        // wherever the level happens to bottom out — mid-fricative for "ihren Schoss",
+        // which is what put the "sch" on the wrong side of the join.
+        let lrun = left.first().map(|&r| self.refine_run(r, a_prev, first_in, true));
+        let rrun = right.last().map(|&r| self.refine_run(r, last_in, a_next, false));
         // Each side falls back to the removed word's own edge when unmeasurable, so
         // the allocation below still has a sane span to work with.
         let (lt0, lt1) = lrun.unwrap_or((first_in, first_in));
@@ -1137,7 +1173,7 @@ mod tests {
         let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
         let onset = 0.55; // vowel ends / fricative begins
         let e = a
-            .spectral_edge(0.40, 0.75)
+            .spectral_edge(0.40, 0.75, 0.55)
             .expect("a sonorant-to-fricative junction is a spectral edge");
         assert!(
             (e - onset).abs() < 0.05,
@@ -1147,7 +1183,7 @@ mod tests {
         let mut flat = Syn::new();
         flat.quiet(0.30).vowel(0.60, 120.0, 0.5).quiet(0.30);
         let b = SpeechAnalysis::new(&flat.s, SR).expect("analysable");
-        assert_eq!(b.spectral_edge(0.40, 0.75), None, "vowel interior is not a boundary");
+        assert_eq!(b.spectral_edge(0.40, 0.75, 0.55), None, "vowel interior is not a boundary");
     }
 
     struct Syn {
