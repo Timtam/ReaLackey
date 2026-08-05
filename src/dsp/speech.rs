@@ -397,31 +397,34 @@ impl SpeechAnalysis {
     /// its search window sits near that window's own median and becomes undetectable —
     /// which is precisely what happened at "ihren Schoss".
     ///
-    /// The region is attributed to a word by NUCLEUS PROXIMITY, not by position in the
-    /// window. Taking the last region pulled "ihren" back onto the /f/ of the previous
-    /// word "auf": a coda fricative is the last region in the window, but it plainly
-    /// belongs to the word before. Friction belongs to whichever nucleus it is nearer.
-    fn fricative_onset(&self, from: f64, to: f64, owner: f64) -> Option<f64> {
+    /// A region is an ONSET of the later nucleus when its END abuts that nucleus more
+    /// closely than its START abuts the earlier one — which is what "word-initial"
+    /// versus "word-final" means acoustically. Proximity of the region's ONSET cannot
+    /// decide this: a word-initial fricative's onset is ALWAYS nearer the previous
+    /// word's nucleus, since it sits immediately after that word ends. Attributing by
+    /// onset therefore assigns every fricative to the earlier word, which is why the
+    /// previous attempt fixed "auf|ihren" and could not possibly fix "ihren|Schoss".
+    fn fricative_onset(&self, from: f64, to: f64) -> Option<f64> {
         let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
         let need = ((0.040 / self.hop).round() as usize).max(2);
         if hi < lo + need + 1 {
             return None;
         }
-        let other = if (owner - from).abs() < (owner - to).abs() { to } else { from };
         let hot = |k: usize| {
             (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb) > self.fric_bar
         };
         let (mut best, mut start) = (None::<usize>, None::<usize>);
+        let (lo_t, hi_t) = (from.min(to), from.max(to));
         let consider = |a: usize, b: usize, best: &mut Option<usize>| {
             if b - a < need || a == lo {
                 return; // too short, or its onset began before the window
             }
-            let t = self.time_of(a);
-            if (t - owner).abs() >= (t - other).abs() {
-                return; // nearer the other word's nucleus: not this word's friction
+            // Onset of the later nucleus, or coda of the earlier one?
+            if (hi_t - self.time_of(b)) >= (self.time_of(a) - lo_t) {
+                return; // abuts the earlier vowel: a coda, not this word's onset
             }
-            if best.map_or(true, |c| (t - owner).abs() < (self.time_of(c) - owner).abs()) {
-                *best = Some(a);
+            if best.map_or(true, |c| a < c) {
+                *best = Some(a); // earliest onset: the friction that starts the word
             }
         };
         for k in lo..=hi {
@@ -622,10 +625,10 @@ impl SpeechAnalysis {
         // where this one ends. Both are attributed by nucleus proximity, so a
         // neighbour's coda cannot claim either edge.
         let raw_start = lrun.map(|(_, b)| {
-            self.fricative_onset(a_prev, first_in, first_in).unwrap_or(self.time_of(b))
+            self.fricative_onset(a_prev, first_in).unwrap_or(self.time_of(b))
         });
         let raw_end = rrun.map(|(a, _)| {
-            self.fricative_onset(last_in, a_next, a_next).unwrap_or(self.time_of(a))
+            self.fricative_onset(last_in, a_next).unwrap_or(self.time_of(a))
         });
         let llen = lrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         let rlen = rrun.map_or(-1.0, |(a, b)| (b - a) as f64);
@@ -1168,15 +1171,24 @@ mod tests {
         let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
         let (prev_nuc, own_nuc) = (0.40, 0.78);
         assert_eq!(
-            a.fricative_onset(prev_nuc, own_nuc, own_nuc),
+            a.fricative_onset(prev_nuc, own_nuc),
             None,
-            "the /f/ at 0.50 is nearer the previous nucleus and must not be claimed"
+            "the /f/ at 0.50 abuts the PREVIOUS vowel — a coda, not this word's onset"
         );
-        // Asked on behalf of the word that owns it, the same region IS returned.
-        let f = a
-            .fricative_onset(prev_nuc, own_nuc, prev_nuc)
-            .expect("its owner should get it");
-        assert!((f - 0.50).abs() < 0.05, "onset {f:.3} should be the /f/ at 0.500");
+
+        // The mirror image: friction abutting the LATER vowel is that word's onset.
+        let mut on = Syn::new();
+        on.quiet(0.30)
+            .vowel(0.20, 120.0, 0.5) // prev word, nucleus ~0.40
+            .quiet(0.08)
+            .fricative(0.10, 0.7) // its onset at 0.58, abutting the vowel after it
+            .vowel(0.20, 130.0, 0.5) // nucleus ~0.78
+            .quiet(0.30);
+        let b = SpeechAnalysis::new(&on.s, SR).expect("analysable");
+        let f = b
+            .fricative_onset(prev_nuc, own_nuc)
+            .expect("friction abutting the later vowel is its onset");
+        assert!((f - 0.58).abs() < 0.05, "onset {f:.3} should be the friction at 0.580");
     }
 
     struct Syn {
