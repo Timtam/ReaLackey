@@ -7438,11 +7438,17 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     let mut snap_rejected = 0usize;
     let mut crossfaded = 0usize;
     let mut diagnostics: Vec<Value> = Vec::new();
-    /// How far outside the transcript span each edge is taken. Transcript word edges
-    /// are approximate (routinely 50-200 ms out), and the errors are not symmetric in
-    /// cost: a few extra ms of silence is inaudible, a surviving attack is not. Always
-    /// bounded by the neighbouring words, so this can only consume silence.
-    const EDGE_MARGIN: f64 = 0.060;
+    /// How far outside the transcript span each edge is taken. The two edges are
+    /// deliberately NOT symmetric, because they run into different things:
+    ///
+    /// * Going outward at the START meets the previous word's DECAY. Clipping a decay
+    ///   is nearly inaudible, so be generous — this is what finally removed the
+    ///   surviving "sch" and "u" onsets.
+    /// * Going outward at the END meets the next word's ATTACK, which is the most
+    ///   audible thing there is. Be tight, and additionally never pass that word's
+    ///   reported start.
+    const START_MARGIN: f64 = 0.060;
+    const END_MARGIN: f64 = 0.010;
     // Nuclei-anchored placement: analyse the edit region ONCE, then place each edge
     // inside the band bounded by the neighbouring kept words' syllabic nuclei. This
     // supersedes the level-based snap below wherever the caller supplied the
@@ -7511,8 +7517,17 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         // Bounded by the neighbouring words, so the margin can only
                         // eat silence, never a kept word.
 
-                        let s_abs = (r0 + p.start).min(orig.0 - EDGE_MARGIN).max(lim.0);
-                        let e_abs = (r0 + p.end).max(orig.1 + EDGE_MARGIN).min(lim.1);
+                        let s_abs = (r0 + p.start).min(orig.0 - START_MARGIN).max(lim.0);
+                        // Hard stop at the next kept word's reported start: `lim.1` is
+                        // that word's MIDPOINT, which leaves its whole onset inside
+                        // reach — measured, the cut ran to 10.696 with the next
+                        // nucleus at 10.733, taking that word's attack with it.
+                        let next_start = src
+                            .next_word
+                            .map(|(s, _)| acc_start + s)
+                            .unwrap_or(lim.1)
+                            .min(lim.1);
+                        let e_abs = (r0 + p.end).max(orig.1 + END_MARGIN).min(next_start);
                         let clamped = s_abs > r0 + p.start || e_abs < r0 + p.end;
                         if e_abs > s_abs {
                             r.0 = s_abs;
@@ -7544,8 +7559,13 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         // every declined cut — and declining is common (a short word
                         // whose nucleus isn't detected), so those cuts were the least
                         // protected rather than the most.
-                        r.0 = (orig.0 - EDGE_MARGIN).max(lim.0);
-                        r.1 = (orig.1 + EDGE_MARGIN).min(lim.1);
+                        r.0 = (orig.0 - START_MARGIN).max(lim.0);
+                        let next_start = src
+                            .next_word
+                            .map(|(s, _)| acc_start + s)
+                            .unwrap_or(lim.1)
+                            .min(lim.1);
+                        r.1 = (orig.1 + END_MARGIN).min(next_start);
                         snap_rejected += 1;
                         diagnostics.push(json!({
                             "asked": [r3(src.start), r3(src.end)],
