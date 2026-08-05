@@ -84,6 +84,8 @@ pub struct Bound {
     pub detail: f64,
     /// Length in FRAMES of the quiet run behind each edge, -1 when none was found.
     pub runs: (f64, f64),
+    /// Peak high-band-over-voice-bar tilt, dB, in the window each edge searched.
+    pub tilt: (f64, f64),
 }
 
 /// Frames, or `-` when no run was found.
@@ -149,6 +151,12 @@ pub fn word_bounds_explained() -> Vec<Bound> {
                 end_cause: f.cause,
                 detail: o.detail.max(f.detail),
                 runs: (o.run, f.run),
+                // Measured over the SAME windows the edges searched, so a fricative
+                // that should have been found there cannot hide from this.
+                tilt: (
+                    ctx.analysis.band_tilt(ap.unwrap_or(clip_a), w.start),
+                    ctx.analysis.band_tilt(w.end, an.unwrap_or(clip_b)),
+                ),
             }
         })
         .collect()
@@ -217,6 +225,9 @@ pub fn report() -> String {
          All times in seconds from the item start. drift = measured minus transcript;
          an edge that could not be measured shows -- and falls back to the transcript.
          run = length in FRAMES of the quiet run each edge came from (- = none).
+         tilt = peak high-band-over-voice-bar dominance, dB, in that edge's search
+         window. A fricative should stand out here; if a /sch/ junction reads no
+         higher than a vowel-to-vowel one, it cannot be found by band balance at all.
          A run of 1-2 frames is not a pause, it is the flattest point of continuous
          speech, so an edge taken from it carries no information about the boundary.
          idx word            transcript        measured         drift start/end     gap  why
@@ -259,7 +270,7 @@ pub fn report() -> String {
             }
         };
         out.push_str(&format!(
-            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {}/{} {}  {}/{} run {}/{}{}
+            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {}/{} {}  {}/{} run {}/{} tilt {:>5.1}/{:>5.1}{}
 ",
             i,
             txt,
@@ -274,6 +285,8 @@ pub fn report() -> String {
             b.end_cause.token(),
             fmt_run(b.runs.0),
             fmt_run(b.runs.1),
+            b.tilt.0,
+            b.tilt.1,
             if b.detail > 0.0 { format!(" by {:.3}", b.detail) } else { String::new() },
         ));
     }

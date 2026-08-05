@@ -368,6 +368,22 @@ impl SpeechAnalysis {
         m
     }
 
+    /// Peak high-band-over-voice-bar dominance in [from, to], in dB.
+    ///
+    /// The premise under seven failed attempts at "ihren Schoss", never once
+    /// measured: that a fricative between two words is high-band dominant enough to
+    /// be found. Every version assumed it and differed only in how to threshold or
+    /// attribute it; none moved that junction by a frame while all of them moved
+    /// dozens of others. If this reads no higher between "ihren" and "Schoss" than it
+    /// does across junctions with no fricative at all, the whole approach is dead and
+    /// no threshold saves it.
+    pub fn band_tilt(&self, from: f64, to: f64) -> f64 {
+        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
+        (lo..=hi)
+            .map(|k| (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb))
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
     /// True when no band has enough range to measure anything (a music bed, a very
     /// reverberant room, heavy compression). The caller must refuse rather than cut.
     fn bands_unusable(&self) -> bool {
