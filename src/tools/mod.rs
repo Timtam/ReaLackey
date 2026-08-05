@@ -7523,7 +7523,9 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         // Bounded by the neighbouring words, so the margin can only
                         // eat silence, never a kept word.
 
-                        let s_abs = (r0 + p.start).min(orig.0 - START_MARGIN).max(lim.0);
+                        // An unmeasured edge falls back to transcript + margin.
+                        let placed_s = p.start.map(|t| r0 + t).unwrap_or(f64::INFINITY);
+                        let s_abs = placed_s.min(orig.0 - START_MARGIN).max(lim.0);
                         // Hard stop at the next kept word's reported start: `lim.1` is
                         // that word's MIDPOINT, which leaves its whole onset inside
                         // reach — measured, the cut ran to 10.696 with the next
@@ -7534,8 +7536,9 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                             .map(|t| t + NEXT_WORD_SLACK)
                             .unwrap_or(lim.1)
                             .min(lim.1);
-                        let e_abs = (r0 + p.end).max(orig.1 + END_MARGIN).min(next_start);
-                        let clamped = s_abs > r0 + p.start || e_abs < r0 + p.end;
+                        let placed_e = p.end.map(|t| r0 + t).unwrap_or(f64::NEG_INFINITY);
+                        let e_abs = placed_e.max(orig.1 + END_MARGIN).min(next_start);
+                        let clamped = s_abs > placed_s || e_abs < placed_e;
                         if e_abs > s_abs {
                             r.0 = s_abs;
                             r.1 = e_abs;
@@ -7554,7 +7557,10 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                             // What was ACTUALLY applied, after clamping — reporting
                             // the raw placement hid that the clamp was working.
                             "cut": [r3(s_abs - acc_start), r3(e_abs - acc_start)],
-                            "placed_raw": [r3(itm(p.start)), r3(itm(p.end))],
+                            "placed_raw": [
+                                p.start.map(|t| r3(itm(t))),
+                                p.end.map(|t| r3(itm(t))),
+                            ],
                             "gap_left": r3(p.gap),
                             "fade": r3(p.fade),
                             "time_limited": clamped,

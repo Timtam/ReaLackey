@@ -63,8 +63,12 @@ const MAX_TOL_DB: f64 = 6.0;
 /// Where a removal's two edges go, and how they should be joined.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Placement {
-    pub start: f64,
-    pub end: f64,
+    /// `None` when THIS edge could not be measured — the caller keeps the transcript
+    /// time for it. Per edge, because the two sides are independent: a nucleus close
+    /// to the removed word leaves no measurable stretch on that side while the other
+    /// side is perfectly good, and refusing both threw away a real measurement.
+    pub start: Option<f64>,
+    pub end: Option<f64>,
     /// Equal-power fade length for the join, in seconds.
     pub fade: f64,
     /// The pause left at the join — the single number that exposes a placement which
@@ -396,20 +400,28 @@ impl SpeechAnalysis {
         if inner.len() > expected + 1 {
             return Err(Refusal::BandTooWide);
         }
-        if !self.stretch_measurable(a_prev, first_in) || !self.stretch_measurable(last_in, a_next) {
+        let left = if self.stretch_measurable(a_prev, first_in) {
+            self.quiet_runs(a_prev, first_in)
+        } else {
+            Vec::new()
+        };
+        let right = if self.stretch_measurable(last_in, a_next) {
+            self.quiet_runs(last_in, a_next)
+        } else {
+            Vec::new()
+        };
+        if left.is_empty() && right.is_empty() {
             return Err(Refusal::NoMinimum);
         }
-        let left = self.quiet_runs(a_prev, first_in);
-        let right = self.quiet_runs(last_in, a_next);
         // Earliest surviving run on the left, latest on the right — at RUN
         // granularity, where the preference is meaningful, rather than at frame
         // granularity, where it just picks whatever touches the neighbouring speech.
-        let (&(l0, l1), &(r0, r1)) = match (left.first(), right.last()) {
-            (Some(a), Some(b)) => (a, b),
-            _ => return Err(Refusal::NoMinimum),
-        };
-        let (lt0, lt1) = (self.time_of(l0), self.time_of(l1));
-        let (rt0, rt1) = (self.time_of(r0), self.time_of(r1));
+        let lrun = left.first().map(|&(a, b)| (self.time_of(a), self.time_of(b)));
+        let rrun = right.last().map(|&(a, b)| (self.time_of(a), self.time_of(b)));
+        // Each side falls back to the removed word's own edge when unmeasurable, so
+        // the allocation below still has a sane span to work with.
+        let (lt0, lt1) = lrun.unwrap_or((first_in, first_in));
+        let (rt0, rt1) = rrun.unwrap_or((last_in, last_in));
 
         // Allocate a pause out of the silence the runs actually revealed.
         let s_l = (lt1 - lt0).max(0.0);
@@ -428,19 +440,18 @@ impl SpeechAnalysis {
         } else {
             (0.0, 0.0)
         };
-        let start = (lt0 + g_l).clamp(lt0, lt1);
-        let end = (rt1 - g_r).clamp(rt0, rt1);
+        let start = lrun.map(|_| (lt0 + g_l).clamp(lt0, lt1));
+        let end = rrun.map(|_| (rt1 - g_r).clamp(rt0, rt1));
         // Fade length on a continuum rather than a butt/crossfade branch that can pick
         // the wrong side: over true silence a 5 ms equal-power fade is indistinguishable
         // from an abutment, so nothing is lost and the discrete failure mode goes away.
-        let q = (self.level(self.frame_at(start)).max(self.level(self.frame_at(end)))
-            / self.contrast_bb.max(1.0))
-        .clamp(0.0, 1.0);
+        let lvl = |t: Option<f64>| t.map(|x| self.level(self.frame_at(x))).unwrap_or(0.0);
+        let q = (lvl(start).max(lvl(end)) / self.contrast_bb.max(1.0)).clamp(0.0, 1.0);
         Ok(Placement {
             start,
             end,
             fade: 0.005 + 0.020 * q,
-            gap: (start - lt0) + (rt1 - end),
+            gap: (start.unwrap_or(lt0) - lt0) + (rt1 - end.unwrap_or(rt1)),
         })
     }
 
@@ -822,7 +833,10 @@ mod tests {
         // The anchor is in "pan", i.e. after the /p/ closure.
         assert!(a_prev > pan - 0.02, "anchor {a_prev} should be in 'pan' (>= {pan})");
         let a_next = an_.expect("ständig has a nucleus");
-        if let Ok(pl) = a.place_removal(a_prev, a_next, (japan_end, sch)) { let (cut_s, cut_e) = (pl.start, pl.end);
+        if let Ok(pl) = a.place_removal(a_prev, a_next, (japan_end, sch)) {
+            // Only a PLACED edge carries the invariant; an unmeasured one falls back
+            // to the transcript in the caller.
+            let (cut_s, cut_e) = (pl.start.unwrap_or(a_prev), pl.end.unwrap_or(a_next));
             assert!(cut_s >= a_prev, "cut at {cut_s} landed before the anchor {a_prev}");
             assert!(cut_e <= a_next, "cut at {cut_e} landed past the next anchor {a_next}");
         }
@@ -850,7 +864,8 @@ mod tests {
                     let (Some(p), Some(n)) =
                         a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)))
                     else { continue };
-                    if let Ok(pl) = a.place_removal(p, n, (w1_end, w2)) { let (cs, ce) = (pl.start, pl.end);
+                    if let Ok(pl) = a.place_removal(p, n, (w1_end, w2)) {
+                        let (cs, ce) = (pl.start.unwrap_or(p), pl.end.unwrap_or(n));
                         assert!(
                             cs >= p && ce <= n && ce >= cs,
                             "f0={f0} amp={amp} gap={gap}: cut [{cs}, {ce}] outside band [{p}, {n}]"
@@ -889,7 +904,7 @@ mod tests {
         );
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
         let pl = a.place_removal(p, n, (rem, rem_end)).expect("placed");
-        let (_, cut_e) = (pl.start, pl.end);
+        let cut_e = pl.end.expect("end measured");
         assert!(
             cut_e <= fric_start + 0.02,
             "cut ends at {cut_e}, inside the next word's fricative starting {fric_start}"
@@ -920,7 +935,7 @@ mod tests {
         let (p, n) = a.anchors(Some((w1, w1_end)), (fric, w2), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
         let pl = a.place_removal(p, n, (fric, w2)).expect("placed");
-        let (cut_s, cut_e) = (pl.start, pl.end);
+        let (cut_s, cut_e) = (pl.start.expect("start measured"), pl.end.expect("end measured"));
         assert!(
             cut_s <= fric + 0.015,
             "cut starts at {cut_s}, after the fricative at {fric} — the 'sch' survives"
@@ -951,7 +966,7 @@ mod tests {
         let (p, n) = a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
         let pl = a.place_removal(p, n, (w1_end, w2)).expect("placed");
-        let (_, cut_e) = (pl.start, pl.end);
+        let cut_e = pl.end.expect("end measured");
         assert!(
             cut_e >= fric_end - 0.015,
             "cut ends at {cut_e}, before the trailing fricative ends at {fric_end}"
@@ -986,7 +1001,7 @@ mod tests {
         let (p, n) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
         let pl = a.place_removal(p, n, (rem, rem_end)).expect("placed");
-        let (cut_s, _) = (pl.start, pl.end);
+        let cut_s = pl.start.expect("start measured");
         assert!(
             cut_s <= rem + 0.015,
             "cut starts at {cut_s}, after the fricative at {rem} — the 'sch' survives"
@@ -1026,7 +1041,7 @@ mod tests {
         let (p, n2) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let (p, n2) = (p.expect("prev nucleus"), n2.expect("next nucleus"));
         let pl = a.place_removal(p, n2, (rem, rem_end)).expect("placed");
-        let (cut_s, _) = (pl.start, pl.end);
+        let cut_s = pl.start.expect("start measured");
         assert!(
             cut_s <= rem + 0.015,
             "cut starts at {cut_s}, after the word's onset at {rem} — its attack survives"
@@ -1103,8 +1118,10 @@ mod tests {
         let pl = a
             .place_removal(p.expect("prev"), n2.expect("next"), (rem, rem_end))
             .expect("a boundary exists even though nothing reaches the floor");
-        assert!(pl.start <= rem + 0.02, "cut starts {:.3} after the word at {rem:.3}", pl.start);
-        assert!(pl.end >= rem_end - 0.02, "cut ends {:.3} before the word ends {rem_end:.3}", pl.end);
+        let cs = pl.start.expect("start measured");
+        assert!(cs <= rem + 0.02, "cut starts {cs:.3} after the word at {rem:.3}");
+        let ce = pl.end.expect("end measured");
+        assert!(ce >= rem_end - 0.02, "cut ends {ce:.3} before the word ends {rem_end:.3}");
     }
 
     #[test]
