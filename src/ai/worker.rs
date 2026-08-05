@@ -1697,9 +1697,11 @@ fn cut_analysis_lines(cut: &Value) -> Vec<String> {
         let (s0, s1) = pair(r.get("removed_span"));
         let (c0, c1) = pair(r.get("cut"));
         out.push(format!(
-            "  {}. transcript {a0:.3}-{a1:.3} · anchors {n0:.3}/{n1:.3} ·              {} syllable(s) at {s0:.3}-{s1:.3} · CUT {c0:.3}-{c1:.3} (gap {:.3}s)",
+            "  {}. transcript {a0:.3}-{a1:.3} · anchors {n0:.3}/{n1:.3} ·              {} syllable(s) at {s0:.3}-{s1:.3} · CUT {c0:.3}-{c1:.3} (raw {:.3}-{:.3}, gap {:.3}s)",
             i + 1,
             r.get("removed_syllables").and_then(|v| v.as_u64()).unwrap_or(0),
+            pair(r.get("placed_raw")).0,
+            pair(r.get("placed_raw")).1,
             num(r.get("gap_left")),
         ));
     }

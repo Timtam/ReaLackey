@@ -7500,8 +7500,14 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         // INDEPENDENT estimate of the word edge and was right there.
                         // Erring outward costs a few ms of silence; erring inward
                         // leaves the attack, so take whichever is further out.
-                        let s_abs = (r0 + p.start).min(orig.0).max(lim.0);
-                        let e_abs = (r0 + p.end).max(orig.1).min(lim.1);
+                        // A little OUTSIDE the transcript span, not merely at it: the
+                        // transcript edge is itself approximate, so clamping exactly
+                        // to it still leaves a sliver of the word when it reads late.
+                        // Bounded by the neighbouring words, so the margin can only
+                        // eat silence, never a kept word.
+                        const EDGE_MARGIN: f64 = 0.030;
+                        let s_abs = (r0 + p.start).min(orig.0 - EDGE_MARGIN).max(lim.0);
+                        let e_abs = (r0 + p.end).max(orig.1 + EDGE_MARGIN).min(lim.1);
                         let clamped = s_abs > r0 + p.start || e_abs < r0 + p.end;
                         if e_abs > s_abs {
                             r.0 = s_abs;
@@ -7518,7 +7524,10 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                             "anchors": [r3(itm(a_prev)), r3(itm(a_next))],
                             "removed_syllables": n_syl,
                             "removed_span": [r3(itm(syl_a)), r3(itm(syl_b))],
-                            "cut": [r3(itm(p.start)), r3(itm(p.end))],
+                            // What was ACTUALLY applied, after clamping — reporting
+                            // the raw placement hid that the clamp was working.
+                            "cut": [r3(s_abs - acc_start), r3(e_abs - acc_start)],
+                            "placed_raw": [r3(itm(p.start)), r3(itm(p.end))],
                             "gap_left": r3(p.gap),
                             "fade": r3(p.fade),
                             "time_limited": clamped,
