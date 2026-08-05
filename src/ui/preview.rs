@@ -51,8 +51,16 @@ pub fn disarm() {
 /// deleted it. Falls back to the transcript's own times per word when unmeasurable.
 /// How far a measured word edge may sit past the neighbour's transcript boundary
 /// before it is treated as having crossed into the neighbour rather than measured
-/// this word. Matches the tolerance the nucleus search already allows.
-const NEIGHBOUR_BLEED: f64 = 0.040;
+/// this word — as a fraction of the speaker's OWN syllable period.
+///
+/// It was a fixed 40 ms, which is both too tight and a breadth violation: syllable
+/// rate varies about 2x across languages and as much again between talkers, and the
+/// transcript side of the comparison is a Whisper time that drifts by up to ~0.2 s.
+/// At 40 ms this was the single largest cause of unmeasured edges, and the rejections
+/// were overshooting by only 15-30 ms — correct measurements hitting a bound too
+/// tight to hold them. Half a syllable is the natural scale: an edge further than
+/// that past the neighbour's start is not this word's boundary in anyone's speech.
+const NEIGHBOUR_BLEED_SYLLABLES: f64 = 0.5;
 
 /// One word's measured extent, with the reason for each edge that is a fallback.
 pub struct Bound {
@@ -77,6 +85,7 @@ pub fn word_bounds_explained() -> Vec<Bound> {
         return Vec::new();
     };
     let (clip_a, clip_b) = ctx.analysis.span();
+    let bleed = ctx.analysis.syllable_period * NEIGHBOUR_BLEED_SYLLABLES;
     (0..ctx.words.len())
         .map(|i| {
             let w = &ctx.words[i];
@@ -105,8 +114,8 @@ pub fn word_bounds_explained() -> Vec<Bound> {
             // after it. `.min`/`.max` against the word's own hint so an overlapping
             // transcript (numbers, hyphenated tokens) can never tighten the bound past
             // where the word itself claims to be.
-            let lo = prev.map(|(_, pe)| pe.min(w.start) - NEIGHBOUR_BLEED);
-            let hi = next.map(|(ns, _)| ns.max(w.end) + NEIGHBOUR_BLEED);
+            let lo = prev.map(|(_, pe)| pe.min(w.start) - bleed);
+            let hi = next.map(|(ns, _)| ns.max(w.end) + bleed);
             let bleed = |e: Edge, out: bool| if out { e.reject(EdgeCause::BleedReject) } else { e };
             let o = bleed(o, o.time.is_some_and(|t| lo.is_some_and(|l| t < l)));
             let f = bleed(f, f.time.is_some_and(|t| hi.is_some_and(|h| t > h)));
