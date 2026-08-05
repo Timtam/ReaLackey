@@ -12,6 +12,16 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- **Cut-by-text editor: a whole-clip diagnostic report.** The editor's **Report**
+  button copies a per-word table to the clipboard — transcript span, measured span,
+  the drift between them, the gap to the next word, and, for each edge the analysis
+  could **not** measure, *why*. Previously a boundary that fell back to the
+  transcript printed a drift of `+0.000`, which is exactly what a perfect
+  measurement prints, so the two were indistinguishable; unmeasured edges now show
+  `--` and a cause. The header summarises causes across the clip and lists runs of
+  consecutive unmeasured words, because one word the detector cannot see also breaks
+  its neighbours.
+
 - **Speech-to-text (transcription)** — a new provider *type* alongside chat. The
   **Providers dialog is now tabbed by role** (Chat / Transcription); on the
   **Transcription** tab, **Add → "OpenAI Whisper"** (or **"Local Whisper server"**)
@@ -95,6 +105,19 @@ into a versioned heading and attaches its entries to the GitHub release — see
   during thinking it shows "Reasoning…".)
 
 ### Fixed
+
+- **Cut-by-text: the first and last word of every clip are measurable again.** Word
+  boundaries are derived from the neighbouring words' syllabic nuclei, and word 0 has
+  no previous word (nor word N-1 a next one) — so both were falling back to raw
+  transcript times for no acoustic reason. More generally, a missing anchor on one
+  side no longer discards a perfectly good measurement on the other; the clip's own
+  edge stands in where there is no neighbour.
+- **Cut-by-text: short words are no longer rejected by frame rounding.** The check
+  that a measured boundary contains the word's own nucleus now tolerates half an
+  analysis frame. When a word has no nucleus of its own the check runs against the
+  transcript time, which does not sit on the frame grid, so correct measurements were
+  being discarded as if they had run into the neighbouring word — hardest on short
+  words, whose search windows are only a few frames wide.
 
 - **Connections behind antivirus / corporate proxies now work.** ReaLackey trusted
   only its own bundled list of certificate authorities, so on machines where security

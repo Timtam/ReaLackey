@@ -107,6 +107,68 @@ pub enum Refusal {
     NoMinimum,
 }
 
+/// Why ONE edge of a word could not be measured. Per-edge and specific, because
+/// "unmeasured" lumps together a word the detector never saw, a rounding rejection,
+/// and a boundary that genuinely is not in the audio — and those need opposite fixes.
+/// Without this the report showed a fallback as `+0.000` drift, typographically
+/// identical to a perfect measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeCause {
+    /// Found in the audio.
+    Measured,
+    /// The anchors were degenerate (out-of-order or zero-length transcript span).
+    NoAnchor,
+    /// No band has enough range to measure anything — a whole-clip property.
+    BandsUnusable,
+    /// The word has no syllabic nucleus of its own inside the search band, so the
+    /// search fell back to the transcript hint. The detector never saw this word.
+    NoNucleusInBand,
+    /// A nucleus was found but no quiet run flanks it on this side.
+    NoQuietRun,
+    /// A run was found but did not contain the word's own nucleus.
+    ContainmentReject,
+    /// The two edges crossed.
+    Crossed,
+    /// The edge landed inside a neighbouring word.
+    BleedReject,
+}
+
+impl EdgeCause {
+    /// Short token for the diagnostic report.
+    pub fn token(self) -> &'static str {
+        match self {
+            EdgeCause::Measured => "ok",
+            EdgeCause::NoAnchor => "no-anchor",
+            EdgeCause::BandsUnusable => "bands",
+            EdgeCause::NoNucleusInBand => "no-nucleus",
+            EdgeCause::NoQuietRun => "no-run",
+            EdgeCause::ContainmentReject => "contain",
+            EdgeCause::Crossed => "crossed",
+            EdgeCause::BleedReject => "bleed",
+        }
+    }
+}
+
+/// One measured edge, carrying WHY when there is no time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Edge {
+    pub time: Option<f64>,
+    pub cause: EdgeCause,
+}
+
+impl Edge {
+    fn ok(t: f64) -> Self {
+        Edge { time: Some(t), cause: EdgeCause::Measured }
+    }
+    fn fail(cause: EdgeCause) -> Self {
+        Edge { time: None, cause }
+    }
+    /// Drop a measured time that failed a caller-side check, keeping the reason.
+    pub fn reject(self, cause: EdgeCause) -> Self {
+        Edge { time: None, cause }
+    }
+}
+
 /// Per-item speech analysis: band envelopes, self-calibrated levels, and the
 /// syllabic nuclei that anchor every boundary decision.
 pub struct SpeechAnalysis {
@@ -192,6 +254,16 @@ impl SpeechAnalysis {
         })
     }
 
+    /// Analysis frame period. Callers need it to reason about quantisation: a time
+    /// derived from a frame index is only ever accurate to half of this.
+    pub fn hop(&self) -> f64 {
+        self.hop
+    }
+    /// The analysed span, in item time. Used as a substitute anchor at the clip
+    /// edges, where there is no neighbouring word to anchor to.
+    pub fn span(&self) -> (f64, f64) {
+        (0.0, self.time_of(self.bb.len().saturating_sub(1)))
+    }
     fn frame_at(&self, t: f64) -> usize {
         ((t / self.hop).round().max(0.0) as usize).min(self.bb.len().saturating_sub(1))
     }
@@ -399,9 +471,14 @@ impl SpeechAnalysis {
         a_prev: f64,
         a_next: f64,
         hint: (f64, f64),
-    ) -> (Option<f64>, Option<f64>) {
-        if a_next <= a_prev || self.bands_unusable() {
-            return (None, None);
+    ) -> (Edge, Edge) {
+        if self.bands_unusable() {
+            let e = Edge::fail(EdgeCause::BandsUnusable);
+            return (e, e);
+        }
+        if a_next <= a_prev {
+            let e = Edge::fail(EdgeCause::NoAnchor);
+            return (e, e);
         }
         let inner: Vec<f64> = self
             .nuclei
@@ -410,6 +487,11 @@ impl SpeechAnalysis {
             .filter(|&n| n > a_prev && n < a_next)
             .filter(|&n| n >= hint.0 - HINT_TOL && n <= hint.1 + HINT_TOL)
             .collect();
+        // Whether the word has a nucleus of its OWN. When it does not, everything
+        // below is measured against the transcript hint instead, which is worth
+        // reporting separately: it is the detector missing the word, not the audio
+        // lacking a boundary.
+        let has_nucleus = !inner.is_empty();
         let (first_in, last_in) = match (inner.first(), inner.last()) {
             (Some(&f), Some(&l)) => (f, l),
             _ => (hint.0.clamp(a_prev, a_next), hint.1.clamp(a_prev, a_next)),
@@ -417,11 +499,11 @@ impl SpeechAnalysis {
         // The word begins where the quiet run before it ENDS, and ends where the run
         // after it BEGINS. Take the run nearest the word on each side, so a pause
         // further out (a sentence break) is not swallowed.
-        let start = self
+        let raw_start = self
             .quiet_runs(a_prev, first_in)
             .last()
             .map(|&(_, b)| self.time_of(b));
-        let end = self
+        let raw_end = self
             .quiet_runs(last_in, a_next)
             .first()
             .map(|&(a, _)| self.time_of(a));
@@ -431,11 +513,37 @@ impl SpeechAnalysis {
         // the same place, and others overshot by up to 0.68 s into the next word
         // because the right-hand run was found far too late. A side that fails this
         // is discarded so the caller falls back to the transcript for that edge alone.
-        let start = start.filter(|&t| t <= first_in);
-        let end = end.filter(|&t| t >= last_in);
+        //
+        // Tolerated by HALF A HOP. Nuclei sit on the frame grid, so when the word has
+        // its own nucleus this can never reject by rounding. But when it does not,
+        // first_in/last_in are the CLAMPED TRANSCRIPT HINT — an arbitrary float that
+        // frame_at rounds — so a run touching the window edge overshoots by up to
+        // hop/2 and a correct measurement was being thrown away as if it had crossed
+        // into the neighbour. That is frame quantisation, not measurement error, and
+        // it fired hardest on short words, whose flanking windows are only a few
+        // frames wide so the run always touches the edge.
+        let q = self.hop / 2.0;
+        let start = raw_start.filter(|&t| t <= first_in + q);
+        let end = raw_end.filter(|&t| t >= last_in - q);
+        let cause = |raw: Option<f64>| {
+            if raw.is_some() {
+                EdgeCause::ContainmentReject
+            } else if has_nucleus {
+                EdgeCause::NoQuietRun
+            } else {
+                EdgeCause::NoNucleusInBand
+            }
+        };
+        let mk = |kept: Option<f64>, raw: Option<f64>| match kept {
+            Some(t) => Edge::ok(t),
+            None => Edge::fail(cause(raw)),
+        };
         match (start, end) {
-            (Some(a), Some(b)) if b <= a => (None, None),
-            other => other,
+            (Some(a), Some(b)) if b <= a => {
+                let e = Edge::fail(EdgeCause::Crossed);
+                (e, e)
+            }
+            _ => (mk(start, raw_start), mk(end, raw_end)),
         }
     }
 
@@ -826,6 +934,57 @@ mod tests {
     /// A crude but structurally honest speech synthesiser: a voiced "vowel" is a
     /// pulse train with formant-ish shaping, a "fricative" is high-frequency noise,
     /// a "closure" is near-silence, and everything sits on a room-tone floor.
+    /// A word's edges are independent, and each carries its own reason. Regression
+    /// for the report printing a fallback as `+0.000` — indistinguishable from a
+    /// perfect measurement — and for one bad side discarding a good one.
+    #[test]
+    fn word_extent_reports_a_cause_per_edge() {
+        let mut syn = Syn::new();
+        syn.quiet(0.30)
+            .vowel(0.20, 120.0, 0.5) // previous word
+            .quiet(0.15)
+            .vowel(0.20, 130.0, 0.5) // the word under test
+            .quiet(0.15)
+            .vowel(0.20, 140.0, 0.5) // next word
+            .quiet(0.30);
+        let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
+        let (o, f) = a.word_extent(0.40, 1.10, (0.65, 0.85));
+        assert_eq!(o.cause, EdgeCause::Measured, "left edge: {o:?}");
+        assert_eq!(f.cause, EdgeCause::Measured, "right edge: {f:?}");
+        assert!(o.time.unwrap() < f.time.unwrap());
+
+        // Degenerate anchors must name themselves, not masquerade as a measurement.
+        let (o, f) = a.word_extent(1.0, 0.5, (0.65, 0.85));
+        assert_eq!(o.cause, EdgeCause::NoAnchor);
+        assert_eq!(f.cause, EdgeCause::NoAnchor);
+        assert!(o.time.is_none() && f.time.is_none());
+    }
+
+    /// The containment filter tolerates half a hop. When a word has no nucleus of its
+    /// own the window edge is the CLAMPED TRANSCRIPT HINT, an arbitrary float that
+    /// frame_at rounds, so a correct run overshoots by up to hop/2 — that is frame
+    /// quantisation, and rejecting it threw away exactly the short-word cohort.
+    #[test]
+    fn containment_tolerates_frame_quantisation() {
+        let mut syn = Syn::new();
+        syn.quiet(0.30)
+            .vowel(0.20, 120.0, 0.5)
+            .quiet(0.15)
+            .vowel(0.20, 130.0, 0.5)
+            .quiet(0.15)
+            .vowel(0.20, 140.0, 0.5)
+            .quiet(0.30);
+        let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
+        // Sweep the hint off the frame grid by sub-hop amounts: none of these may
+        // flip an edge from measured to rejected.
+        for k in 0..10 {
+            let d = k as f64 * a.hop() / 10.0;
+            let (o, f) = a.word_extent(0.40, 1.10, (0.65 + d, 0.85 + d));
+            assert_ne!(o.cause, EdgeCause::ContainmentReject, "offset {d:.4}: {o:?}");
+            assert_ne!(f.cause, EdgeCause::ContainmentReject, "offset {d:.4}: {f:?}");
+        }
+    }
+
     struct Syn {
         s: Vec<f64>,
         seed: u64,
