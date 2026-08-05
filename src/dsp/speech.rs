@@ -46,6 +46,9 @@ const NUCLEUS_PROMINENCE_DB: f64 = 2.0;
 /// between them is shallow. Below the shortest vowel nucleus in fast speech, so
 /// genuine adjacent syllables are never merged.
 const MIN_SYLLABLE_SEP: f64 = 0.080;
+/// How far outside the transcript's span a nucleus may still belong to the removed
+/// word. Covers the transcript's own error without reaching a neighbour's syllable.
+const HINT_TOL: f64 = 0.120;
 /// Fallback nucleus criterion for whispered/heavily-coded material, where voicing
 /// can't be required: a run above the speech/silence split at least this long. Below
 /// the shortest vowel nucleus in fast speech (~60-80 ms), so it still rejects clicks.
@@ -370,11 +373,18 @@ impl SpeechAnalysis {
         if a_next <= a_prev || self.bands_unusable() {
             return Err(Refusal::NoMinimum);
         }
+        // Nuclei belonging to the removed run. Everything between the anchors is NOT
+        // automatically part of it: a multi-syllable neighbour contributes nuclei
+        // there too, and counting one inflates the removed extent, pushing the end
+        // placement past where the word really finishes (measured: syllables reported
+        // at 24.183-24.423 for a word the transcript ends at 24.368). The transcript
+        // is loose but not that loose, so require membership within a tolerance of it.
         let inner: Vec<f64> = self
             .nuclei
             .iter()
             .copied()
             .filter(|&n| n > a_prev && n < a_next)
+            .filter(|&n| n >= hint.0 - HINT_TOL && n <= hint.1 + HINT_TOL)
             .collect();
         let (first_in, last_in) = match (inner.first(), inner.last()) {
             (Some(&f), Some(&l)) => (f, l),
