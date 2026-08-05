@@ -82,6 +82,17 @@ pub struct Bound {
     pub end_cause: EdgeCause,
     /// By how much a crossing crossed; 0.0 otherwise.
     pub detail: f64,
+    /// Length in FRAMES of the quiet run behind each edge, -1 when none was found.
+    pub runs: (f64, f64),
+}
+
+/// Frames, or `-` when no run was found.
+fn fmt_run(r: f64) -> String {
+    if r < 0.0 {
+        "-".to_string()
+    } else {
+        format!("{r:.0}")
+    }
 }
 
 pub fn word_bounds() -> Vec<(f64, f64)> {
@@ -137,6 +148,7 @@ pub fn word_bounds_explained() -> Vec<Bound> {
                 start_cause: o.cause,
                 end_cause: f.cause,
                 detail: o.detail.max(f.detail),
+                runs: (o.run, f.run),
             }
         })
         .collect()
@@ -204,6 +216,9 @@ pub fn report() -> String {
          Runs of consecutive unmeasured words: {}
          All times in seconds from the item start. drift = measured minus transcript;
          an edge that could not be measured shows -- and falls back to the transcript.
+         run = length in FRAMES of the quiet run each edge came from (- = none).
+         A run of 1-2 frames is not a pause, it is the flattest point of continuous
+         speech, so an edge taken from it carries no information about the boundary.
          idx word            transcript        measured         drift start/end     gap  why
 ",
         ctx.words.len(),
@@ -244,7 +259,7 @@ pub fn report() -> String {
             }
         };
         out.push_str(&format!(
-            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {}/{} {}  {}/{}{}
+            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {}/{} {}  {}/{} run {}/{}{}
 ",
             i,
             txt,
@@ -257,6 +272,8 @@ pub fn report() -> String {
             gap.map_or_else(|| "      -".to_string(), |g| format!("{g:7.3}")),
             b.start_cause.token(),
             b.end_cause.token(),
+            fmt_run(b.runs.0),
+            fmt_run(b.runs.1),
             if b.detail > 0.0 { format!(" by {:.3}", b.detail) } else { String::new() },
         ));
     }

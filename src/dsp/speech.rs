@@ -162,21 +162,28 @@ impl EdgeCause {
 pub struct Edge {
     pub time: Option<f64>,
     pub cause: EdgeCause,
+    /// LENGTH IN FRAMES of the quiet run this edge came from, or -1 when no run was
+    /// found. The measurement four fixes at the "ihren Schoss" junction were aimed at
+    /// and none of them ever took: the report's `gap` column is
+    /// next.measured_start - this.measured_end, which is NOT a run length, so whether
+    /// a marginal-run gate would even fire there has never actually been observed.
+    pub run: f64,
     /// For a crossing, BY HOW MUCH. The single number that says whether this is
     /// frame quantisation (<= one hop) or a real inversion.
     pub detail: f64,
 }
 
 impl Edge {
-    fn ok(t: f64) -> Self {
-        Edge { time: Some(t), cause: EdgeCause::Measured, detail: 0.0 }
+    fn ok(t: f64, run: f64) -> Self {
+        Edge { time: Some(t), cause: EdgeCause::Measured, detail: 0.0, run }
     }
     fn fail(cause: EdgeCause) -> Self {
-        Edge { time: None, cause, detail: 0.0 }
+        Edge { time: None, cause, detail: 0.0, run: -1.0 }
     }
-    /// Drop a measured time that failed a caller-side check, keeping the reason.
+    /// Drop a measured time that failed a caller-side check, keeping the reason and
+    /// the run it came from — a rejected edge still says how much silence was there.
     pub fn reject(self, cause: EdgeCause) -> Self {
-        Edge { time: None, cause, detail: 0.0 }
+        Edge { time: None, cause, detail: 0.0, run: self.run }
     }
 }
 
@@ -534,14 +541,15 @@ impl SpeechAnalysis {
         // The word begins where the quiet run before it ENDS, and ends where the run
         // after it BEGINS. Take the run nearest the word on each side, so a pause
         // further out (a sentence break) is not swallowed.
-        let raw_start = self
-            .quiet_runs(a_prev, first_in)
-            .last()
-            .map(|&(_, b)| self.time_of(b));
-        let raw_end = self
-            .quiet_runs(last_in, a_next)
-            .first()
-            .map(|&(a, _)| self.time_of(a));
+        // Keep the run itself, not just the edge time: its LENGTH is what decides
+        // whether a junction has a real pause or only the flattest point of continuous
+        // speech, and it has never been observed on real audio.
+        let lrun = self.quiet_runs(a_prev, first_in).last().copied();
+        let rrun = self.quiet_runs(last_in, a_next).first().copied();
+        let raw_start = lrun.map(|(_, b)| self.time_of(b));
+        let raw_end = rrun.map(|(a, _)| self.time_of(a));
+        let llen = lrun.map_or(-1.0, |(a, b)| (b - a) as f64);
+        let rlen = rrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         // The word's own nucleus MUST lie inside its extent. Nothing forced that
         // before, and the report showed both ways it fails: ~9% of words (nearly all
         // short function words) came back zero-length because the two runs resolved to
@@ -569,12 +577,13 @@ impl SpeechAnalysis {
                 EdgeCause::NoNucleusInBand
             }
         };
-        let mk = |kept: Option<f64>, raw: Option<f64>| match kept {
-            Some(t) => Edge::ok(t),
-            None => Edge::fail(cause(raw)),
+        let mk = |kept: Option<f64>, raw: Option<f64>, run: f64| match kept {
+            Some(t) => Edge::ok(t, run),
+            None => Edge { run, ..Edge::fail(cause(raw)) },
         };
         match (start, end) {
             (Some(a), Some(b)) if b <= a => {
+                let (lr, rr) = (llen, rlen);
                 // Split by nucleus geometry, because these need opposite fixes: with a
                 // single nucleus the two search windows MEET at that frame, so both
                 // runs can legitimately touch it and the "crossing" may be nothing but
@@ -587,10 +596,10 @@ impl SpeechAnalysis {
                 } else {
                     EdgeCause::CrossedMulti
                 };
-                let e = Edge { time: None, cause, detail: a - b };
-                (e, e)
+                let base = Edge { time: None, cause, detail: a - b, run: -1.0 };
+                (Edge { run: lr, ..base }, Edge { run: rr, ..base })
             }
-            _ => (mk(start, raw_start), mk(end, raw_end)),
+            _ => (mk(start, raw_start, llen), mk(end, raw_end, rlen)),
         }
     }
 
