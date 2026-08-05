@@ -47,8 +47,14 @@ const NUCLEUS_PROMINENCE_DB: f64 = 2.0;
 /// genuine adjacent syllables are never merged.
 const MIN_SYLLABLE_SEP: f64 = 0.080;
 /// How far outside the transcript's span a nucleus may still belong to the removed
-/// word. Covers the transcript's own error without reaching a neighbour's syllable.
-const HINT_TOL: f64 = 0.120;
+/// word.
+///
+/// 40 ms, checked against a real case rather than picked: a measured cut counted a
+/// nucleus at 24.423 for a word ending at 24.368 — 55 ms past — and cut into the
+/// following word. At 120 ms that nucleus passed; at 40 ms it does not. Erring small
+/// only shrinks the removed extent, which under-cuts and is recoverable by ear, while
+/// erring large cuts into a word the user kept.
+const HINT_TOL: f64 = 0.040;
 /// How far past a NEIGHBOUR's reported boundary a nucleus may still be counted as the
 /// removed word's. Tight on purpose: erring small only shrinks the removed extent,
 /// which under-cuts (recoverable), while erring large over-cuts into a kept word.
