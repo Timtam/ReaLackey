@@ -42,6 +42,10 @@ const SMOOTH: f64 = 0.030;
 /// A nucleus must stand this far above its flanking dips (de Jong & Wempe's
 /// validated syllable-nuclei method).
 const NUCLEUS_PROMINENCE_DB: f64 = 2.0;
+/// Two envelope peaks closer than this are treated as one syllable when the valley
+/// between them is shallow. Below the shortest vowel nucleus in fast speech, so
+/// genuine adjacent syllables are never merged.
+const MIN_SYLLABLE_SEP: f64 = 0.080;
 /// Fallback nucleus criterion for whispered/heavily-coded material, where voicing
 /// can't be required: a run above the speech/silence split at least this long. Below
 /// the shortest vowel nucleus in fast speech (~60-80 ms), so it still rejects clicks.
@@ -598,7 +602,15 @@ fn find_nuclei(
     for &c in &cands {
         if let Some(&last) = kept.last() {
             let valley = mid[last..=c].iter().copied().fold(f64::INFINITY, f64::min);
-            if mid[c].min(mid[last]) - valley < NUCLEUS_PROMINENCE_DB {
+            let apart = (c - last) as f64 * hop_s;
+            // Merge ONLY when the peaks are also close in time. The dip test alone
+            // absorbs a quiet word's syllable into a louder neighbour whenever the
+            // level barely dips between them — which is normal in connected speech —
+            // and that word then has no nucleus, so its removal cannot be measured at
+            // all. Ripple within one vowel occurs over a few tens of ms; two peaks
+            // further apart than the shortest syllable are separate syllables however
+            // shallow the valley.
+            if apart < MIN_SYLLABLE_SEP && mid[c].min(mid[last]) - valley < NUCLEUS_PROMINENCE_DB {
                 if mid[c] > mid[last] {
                     kept.pop();
                     kept.push(c);
@@ -1122,6 +1134,39 @@ mod tests {
         assert!(cs <= rem + 0.02, "cut starts {cs:.3} after the word at {rem:.3}");
         let ce = pl.end.expect("end measured");
         assert!(ce >= rem_end - 0.02, "cut ends {ce:.3} before the word ends {rem_end:.3}");
+    }
+
+    /// A quiet unstressed word beside a loud one must keep its OWN nucleus. The
+    /// prominence merge previously absorbed it into the louder neighbour whenever the
+    /// level barely dipped between them — normal in connected speech — and the word
+    /// then had no nucleus, so its removal could not be measured and fell back to bare
+    /// transcript times. That is what left two of three real cuts unmeasured.
+    #[test]
+    fn a_quiet_word_keeps_its_own_nucleus() {
+        let mut s = Syn::new();
+        s.quiet(0.25);
+        let loud = s.at();
+        s.vowel(0.20, 120.0, 0.6);
+        let loud_end = s.at();
+        s.quiet(0.02); // barely a dip — connected speech
+        let soft = s.at();
+        s.vowel(0.14, 120.0, 0.12); // ~14 dB down: an unstressed function word
+        let soft_end = s.at();
+        s.quiet(0.02);
+        s.vowel(0.20, 120.0, 0.6);
+        s.quiet(0.25);
+        let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
+        let own = a
+            .nuclei
+            .iter()
+            .filter(|&&n| n > soft - 0.02 && n < soft_end + 0.02)
+            .count();
+        assert!(
+            own >= 1,
+            "the quiet word [{soft:.3}, {soft_end:.3}] has no nucleus of its own: {:?}",
+            a.nuclei
+        );
+        assert!(loud < loud_end, "fixture sanity");
     }
 
     #[test]
