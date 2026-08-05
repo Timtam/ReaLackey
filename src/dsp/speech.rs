@@ -190,9 +190,14 @@ pub struct SpeechAnalysis {
     hf: Vec<f64>,
     /// Voice bar, 300-3000 Hz, unsmoothed.
     vb: Vec<f64>,
+    /// Sonorant / fricative pair for the spectral boundary measure only.
+    lb: Vec<f64>,
+    fr: Vec<f64>,
     floor_bb: f64,
     floor_hf: f64,
     floor_vb: f64,
+    floor_lb: f64,
+    floor_fr: f64,
     /// Each band's own speech-to-floor range, so levels can be compared between
     /// bands with very different noise floors.
     contrast_bb: f64,
@@ -245,6 +250,17 @@ impl SpeechAnalysis {
         // vowel into several syllables. The smoothing must not reach level(), where
         // it would span a short inter-word gap and hide it.
         let mid = smooth_db(&vb, hop, sample_rate);
+        // Bands for the SPECTRAL BOUNDARY measure, chosen for fricatives rather than
+        // borrowed from the nucleus detector. The old measure was hf(>3 kHz) against
+        // vb(300-3000 Hz), and German /sch/ sits at roughly 2-4 kHz — straddling that
+        // split, so its energy landed on both sides and cancelled in the difference.
+        // Three clip reports in a row came back byte-identical at "ihren Schoss"
+        // because of it. 2 kHz is below any fricative's energy and above the second
+        // formant of most vowels, so the two sides separate cleanly.
+        let fric_hi = (nyq * 0.95).min(8000.0);
+        let fric_lo = 2000.0_f64.min(fric_hi * 0.5);
+        let lb = frame_db(&bandpass(&base, sample_rate, 300.0, fric_lo), win, hop);
+        let fr = frame_db(&bandpass(&base, sample_rate, fric_lo, fric_hi), win, hop);
         if bb.len() < 3 {
             return None;
         }
@@ -253,6 +269,8 @@ impl SpeechAnalysis {
         let floor_bb = noise_floor_db(&bb);
         let floor_hf = noise_floor_db(&hf);
         let floor_vb = noise_floor_db(&vb);
+        let floor_lb = noise_floor_db(&lb);
+        let floor_fr = noise_floor_db(&fr);
         let (t_split, speech_level) = otsu_split(&bb);
         let contrast_bb = (speech_level - floor_bb).max(0.0);
         let contrast_hf = (otsu_split(&hf).1 - floor_hf).max(0.0);
@@ -273,9 +291,13 @@ impl SpeechAnalysis {
             bb,
             hf,
             vb,
+            lb,
+            fr,
             floor_bb,
             floor_hf,
             floor_vb,
+            floor_lb,
+            floor_fr,
             contrast_bb,
             contrast_hf,
             contrast_vb,
@@ -381,11 +403,11 @@ impl SpeechAnalysis {
         (self.time_of(run.0), self.time_of(run.1))
     }
 
-    /// Balance between the high band and the voice bar, in dB. A sonorant sits low
-    /// here and a fricative high, so the DERIVATIVE of this locates a boundary that
-    /// has no energy dip at all.
+    /// Balance between the fricative band and the sonorant band, in dB. A sonorant
+    /// sits low here and a fricative high, so the DERIVATIVE of this locates a
+    /// boundary that has no energy dip at all.
     fn balance(&self, k: usize) -> f64 {
-        (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb)
+        (self.fr[k] - self.floor_fr) - (self.lb[k] - self.floor_lb)
     }
 
     /// Where the spectral balance shifts most sharply in [from, to] — a boundary
@@ -1193,6 +1215,33 @@ mod tests {
         flat.quiet(0.30).vowel(0.60, 120.0, 0.5).quiet(0.30);
         let b = SpeechAnalysis::new(&flat.s, SR).expect("analysable");
         assert_eq!(b.spectral_edge(0.40, 0.75, 0.55), None, "vowel interior is not a boundary");
+    }
+
+    /// A fricative confined to 2-4 kHz — German /sch/ — registers as a spectral
+    /// boundary.
+    ///
+    /// NOT a discriminating test, though it was written to be one: it passes with the
+    /// OLD hf/vb bands too, because bandpassed white noise lifts the >3 kHz band far
+    /// above its own near-empty floor, so the step survives the split that cancels it
+    /// in real speech. Synthetic fricatives have failed to reproduce this failure
+    /// three times now. Only the whole-clip report on real audio discriminates.
+    #[test]
+    fn a_sch_confined_to_two_to_four_khz_is_a_boundary() {
+        let mut syn = Syn::new();
+        syn.quiet(0.30).vowel(0.25, 120.0, 0.5);
+        let mut burst = Syn::new();
+        burst.fricative(0.12, 0.9);
+        syn.s.extend(bandpass(&burst.s, SR, 2000.0, 4000.0));
+        syn.vowel(0.22, 110.0, 0.5).quiet(0.30);
+        let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
+        let onset = 0.55;
+        let e = a
+            .spectral_edge(0.40, 0.75, onset)
+            .expect("a /sch/ onset is a spectral boundary");
+        assert!(
+            (e - onset).abs() < 0.05,
+            "edge {e:.3} should be near the /sch/ onset {onset:.3}"
+        );
     }
 
     struct Syn {
