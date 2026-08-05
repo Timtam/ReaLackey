@@ -1589,6 +1589,16 @@ async fn run_cut_editor(
     let wav_b64 = rendered.audio.map(|a| a.data_base64).unwrap_or_default();
 
     // 4. Build the editor payload: words with sentence ids + times, and the audio.
+    // Arm the analysis first so each word can carry its MEASURED extent — snippet
+    // playback then auditions exactly what deleting that word would remove, instead
+    // of transcript times that run 50-200 ms out and bleed into the neighbours.
+    {
+        use base64::Engine as _;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&wav_b64) {
+            crate::ui::preview::arm(&bytes, &t.transcript.words);
+        }
+    }
+    let measured = crate::ui::preview::word_bounds();
     let sids = crate::edit::sentence_ids(&t.transcript.words, &t.transcript.segments);
     let words_json: Vec<Value> = t
         .transcript
@@ -1596,7 +1606,12 @@ async fn run_cut_editor(
         .iter()
         .enumerate()
         .map(|(i, w)| {
-            json!({ "t": w.text, "start": w.start, "end": w.end, "s": sids.get(i).copied().unwrap_or(0) })
+            let (o, f) = measured.get(i).copied().unwrap_or((w.start, w.end));
+            json!({
+                "t": w.text, "start": w.start, "end": w.end,
+                "s": sids.get(i).copied().unwrap_or(0),
+                "o": o, "f": f,
+            })
         })
         .collect();
     let item_name = std::path::Path::new(&t.source_file)
@@ -1604,14 +1619,6 @@ async fn run_cut_editor(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
-    // Cache the analysis so the editor's Play button can ask for the REAL cut
-    // boundaries instead of previewing transcript times.
-    {
-        use base64::Engine as _;
-        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&wav_b64) {
-            crate::ui::preview::arm(&bytes, &t.transcript.words);
-        }
-    }
     let payload = json!({ "words": words_json, "wav": wav_b64, "item": item_name, "duration": total });
 
     // 5. Arm the reply slot, open the editor, await the user's result. The editor

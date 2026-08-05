@@ -831,9 +831,14 @@ document.addEventListener('keydown',function(e){
     try{
       var lead=PAD_IN,tail=PAD_OUT;
       if(st&&typeof i==='number'&&st.words){
-        var p=st.words[i-1],nx=st.words[i+1];
-        if(p) lead=Math.min(PAD_IN,Math.max(PAD_IN_MIN,0.5*(s-p.end)));
-        if(nx) tail=Math.min(PAD_OUT,Math.max(PAD_OUT_MIN,0.5*(nx.start-e)));
+        var w=st.words[i],p=st.words[i-1],nx=st.words[i+1];
+        // Measured extent when the host could determine it: what you hear is then
+        // exactly what deleting this word would remove.
+        if(w&&typeof w.o==='number'&&typeof w.f==='number'&&w.f>w.o){ s=w.o; e=w.f; }
+        var pe=(p&&typeof p.f==='number')?p.f:(p?p.end:null);
+        var ns=(nx&&typeof nx.o==='number')?nx.o:(nx?nx.start:null);
+        if(pe!==null) lead=Math.min(PAD_IN,Math.max(0,0.5*(s-pe)));
+        if(ns!==null) tail=Math.min(PAD_OUT,Math.max(0,0.5*(ns-e)));
       }
       var o=Math.max(0,s-lead), d=Math.max(0.02,(e-o)+tail);
       if(buf.duration) d=Math.min(d,Math.max(0.02,buf.duration-o));

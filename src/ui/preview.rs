@@ -44,6 +44,40 @@ pub fn disarm() {
     }
 }
 
+/// Measured [onset, offset] for EVERY word, in item time.
+///
+/// Each is obtained by asking where the cut would go if that word alone were removed,
+/// so what you hear when you land on a word is exactly what would disappear if you
+/// deleted it. Falls back to the transcript's own times per word when unmeasurable.
+pub fn word_bounds() -> Vec<(f64, f64)> {
+    let g = match CTX.lock() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    let Some(ctx) = g.as_ref() else {
+        return Vec::new();
+    };
+    (0..ctx.words.len())
+        .map(|i| {
+            let w = &ctx.words[i];
+            let prev = i.checked_sub(1).and_then(|j| ctx.words.get(j)).map(|p| (p.start, p.end));
+            let next = ctx.words.get(i + 1).map(|n| (n.start, n.end));
+            let (ap, an) = ctx.analysis.anchors(prev, (w.start, w.end), next);
+            let placed = match (ap, an) {
+                (Some(a), Some(b)) => ctx
+                    .analysis
+                    .place_removal(a, b, (w.start, w.end), (prev.map(|p| p.1), next.map(|n| n.0)))
+                    .ok(),
+                _ => None,
+            };
+            match placed {
+                Some(p) => (p.start.unwrap_or(w.start), p.end.unwrap_or(w.end)),
+                None => (w.start, w.end),
+            }
+        })
+        .collect()
+}
+
 /// The KEPT segments, in item time, that a cut with these flags would leave —
 /// computed by the same placement the cut itself uses. Empty when unavailable, in
 /// which case the caller falls back to transcript times.
