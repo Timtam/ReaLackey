@@ -49,6 +49,11 @@ pub fn disarm() {
 /// Each is obtained by asking where the cut would go if that word alone were removed,
 /// so what you hear when you land on a word is exactly what would disappear if you
 /// deleted it. Falls back to the transcript's own times per word when unmeasurable.
+/// How far a measured word edge may sit past the neighbour's transcript boundary
+/// before it is treated as having crossed into the neighbour rather than measured
+/// this word. Matches the tolerance the nucleus search already allows.
+const NEIGHBOUR_BLEED: f64 = 0.040;
+
 pub fn word_bounds() -> Vec<(f64, f64)> {
     let g = match CTX.lock() {
         Ok(g) => g,
@@ -69,6 +74,18 @@ pub fn word_bounds() -> Vec<(f64, f64)> {
                 (Some(a), Some(b)) => ctx.analysis.word_extent(a, b, (w.start, w.end)),
                 _ => (None, None),
             };
+            // A measured edge may bleed a little past the neighbour's transcript
+            // boundary, but not INTO the neighbour. Without this, a gap too short to
+            // register as a quiet run makes the search skip over the next word and take
+            // the run after it — the report showed ~10 pairs resolving to the identical
+            // run, worst "Robot" running 0.68 s past its end and swallowing the word
+            // after it. `.min`/`.max` against the word's own hint so an overlapping
+            // transcript (numbers, hyphenated tokens) can never tighten the bound past
+            // where the word itself claims to be.
+            let lo = prev.map(|(_, pe)| pe.min(w.start) - NEIGHBOUR_BLEED);
+            let hi = next.map(|(ns, _)| ns.max(w.end) + NEIGHBOUR_BLEED);
+            let o = o.filter(|&t| lo.map_or(true, |l| t >= l));
+            let f = f.filter(|&t| hi.map_or(true, |h| t <= h));
             (o.unwrap_or(w.start), f.unwrap_or(w.end))
         })
         .collect()
@@ -101,12 +118,20 @@ pub fn report() -> String {
     );
     for (i, w) in ctx.words.iter().enumerate() {
         let (o, f) = bounds.get(i).copied().unwrap_or((w.start, w.end));
-        let gap = bounds.get(i + 1).map(|n| n.0 - f).unwrap_or(f64::NAN);
+        let gap = bounds.get(i + 1).map(|n| n.0 - f);
         let txt: String = w.text.chars().take(14).collect();
         out.push_str(&format!(
-            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {:>+6.3}/{:>+6.3} {:>7.3}
+            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {:>+6.3}/{:>+6.3} {}
 ",
-            i, txt, w.start, w.end, o, f, o - w.start, f - w.end, gap
+            i,
+            txt,
+            w.start,
+            w.end,
+            o,
+            f,
+            o - w.start,
+            f - w.end,
+            gap.map_or_else(|| "      -".to_string(), |g| format!("{g:7.3}"))
         ));
     }
     out
