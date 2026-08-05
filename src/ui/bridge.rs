@@ -137,6 +137,18 @@ pub fn on_webview_message(json: &str) {
         // The editor's Play button: hand back the segments a cut with these flags
         // would actually leave, so the preview auditions the real result rather than
         // transcript times.
+        // "Report" in the editor: dump the whole clip's word/measurement table into
+        // the chat pane, so a whole take can be diagnosed from one paste.
+        Some("cut:report") => {
+            let text = crate::ui::preview::report();
+            if text.is_empty() {
+                crate::ui::output::notice("No analysis available for this clip.");
+            } else {
+                for line in text.lines() {
+                    crate::ui::output::notice(line);
+                }
+            }
+        }
         Some("cut:preview") => {
             let keep: Vec<bool> = v
                 .get("keep")

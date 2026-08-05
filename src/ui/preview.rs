@@ -63,19 +63,53 @@ pub fn word_bounds() -> Vec<(f64, f64)> {
             let prev = i.checked_sub(1).and_then(|j| ctx.words.get(j)).map(|p| (p.start, p.end));
             let next = ctx.words.get(i + 1).map(|n| (n.start, n.end));
             let (ap, an) = ctx.analysis.anchors(prev, (w.start, w.end), next);
-            let placed = match (ap, an) {
-                (Some(a), Some(b)) => ctx
-                    .analysis
-                    .place_removal(a, b, (w.start, w.end), (prev.map(|p| p.1), next.map(|n| n.0)))
-                    .ok(),
-                _ => None,
+            // The word's own extent, NOT the cut boundaries: those sit inside the
+            // surrounding pause by design.
+            let (o, f) = match (ap, an) {
+                (Some(a), Some(b)) => ctx.analysis.word_extent(a, b, (w.start, w.end)),
+                _ => (None, None),
             };
-            match placed {
-                Some(p) => (p.start.unwrap_or(w.start), p.end.unwrap_or(w.end)),
-                None => (w.start, w.end),
-            }
+            (o.unwrap_or(w.start), f.unwrap_or(w.end))
         })
         .collect()
+}
+
+/// A whole-clip diagnostic: every word with its transcript times, its MEASURED
+/// extent, the drift between them, and the measured gap to the next word.
+///
+/// One paste diagnoses a whole take. Without it every symptom costs a re-cut, and
+/// only the words that happened to be cut are visible at all.
+pub fn report() -> String {
+    // Computed first: it takes the lock itself.
+    let bounds = word_bounds();
+    let g = match CTX.lock() {
+        Ok(g) => g,
+        Err(_) => return String::new(),
+    };
+    let Some(ctx) = g.as_ref() else {
+        return "No clip is loaded in the editor.".into();
+    };
+    let mut out = format!(
+        "Cut-by-text clip report — {} words, {} nuclei, syllable period {:.3}s
+         All times in seconds from the item start. drift = measured minus transcript;
+         large drift, or gap 0.000, is where to look.
+         idx word            transcript        measured         drift start/end     gap
+",
+        ctx.words.len(),
+        ctx.analysis.nuclei.len(),
+        ctx.analysis.syllable_period,
+    );
+    for (i, w) in ctx.words.iter().enumerate() {
+        let (o, f) = bounds.get(i).copied().unwrap_or((w.start, w.end));
+        let gap = bounds.get(i + 1).map(|n| n.0 - f).unwrap_or(f64::NAN);
+        let txt: String = w.text.chars().take(14).collect();
+        out.push_str(&format!(
+            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {:>+6.3}/{:>+6.3} {:>7.3}
+",
+            i, txt, w.start, w.end, o, f, o - w.start, f - w.end, gap
+        ));
+    }
+    out
 }
 
 /// The KEPT segments, in item time, that a cut with these flags would leave —

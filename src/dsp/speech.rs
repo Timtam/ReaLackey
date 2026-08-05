@@ -387,6 +387,47 @@ impl SpeechAnalysis {
     /// what made every pause vanish: at the floor all frames tie exactly, so the
     /// extremes of the tie set are the frames touching the neighbouring words, and the
     /// cut swallowed the whole silence on both sides.
+    /// Where a word's audio actually STARTS and ENDS — the inner edges of the quiet
+    /// runs flanking it.
+    ///
+    /// Distinct from [`Self::place_removal`], which returns CUT boundaries: those sit
+    /// inside the surrounding pause on purpose, so the join keeps a natural gap.
+    /// Using them to audition a word made a sentence-initial word play the whole
+    /// pause before it.
+    pub fn word_extent(
+        &self,
+        a_prev: f64,
+        a_next: f64,
+        hint: (f64, f64),
+    ) -> (Option<f64>, Option<f64>) {
+        if a_next <= a_prev || self.bands_unusable() {
+            return (None, None);
+        }
+        let inner: Vec<f64> = self
+            .nuclei
+            .iter()
+            .copied()
+            .filter(|&n| n > a_prev && n < a_next)
+            .filter(|&n| n >= hint.0 - HINT_TOL && n <= hint.1 + HINT_TOL)
+            .collect();
+        let (first_in, last_in) = match (inner.first(), inner.last()) {
+            (Some(&f), Some(&l)) => (f, l),
+            _ => (hint.0.clamp(a_prev, a_next), hint.1.clamp(a_prev, a_next)),
+        };
+        // The word begins where the quiet run before it ENDS, and ends where the run
+        // after it BEGINS. Take the run nearest the word on each side, so a pause
+        // further out (a sentence break) is not swallowed.
+        let start = self
+            .quiet_runs(a_prev, first_in)
+            .last()
+            .map(|&(_, b)| self.time_of(b));
+        let end = self
+            .quiet_runs(last_in, a_next)
+            .first()
+            .map(|&(a, _)| self.time_of(a));
+        (start, end)
+    }
+
     pub fn place_removal(
         &self,
         a_prev: f64,

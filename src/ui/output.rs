@@ -593,6 +593,8 @@ details.help li{margin:2px 0;}
       <button id="cutRedo" type="button" class="cut-ico" title="Redo (Ctrl+Y)">Redo</button>
       <button id="cutKeysBtn" type="button" class="cut-ico" aria-expanded="false"
         aria-controls="cutKeys" title="Show keyboard shortcuts">Keys</button>
+      <button id="cutReport" type="button" class="cut-ico"
+        title="Write a diagnostic report for this clip to the chat window">Report</button>
     </div>
     <div id="cutKeys" hidden role="region" aria-label="Keyboard shortcuts">
       <ul>
@@ -714,6 +716,11 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
   if(kb&&kp) kb.addEventListener('click',function(){
     var open=kp.hidden; kp.hidden=!open; kb.setAttribute('aria-expanded',open?'true':'false');
     if(window.liveAnnounce) liveAnnounce(open?'Keyboard shortcuts shown':'Keyboard shortcuts hidden');
+  });
+  var rb=document.getElementById('cutReport');
+  if(rb) rb.addEventListener('click',function(){
+    if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:report'}));
+    if(window.liveAnnounce) liveAnnounce('Report written to the assistant window.');
   });
   var cbtn=document.getElementById('clearchat');
   if(cbtn) cbtn.addEventListener('click',function(){
