@@ -374,6 +374,13 @@ pub fn announce(text: &str) {
 pub fn open_cut_editor(payload_json: &str) {
     STATE.with(|c| c.borrow().open_cut_editor(payload_json));
 }
+/// Tell the editor whether the clip report reached the clipboard (main thread).
+pub fn report_copied(ok: bool) {
+    STATE.with(|c| {
+        c.borrow()
+            .eval(if ok { "cutReportDone(true);" } else { "cutReportDone(false);" })
+    });
+}
 /// Clear the visible conversation log (main thread).
 pub fn clear_log() {
     STATE.with(|c| c.borrow().eval("clearLog();"));
@@ -594,7 +601,7 @@ details.help li{margin:2px 0;}
       <button id="cutKeysBtn" type="button" class="cut-ico" aria-expanded="false"
         aria-controls="cutKeys" title="Show keyboard shortcuts">Keys</button>
       <button id="cutReport" type="button" class="cut-ico"
-        title="Write a diagnostic report for this clip to the chat window">Report</button>
+        title="Copy a diagnostic report for this clip to the clipboard">Report</button>
     </div>
     <div id="cutKeys" hidden role="region" aria-label="Keyboard shortcuts">
       <ul>
@@ -719,9 +726,18 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
   });
   var rb=document.getElementById('cutReport');
   if(rb) rb.addEventListener('click',function(){
+    rb.textContent='Copying…';
     if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:report'}));
-    if(window.liveAnnounce) liveAnnounce('Report written to the assistant window.');
   });
+  // Confirm on BOTH channels: the label is the sighted signal, the live region the
+  // spoken one — a copy that silently did nothing is indistinguishable from success.
+  window.cutReportDone=function(ok){
+    var b=document.getElementById('cutReport'); if(!b)return;
+    var msg=ok?'Report copied to the clipboard':'No analysis available to report';
+    b.textContent=ok?'Copied':'No data';
+    if(window.liveAnnounce) liveAnnounce(msg);
+    setTimeout(function(){ b.textContent='Report'; },2500);
+  };
   var cbtn=document.getElementById('clearchat');
   if(cbtn) cbtn.addEventListener('click',function(){
     if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'chat:clear'}));

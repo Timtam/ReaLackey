@@ -141,13 +141,15 @@ pub fn on_webview_message(json: &str) {
         // the chat pane, so a whole take can be diagnosed from one paste.
         Some("cut:report") => {
             let text = crate::ui::preview::report();
-            if text.is_empty() {
-                crate::ui::output::notice("No analysis available for this clip.");
+            // Straight to the clipboard: the table is one line per word, which floods
+            // the chat pane and is tedious to select out of it again.
+            let ok = if text.is_empty() {
+                false
             } else {
-                for line in text.lines() {
-                    crate::ui::output::notice(line);
-                }
-            }
+                crate::ui::ffi::clipboard_set(&text);
+                true
+            };
+            crate::ui::output::report_copied(ok);
         }
         Some("cut:preview") => {
             let keep: Vec<bool> = v
