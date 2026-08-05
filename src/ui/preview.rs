@@ -60,6 +60,8 @@ pub struct Bound {
     pub end: f64,
     pub start_cause: EdgeCause,
     pub end_cause: EdgeCause,
+    /// By how much a crossing crossed; 0.0 otherwise.
+    pub detail: f64,
 }
 
 pub fn word_bounds() -> Vec<(f64, f64)> {
@@ -113,6 +115,7 @@ pub fn word_bounds_explained() -> Vec<Bound> {
                 end: f.time.unwrap_or(w.end),
                 start_cause: o.cause,
                 end_cause: f.cause,
+                detail: o.detail.max(f.detail),
             }
         })
         .collect()
@@ -220,7 +223,7 @@ pub fn report() -> String {
             }
         };
         out.push_str(&format!(
-            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {}/{} {}  {}/{}
+            "{:>3} {:<15} {:>7.3}-{:<7.3} {:>7.3}-{:<7.3} {}/{} {}  {}/{}{}
 ",
             i,
             txt,
@@ -233,6 +236,7 @@ pub fn report() -> String {
             gap.map_or_else(|| "      -".to_string(), |g| format!("{g:7.3}")),
             b.start_cause.token(),
             b.end_cause.token(),
+            if b.detail > 0.0 { format!(" by {:.3}", b.detail) } else { String::new() },
         ));
     }
     out

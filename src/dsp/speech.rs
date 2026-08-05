@@ -127,8 +127,14 @@ pub enum EdgeCause {
     NoQuietRun,
     /// A run was found but did not contain the word's own nucleus.
     ContainmentReject,
-    /// The two edges crossed.
-    Crossed,
+    /// The two edges crossed, and the word has no nucleus of its own.
+    CrossedNoNucleus,
+    /// The two edges crossed around a SINGLE nucleus — the left and right search
+    /// windows meet at that one frame, so both runs can touch it.
+    CrossedOneNucleus,
+    /// The two edges crossed despite the word spanning several nuclei, which the
+    /// window geometry should make impossible.
+    CrossedMulti,
     /// The edge landed inside a neighbouring word.
     BleedReject,
 }
@@ -143,7 +149,9 @@ impl EdgeCause {
             EdgeCause::NoNucleusInBand => "no-nucleus",
             EdgeCause::NoQuietRun => "no-run",
             EdgeCause::ContainmentReject => "contain",
-            EdgeCause::Crossed => "crossed",
+            EdgeCause::CrossedNoNucleus => "crossed-nonuc",
+            EdgeCause::CrossedOneNucleus => "crossed-1nuc",
+            EdgeCause::CrossedMulti => "crossed-multi",
             EdgeCause::BleedReject => "bleed",
         }
     }
@@ -154,18 +162,21 @@ impl EdgeCause {
 pub struct Edge {
     pub time: Option<f64>,
     pub cause: EdgeCause,
+    /// For a crossing, BY HOW MUCH. The single number that says whether this is
+    /// frame quantisation (<= one hop) or a real inversion.
+    pub detail: f64,
 }
 
 impl Edge {
     fn ok(t: f64) -> Self {
-        Edge { time: Some(t), cause: EdgeCause::Measured }
+        Edge { time: Some(t), cause: EdgeCause::Measured, detail: 0.0 }
     }
     fn fail(cause: EdgeCause) -> Self {
-        Edge { time: None, cause }
+        Edge { time: None, cause, detail: 0.0 }
     }
     /// Drop a measured time that failed a caller-side check, keeping the reason.
     pub fn reject(self, cause: EdgeCause) -> Self {
-        Edge { time: None, cause }
+        Edge { time: None, cause, detail: 0.0 }
     }
 }
 
@@ -540,7 +551,19 @@ impl SpeechAnalysis {
         };
         match (start, end) {
             (Some(a), Some(b)) if b <= a => {
-                let e = Edge::fail(EdgeCause::Crossed);
+                // Split by nucleus geometry, because these need opposite fixes: with a
+                // single nucleus the two search windows MEET at that frame, so both
+                // runs can legitimately touch it and the "crossing" may be nothing but
+                // quantisation; with several, the windows are disjoint and a crossing
+                // should be impossible.
+                let cause = if !has_nucleus {
+                    EdgeCause::CrossedNoNucleus
+                } else if first_in >= last_in {
+                    EdgeCause::CrossedOneNucleus
+                } else {
+                    EdgeCause::CrossedMulti
+                };
+                let e = Edge { time: None, cause, detail: a - b };
                 (e, e)
             }
             _ => (mk(start, raw_start), mk(end, raw_end)),
