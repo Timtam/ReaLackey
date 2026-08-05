@@ -7438,6 +7438,11 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     let mut snap_rejected = 0usize;
     let mut crossfaded = 0usize;
     let mut diagnostics: Vec<Value> = Vec::new();
+    /// How far outside the transcript span each edge is taken. Transcript word edges
+    /// are approximate (routinely 50-200 ms out), and the errors are not symmetric in
+    /// cost: a few extra ms of silence is inaudible, a surviving attack is not. Always
+    /// bounded by the neighbouring words, so this can only consume silence.
+    const EDGE_MARGIN: f64 = 0.060;
     // Nuclei-anchored placement: analyse the edit region ONCE, then place each edge
     // inside the band bounded by the neighbouring kept words' syllabic nuclei. This
     // supersedes the level-based snap below wherever the caller supplied the
@@ -7505,7 +7510,7 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         // to it still leaves a sliver of the word when it reads late.
                         // Bounded by the neighbouring words, so the margin can only
                         // eat silence, never a kept word.
-                        const EDGE_MARGIN: f64 = 0.030;
+
                         let s_abs = (r0 + p.start).min(orig.0 - EDGE_MARGIN).max(lim.0);
                         let e_abs = (r0 + p.end).max(orig.1 + EDGE_MARGIN).min(lim.1);
                         let clamped = s_abs > r0 + p.start || e_abs < r0 + p.end;
@@ -7534,6 +7539,13 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                         }));
                     }
                     Err(why) => {
+                        // A declined placement still gets the outward margin. Keeping
+                        // the transcript times bare left the word's onset audible on
+                        // every declined cut — and declining is common (a short word
+                        // whose nucleus isn't detected), so those cuts were the least
+                        // protected rather than the most.
+                        r.0 = (orig.0 - EDGE_MARGIN).max(lim.0);
+                        r.1 = (orig.1 + EDGE_MARGIN).min(lim.1);
                         snap_rejected += 1;
                         diagnostics.push(json!({
                             "asked": [r3(src.start), r3(src.end)],
