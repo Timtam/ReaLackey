@@ -187,12 +187,16 @@ pub struct SpeechAnalysis {
     /// Smoothed per-frame levels in dB, broadband / voice-bar / high-frequency.
     bb: Vec<f64>,
     hf: Vec<f64>,
+    /// Voice bar, 300-3000 Hz, unsmoothed.
+    vb: Vec<f64>,
     floor_bb: f64,
     floor_hf: f64,
+    floor_vb: f64,
     /// Each band's own speech-to-floor range, so levels can be compared between
     /// bands with very different noise floors.
     contrast_bb: f64,
     contrast_hf: f64,
+    contrast_vb: f64,
     /// Nucleus times, ascending.
     pub nuclei: Vec<f64>,
     /// Median interval between nuclei — the speaker's own syllable period. Every
@@ -225,12 +229,21 @@ impl SpeechAnalysis {
         // otherwise split one vowel into several syllables.
         let bb = frame_db(&base, win, hop);
         let hf = frame_db(&hf_sig, win, hop);
-        // MID (300-3000 Hz) is where sonorant nuclei live; used only for nuclei.
-        let mid = smooth_db(
-            &frame_db(&bandpass(&base, sample_rate, 300.0, 3000.0_f64.min(nyq * 0.9)), win, hop),
-            hop,
-            sample_rate,
-        );
+        // The VOICE BAR (300-3000 Hz) is where sonorant nuclei live. It is a level
+        // band like the other two: quiet_runs has to be able to see the band nuclei
+        // are DETECTED in, or a word can be a nucleus and a silence at the same time.
+        // It was, for 178 edges on a 271 s take — an unstressed function word is a
+        // vowel, so its energy sits here, it is weak broadband and has nothing above
+        // 3 kHz, while the content words around it have fricatives that do. Measured
+        // on the only two bands level() could see, the whole word read as silence,
+        // one continuous quiet run spanning it, split in two by the search-window
+        // boundary at its own nucleus — which is why both edges landed on the same
+        // frame, to the sample.
+        let vb = frame_db(&bandpass(&base, sample_rate, 300.0, 3000.0_f64.min(nyq * 0.9)), win, hop);
+        // Nuclei use a SMOOTHED copy, where pitch ripple would otherwise split one
+        // vowel into several syllables. The smoothing must not reach level(), where
+        // it would span a short inter-word gap and hide it.
+        let mid = smooth_db(&vb, hop, sample_rate);
         if bb.len() < 3 {
             return None;
         }
@@ -238,9 +251,11 @@ impl SpeechAnalysis {
 
         let floor_bb = noise_floor_db(&bb);
         let floor_hf = noise_floor_db(&hf);
+        let floor_vb = noise_floor_db(&vb);
         let (t_split, speech_level) = otsu_split(&bb);
         let contrast_bb = (speech_level - floor_bb).max(0.0);
         let contrast_hf = (otsu_split(&hf).1 - floor_hf).max(0.0);
+        let contrast_vb = (otsu_split(&vb).1 - floor_vb).max(0.0);
 
         let hop_s = hop as f64 / sample_rate;
         let nuclei = find_nuclei(&mid, &base, hop, win, sample_rate, t_split, hop_s);
@@ -256,10 +271,13 @@ impl SpeechAnalysis {
             hop: hop_s,
             bb,
             hf,
+            vb,
             floor_bb,
             floor_hf,
+            floor_vb,
             contrast_bb,
             contrast_hf,
+            contrast_vb,
             nuclei,
             syllable_period,
         })
@@ -336,13 +354,18 @@ impl SpeechAnalysis {
         if self.contrast_hf >= MIN_BAND_RANGE {
             m = m.max((self.hf[k] - self.floor_hf).clamp(0.0, self.contrast_hf));
         }
+        if self.contrast_vb >= MIN_BAND_RANGE {
+            m = m.max((self.vb[k] - self.floor_vb).clamp(0.0, self.contrast_vb));
+        }
         m
     }
 
     /// True when no band has enough range to measure anything (a music bed, a very
     /// reverberant room, heavy compression). The caller must refuse rather than cut.
     fn bands_unusable(&self) -> bool {
-        self.contrast_bb < MIN_BAND_RANGE && self.contrast_hf < MIN_BAND_RANGE
+        self.contrast_bb < MIN_BAND_RANGE
+            && self.contrast_hf < MIN_BAND_RANGE
+            && self.contrast_vb < MIN_BAND_RANGE
     }
 
 
@@ -1006,6 +1029,38 @@ mod tests {
             assert_ne!(o.cause, EdgeCause::ContainmentReject, "offset {d:.4}: {o:?}");
             assert_ne!(f.cause, EdgeCause::ContainmentReject, "offset {d:.4}: {f:?}");
         }
+    }
+
+    /// A quiet VOICED word between two fricative-rich loud ones measures.
+    ///
+    /// NOT a regression guard for the voice-bar change: it passes with the voice band
+    /// excluded from level() too, so it does not discriminate. Synthetic speech has a
+    /// near-digital-silence floor, which keeps a faint vowel far above baseline in
+    /// every band; the real failure needs a search window containing no true pause.
+    /// Kept as a property test, and as a marker that the fixture set cannot yet
+    /// reproduce the crossing — real audio is needed for that.
+    #[test]
+    fn a_quiet_voiced_word_is_not_silence() {
+        let mut syn = Syn::new();
+        syn.quiet(0.30)
+            .vowel(0.20, 120.0, 0.6)
+            .fricative(0.10, 0.6) // loud, HF-rich neighbour
+            .quiet(0.12)
+            .vowel(0.10, 130.0, 0.12) // the unstressed function word: voiced, faint
+            .quiet(0.12)
+            .fricative(0.10, 0.6)
+            .vowel(0.20, 140.0, 0.6)
+            .quiet(0.30);
+        let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
+        let (o, f) = a.word_extent(0.55, 1.00, (0.72, 0.82));
+        assert_eq!(o.cause, EdgeCause::Measured, "start: {o:?}");
+        assert_eq!(f.cause, EdgeCause::Measured, "end: {f:?}");
+        let (st, en) = (o.time.unwrap(), f.time.unwrap());
+        assert!(en > st, "extent collapsed: {st:.3}-{en:.3}");
+        assert!(
+            en - st > 0.04,
+            "extent implausibly short for a 100 ms word: {st:.3}-{en:.3}"
+        );
     }
 
     struct Syn {
