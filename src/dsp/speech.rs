@@ -368,64 +368,6 @@ impl SpeechAnalysis {
         m
     }
 
-    /// Onset of the fricative nearest the far end of [from, to], or `None`.
-    ///
-    /// A sonorant running into a fricative has no energy dip at all — the level never
-    /// drops, it moves BANDS — so `quiet_runs` settles somewhere inside the friction
-    /// and the boundary lands wrong. A labelled listening test over nine junctions
-    /// showed the onset class predicts this exactly (fricative-initial: all wrong;
-    /// /d/ and /z/: both right) and that run LENGTH predicts nothing — "weiche|Fell"
-    /// and "Sie|schaut" fail on runs of 13 and 14 frames. So this is not gated on run
-    /// length; four earlier attempts were, and all four failed.
-    ///
-    /// A REGION, not a step: a fricative is 40 ms or more of sustained high-band
-    /// dominance, and single-frame step detection proved fragile. The threshold is
-    /// this stretch's own median + MAD, so it adapts to the material.
-    ///
-    /// Returns the LAST qualifying region, which is the one adjacent to the far word,
-    /// and refuses when that region reaches the window edge: then its onset is outside
-    /// what was searched, or it is one continuous turbulent stretch spanning the
-    /// junction ("Nachts schläft"), where energy genuinely cannot say which part
-    /// belongs to which word.
-    fn fricative_onset(&self, from: f64, to: f64) -> Option<f64> {
-        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
-        let need = ((0.040 / self.hop).round() as usize).max(2);
-        if hi < lo + need + 1 {
-            return None;
-        }
-        let bal: Vec<f64> = (lo..=hi)
-            .map(|k| (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb))
-            .collect();
-        let mut sorted = bal.clone();
-        sorted.sort_by(f64::total_cmp);
-        let med = sorted[sorted.len() / 2];
-        let mut dev: Vec<f64> = bal.iter().map(|v| (v - med).abs()).collect();
-        dev.sort_by(f64::total_cmp);
-        let bar = (med + 2.0 * 1.4826 * dev[dev.len() / 2]).max(med + MIN_TOL_DB);
-        // Last run of `need` or more consecutive frames above the bar.
-        let (mut best, mut run_start) = (None, None);
-        for (i, &v) in bal.iter().enumerate() {
-            match (v > bar, run_start) {
-                (true, None) => run_start = Some(i),
-                (false, Some(a)) => {
-                    if i - a >= need {
-                        best = Some(a);
-                    }
-                    run_start = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(a) = run_start {
-            if bal.len() - a >= need {
-                best = Some(a);
-            }
-        }
-        // Onset at the very first frame means the friction started before the window:
-        // its true onset was never seen, so there is nothing honest to return.
-        best.filter(|&a| a > 0).map(|a| self.time_of(lo + a))
-    }
-
     /// True when no band has enough range to measure anything (a music bed, a very
     /// reverberant room, heavy compression). The caller must refuse rather than cut.
     fn bands_unusable(&self) -> bool {
@@ -604,14 +546,8 @@ impl SpeechAnalysis {
         // speech, and it has never been observed on real audio.
         let lrun = self.quiet_runs(a_prev, first_in).last().copied();
         let rrun = self.quiet_runs(last_in, a_next).first().copied();
-        // A fricative beginning the NEXT word ends THIS one, and vice versa: both
-        // edges of a junction resolve to the same onset, from opposite sides.
-        let raw_start = lrun.map(|(_, b)| {
-            self.fricative_onset(a_prev, first_in).unwrap_or(self.time_of(b))
-        });
-        let raw_end = rrun.map(|(a, _)| {
-            self.fricative_onset(last_in, a_next).unwrap_or(self.time_of(a))
-        });
+        let raw_start = lrun.map(|(_, b)| self.time_of(b));
+        let raw_end = rrun.map(|(a, _)| self.time_of(a));
         let llen = lrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         let rlen = rrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         // The word's own nucleus MUST lie inside its extent. Nothing forced that
@@ -1135,34 +1071,6 @@ mod tests {
             en - st > 0.04,
             "extent implausibly short for a 100 ms word: {st:.3}-{en:.3}"
         );
-    }
-
-    /// The onset of a fricative is found, and its position is the START of the
-    /// friction, not somewhere inside it. Direct unit test of the new function —
-    /// three earlier synthetic tests written to prove a fix passed with and without
-    /// it, so this asserts the function's own contract rather than an outcome.
-    #[test]
-    fn fricative_onset_is_the_start_of_the_friction() {
-        let mut syn = Syn::new();
-        syn.quiet(0.30)
-            .vowel(0.25, 120.0, 0.5)
-            .fricative(0.12, 0.7) // onset at 0.55
-            .vowel(0.22, 110.0, 0.5)
-            .quiet(0.30);
-        let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
-        let f = a.fricative_onset(0.40, 0.80).expect("a fricative is in this window");
-        assert!(
-            (f - 0.55).abs() < 0.04,
-            "onset {f:.3} should be the START of the friction at 0.550, not inside it"
-        );
-        // Nothing turbulent: must not invent one.
-        let mut flat = Syn::new();
-        flat.quiet(0.30).vowel(0.60, 120.0, 0.5).quiet(0.30);
-        let b = SpeechAnalysis::new(&flat.s, SR).expect("analysable");
-        assert_eq!(b.fricative_onset(0.40, 0.80), None, "a vowel is not a fricative");
-        // Friction that reaches the window edge has no visible onset — refuse rather
-        // than return the window edge as if it were a boundary.
-        assert_eq!(a.fricative_onset(0.56, 0.80), None, "onset outside the window");
     }
 
     struct Syn {
