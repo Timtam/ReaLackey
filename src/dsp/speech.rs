@@ -361,6 +361,52 @@ impl SpeechAnalysis {
         m
     }
 
+    /// Balance between the high band and the voice bar, in dB. A sonorant sits low
+    /// here and a fricative high, so the DERIVATIVE of this locates a boundary that
+    /// has no energy dip at all.
+    fn balance(&self, k: usize) -> f64 {
+        (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb)
+    }
+
+    /// Where the spectral balance shifts most sharply in [from, to] — a boundary
+    /// found by CHANGE rather than by quietness.
+    ///
+    /// Needed because a word junction often has no pause to find: "ihren Schoss" runs
+    /// /n/ straight into a fricative, the level never drops, and the shallowest point
+    /// lies INSIDE the fricative — so the boundary was landing mid-"sch" and the cut
+    /// left "ihrensch" and "oss". Energy cannot see that boundary; the band balance
+    /// can, because a sonorant and a fricative sit at opposite ends of it.
+    ///
+    /// The threshold is relative to the window's own median step, so it adapts to the
+    /// material instead of asserting a dB figure that would be wrong for another mic
+    /// or another voice. `None` when nothing stands out — a vowel-to-vowel junction
+    /// genuinely has no spectral edge either, and inventing one would be worse than
+    /// admitting it.
+    fn spectral_edge(&self, from: f64, to: f64) -> Option<f64> {
+        let w = 3usize; // 30 ms either side: shorter than any phone we care about
+        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
+        if hi < lo + 2 * w + 1 {
+            return None;
+        }
+        let step: Vec<f64> = (lo + w..=hi - w)
+            .map(|k| {
+                let after: f64 = (k..k + w).map(|i| self.balance(i)).sum::<f64>() / w as f64;
+                let before: f64 = (k - w..k).map(|i| self.balance(i)).sum::<f64>() / w as f64;
+                (after - before).abs()
+            })
+            .collect();
+        let (best, &peak) = step
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))?;
+        let mut sorted = step.clone();
+        sorted.sort_by(f64::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        // Must stand clearly above the window's own churn, and be a real shift rather
+        // than estimator noise.
+        (peak > (median * 3.0).max(MIN_TOL_DB)).then(|| self.time_of(lo + w + best))
+    }
+
     /// True when no band has enough range to measure anything (a music bed, a very
     /// reverberant room, heavy compression). The caller must refuse rather than cut.
     fn bands_unusable(&self) -> bool {
@@ -534,14 +580,27 @@ impl SpeechAnalysis {
         // The word begins where the quiet run before it ENDS, and ends where the run
         // after it BEGINS. Take the run nearest the word on each side, so a pause
         // further out (a sentence break) is not swallowed.
-        let raw_start = self
-            .quiet_runs(a_prev, first_in)
-            .last()
-            .map(|&(_, b)| self.time_of(b));
-        let raw_end = self
-            .quiet_runs(last_in, a_next)
-            .first()
-            .map(|&(a, _)| self.time_of(a));
+        // A run only 1-2 frames long is not a pause; it is the shallowest point of
+        // continuous speech, and its position carries no information about where the
+        // word actually ends. Where that happens, ask the spectral balance instead.
+        // Longer runs are real silence and are left completely alone.
+        let marginal = 2usize;
+        let left = self.quiet_runs(a_prev, first_in).last().copied();
+        let right = self.quiet_runs(last_in, a_next).first().copied();
+        let raw_start = left.map(|(a, b)| {
+            if b - a <= marginal {
+                self.spectral_edge(a_prev, first_in).unwrap_or(self.time_of(b))
+            } else {
+                self.time_of(b)
+            }
+        });
+        let raw_end = right.map(|(a, b)| {
+            if b - a <= marginal {
+                self.spectral_edge(last_in, a_next).unwrap_or(self.time_of(a))
+            } else {
+                self.time_of(a)
+            }
+        });
         // The word's own nucleus MUST lie inside its extent. Nothing forced that
         // before, and the report showed both ways it fails: ~9% of words (nearly all
         // short function words) came back zero-length because the two runs resolved to
@@ -1062,6 +1121,33 @@ mod tests {
             en - st > 0.04,
             "extent implausibly short for a 100 ms word: {st:.3}-{en:.3}"
         );
+    }
+
+    /// A sonorant running straight into a fricative has no energy dip, so the
+    /// boundary must be found by SPECTRAL CHANGE. Reported by ear: the cut between
+    /// "ihren" and "Schoss" landed inside the "sch", leaving "ihrensch" and "oss".
+    #[test]
+    fn a_fricative_onset_is_found_without_a_pause() {
+        let mut syn = Syn::new();
+        syn.quiet(0.30)
+            .vowel(0.25, 120.0, 0.5) // ...ihren
+            .fricative(0.12, 0.45) // sch — no gap before it at all
+            .vowel(0.22, 110.0, 0.5) // ...oss
+            .quiet(0.30);
+        let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
+        let onset = 0.55; // vowel ends / fricative begins
+        let e = a
+            .spectral_edge(0.40, 0.75)
+            .expect("a sonorant-to-fricative junction is a spectral edge");
+        assert!(
+            (e - onset).abs() < 0.05,
+            "spectral edge {e:.3} should be near the fricative onset {onset:.3}"
+        );
+        // A junction with no spectral contrast must NOT invent one.
+        let mut flat = Syn::new();
+        flat.quiet(0.30).vowel(0.60, 120.0, 0.5).quiet(0.30);
+        let b = SpeechAnalysis::new(&flat.s, SR).expect("analysable");
+        assert_eq!(b.spectral_edge(0.40, 0.75), None, "vowel interior is not a boundary");
     }
 
     struct Syn {
