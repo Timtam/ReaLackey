@@ -37,6 +37,18 @@ pub fn arm(wav: &[u8], words: &[Word]) {
     }
 }
 
+/// A copy of the cached analysis, for the CUT executor.
+///
+/// The executor used to build its OWN SpeechAnalysis over a few seconds around the
+/// edit. Noise floor, Otsu split and syllable period are whole-clip statistics, so a
+/// single-word deletion calibrated them on ~4 s of audio while the preview used the
+/// whole take — the preview therefore auditioned a different calibration than the one
+/// that wrote the cut, which is the exact disagreement this module exists to prevent.
+/// Cloning costs one allocation per cut (a user-initiated action, not per keystroke).
+pub fn analysis_clone() -> Option<SpeechAnalysis> {
+    CTX.lock().ok()?.as_ref().map(|c| c.analysis.clone())
+}
+
 /// Forget it when the editor closes.
 pub fn disarm() {
     if let Ok(mut g) = CTX.lock() {

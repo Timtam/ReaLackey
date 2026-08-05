@@ -574,6 +574,12 @@ details.help li{margin:2px 0;}
 .cut-tok.rm{opacity:.45;text-decoration:line-through;color:#8a8a8a;}
 .cut-foot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid #3a3a3a;}
 .cut-hint{flex:1;color:#8a8a8a;font-size:11px;}
+/* Everything the editor announces is ALSO shown here. The live region is
+   sr-only by necessity, so without this every announcement -- the word under
+   the caret, an undo, a failed copy -- reached screen-reader users only, and a
+   sighted user saw nothing at all. */
+.cut-say{color:#e6e6e6;}
+.cut-say:not(:empty)+#cutKeyHint{display:none;}
 .cut-foot button{padding:6px 14px;border-radius:5px;border:1px solid #3a3a3a;background:#2a2a2a;color:#e6e6e6;cursor:pointer;font:inherit;}
 .cut-primary{background:#0e639c;border-color:#1177bb;color:#fff;}
 </style></head><body>
@@ -624,7 +630,7 @@ details.help li{margin:2px 0;}
     </div>
     <div id="cutGrid" class="cut-grid" role="application" tabindex="0" aria-label="Transcript. Arrow keys move by word and sentence; Space selects; Delete removes; Ctrl+Z undoes; Tab leaves to the buttons."></div>
     <div class="cut-foot">
-      <span class="cut-hint">Up/Down sentence, Left/Right word, Space select, Del remove, Ctrl+Z undo, Tab to buttons</span>
+      <span class="cut-hint"><span id="cutStatus" class="cut-say"></span><span id="cutKeyHint">Up/Down sentence, Left/Right word, Space select, Del remove, Ctrl+Z undo, Tab to buttons</span></span>
       <button id="cutCancel" type="button">Cancel</button>
       <button id="cutConfirm" type="button" class="cut-primary">Confirm cut</button>
     </div>
@@ -659,8 +665,25 @@ var _liveT=null,_liveAlt=false;
 // toggled zero-width space guarantees the text differs from the previous
 // announcement — screen readers drop a live-region update that repeats the same
 // string, which otherwise silences repeated words ("the" ... "the").
-function liveAnnounce(t){var l=document.getElementById('live');if(!l||!t)return;if(_liveT){clearTimeout(_liveT);_liveT=null;}_liveAlt=!_liveAlt;l.textContent=t+(_liveAlt?'\u200B':'');_liveT=setTimeout(function(){l.textContent='';_liveT=null;},4000);}
+function liveAnnounce(t){var l=document.getElementById('live');if(!l||!t)return;showSaid(t);if(_liveT){clearTimeout(_liveT);_liveT=null;}_liveAlt=!_liveAlt;l.textContent=t+(_liveAlt?'\u200B':'');_liveT=setTimeout(function(){l.textContent='';_liveT=null;},4000);}
 function setStatus(t){var s=document.getElementById('status');if(s)s.textContent=t;}
+// A screen-reader-only announcement is invisible by construction, so mirror it to
+// a VISIBLE line: the editor's own footer while the editor is open, and the chat
+// pane's status line otherwise. Cleared on the same timer as the live region so
+// the footer falls back to showing the key hints.
+var _sayT=null;
+function showSaid(t){
+  var c=document.getElementById('cutStatus'),
+      open=document.getElementById('cutModal');
+  if(_sayT){clearTimeout(_sayT);_sayT=null;}
+  if(c&&open&&!open.hidden){
+    c.textContent=t;
+    _sayT=setTimeout(function(){c.textContent='';_sayT=null;},4000);
+  }else{
+    if(c)c.textContent='';
+    setStatus(t);
+  }
+}
 function clearLog(){var l=document.getElementById('log');if(l)l.innerHTML='';
   var st=document.getElementById('status');if(st)st.textContent='Ready.';
   if(window.liveAnnounce) liveAnnounce('Conversation cleared.');}

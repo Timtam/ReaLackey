@@ -7469,13 +7469,32 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
         let hi = ranges.iter().map(|r| r.end).fold(f64::NEG_INFINITY, f64::max);
         // Enough context either side for the calibration to see real silence, capped
         // so a long item can't blow up memory.
-        let r0 = (acc_start + lo - 2.0).max(acc_start);
-        let r1 = (acc_start + hi + 2.0).min(acc_end).min(r0 + 180.0);
-        let (samples, read_error) =
-            read_accessor_samples_at(low, acc, 1, SNAP_SR, r0, (r1 - r0).max(0.0));
-        let analysis = (!read_error && !samples.is_empty())
-            .then(|| crate::dsp::speech::SpeechAnalysis::new(&samples, SNAP_SR as f64))
-            .flatten();
+        // Prefer the analysis the EDITOR is auditioning, when it covers this item.
+        // Building a second one over a few seconds around the edit calibrated the
+        // noise floor, the Otsu split and the syllable period — all whole-clip
+        // statistics — on a different, much shorter stretch of audio, so the preview
+        // and the cut disagreed by construction. Its time base is item time from 0,
+        // which is what `rel` produces when r0 == acc_start.
+        let item_len = acc_end - acc_start;
+        let cached = crate::ui::preview::analysis_clone().filter(|a| {
+            // Only if it plainly covers THIS item: the editor may be armed for
+            // another one, and a mismatched analysis would place cuts from the
+            // wrong audio. Half a second of slack for render/round-off.
+            (a.span().1 - item_len).abs() < 0.5
+        });
+        let (analysis, r0) = match cached {
+            Some(a) => (Some(a), acc_start),
+            None => {
+                let r0 = (acc_start + lo - 2.0).max(acc_start);
+                let r1 = (acc_start + hi + 2.0).min(acc_end).min(r0 + 180.0);
+                let (samples, read_error) =
+                    read_accessor_samples_at(low, acc, 1, SNAP_SR, r0, (r1 - r0).max(0.0));
+                let a = (!read_error && !samples.is_empty())
+                    .then(|| crate::dsp::speech::SpeechAnalysis::new(&samples, SNAP_SR as f64))
+                    .flatten();
+                (a, r0)
+            }
+        };
         if let Some(an) = analysis {
             let rel = |t: f64| acc_start + t - r0; // item time -> analysis time
             let original = project_removes.clone();

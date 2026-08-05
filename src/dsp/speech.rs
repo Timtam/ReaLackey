@@ -182,6 +182,7 @@ impl Edge {
 
 /// Per-item speech analysis: band envelopes, self-calibrated levels, and the
 /// syllabic nuclei that anchor every boundary decision.
+#[derive(Clone)]
 pub struct SpeechAnalysis {
     hop: f64,
     /// Smoothed per-frame levels in dB, broadband / voice-bar / high-frequency.
