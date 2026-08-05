@@ -7454,7 +7454,10 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
     /// end margin to zero and leave the removed word's tail whenever that boundary
     /// reads early. A little slack past it keeps a small margin available while
     /// limiting any encroachment on the next word's attack.
-    const NEXT_WORD_SLACK: f64 = 0.020;
+    /// 45 ms: under half a syllable, so it cannot reach a following word's nucleus,
+    /// but enough to cover a transcript boundary that reads early — measured, a
+    /// declined cut stopped ~90 ms short and left the tail of "ungefähr" audible.
+    const NEXT_WORD_SLACK: f64 = 0.045;
     // Nuclei-anchored placement: analyse the edit region ONCE, then place each edge
     // inside the band bounded by the neighbouring kept words' syllabic nuclei. This
     // supersedes the level-based snap below wherever the caller supplied the
@@ -7501,7 +7504,15 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                 let itm = |t: f64| r0 + t - acc_start;
                 let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
                 let (syl_a, syl_b, n_syl) = an.explain(a_prev, a_next);
-                match an.place_removal(a_prev, a_next, (rel(src.start), rel(src.end))) {
+                match an.place_removal(
+                    a_prev,
+                    a_next,
+                    (rel(src.start), rel(src.end)),
+                    (
+                        src.prev_word.map(|(_, e)| rel(e)),
+                        src.next_word.map(|(s, _)| rel(s)),
+                    ),
+                ) {
                     Ok(p) => {
                         // Hard TIME bound from the transcript — the one guard that
                         // limits the damage of every other failure. It was computed
@@ -7585,6 +7596,11 @@ fn cut_item_time_ranges(reaper: &Reaper<MainThreadScope>, input: &Value) -> Resu
                             "asked": [r3(src.start), r3(src.end)],
                             "anchors": [r3(itm(a_prev)), r3(itm(a_next))],
                             "declined": format!("{why:?}"),
+                            // Which side had no range, and how much it had — a bare
+                            // "NoMinimum" says nothing actionable.
+                            "left_range_db": r3(an.stretch_range(a_prev, rel(src.start))),
+                            "right_range_db": r3(an.stretch_range(rel(src.end), a_next)),
+                            "syllables": n_syl,
                         }));
                     }
                 }

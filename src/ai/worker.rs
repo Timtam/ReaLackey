@@ -1689,8 +1689,11 @@ fn cut_analysis_lines(cut: &Value) -> Vec<String> {
         let (n0, n1) = pair(r.get("anchors"));
         if let Some(why) = r.get("declined").and_then(|v| v.as_str()) {
             out.push(format!(
-                "  {}. transcript {a0:.3}-{a1:.3} · DECLINED ({why}) — transcript times kept",
-                i + 1
+                "  {}. transcript {a0:.3}-{a1:.3} · DECLINED ({why}) — ranges L {:.1}dB /                  R {:.1}dB, {} syllable(s) — transcript times kept",
+                i + 1,
+                num(r.get("left_range_db")),
+                num(r.get("right_range_db")),
+                r.get("syllables").and_then(|v| v.as_u64()).unwrap_or(0)
             ));
             continue;
         }

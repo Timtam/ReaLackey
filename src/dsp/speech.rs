@@ -49,6 +49,10 @@ const MIN_SYLLABLE_SEP: f64 = 0.080;
 /// How far outside the transcript's span a nucleus may still belong to the removed
 /// word. Covers the transcript's own error without reaching a neighbour's syllable.
 const HINT_TOL: f64 = 0.120;
+/// How far past a NEIGHBOUR's reported boundary a nucleus may still be counted as the
+/// removed word's. Tight on purpose: erring small only shrinks the removed extent,
+/// which under-cuts (recoverable), while erring large over-cuts into a kept word.
+const NEIGHBOUR_TOL: f64 = 0.030;
 /// Fallback nucleus criterion for whispered/heavily-coded material, where voicing
 /// can't be required: a run above the speech/silence split at least this long. Below
 /// the shortest vowel nucleus in fast speech (~60-80 ms), so it still rejects clicks.
@@ -326,6 +330,19 @@ impl SpeechAnalysis {
         runs
     }
 
+    /// Dynamic range of a search stretch, in dB — reported on a refusal so the log
+    /// says WHICH side had nothing to measure and how close it came, instead of the
+    /// bare word "NoMinimum".
+    pub fn stretch_range(&self, from: f64, to: f64) -> f64 {
+        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
+        if hi < lo + 2 {
+            return 0.0;
+        }
+        let mut lv: Vec<f64> = (lo..=hi).map(|k| self.level(k)).collect();
+        lv.sort_by(|a, b| a.total_cmp(b));
+        percentile(&lv, 90.0) - percentile(&lv, 10.0)
+    }
+
     /// Is there a measurable boundary in this stretch at all? A continuous background
     /// (music bed, long reverb tail, crosstalk) has no dynamic range to work with, and
     /// guessing inside it is worse than saying so.
@@ -369,6 +386,8 @@ impl SpeechAnalysis {
         a_prev: f64,
         a_next: f64,
         hint: (f64, f64),
+        // (previous kept word's end, next kept word's start), when known.
+        neighbours: (Option<f64>, Option<f64>),
     ) -> Result<Placement, Refusal> {
         if a_next <= a_prev || self.bands_unusable() {
             return Err(Refusal::NoMinimum);
@@ -384,6 +403,14 @@ impl SpeechAnalysis {
             .iter()
             .copied()
             .filter(|&n| n > a_prev && n < a_next)
+            // Bounded by the NEIGHBOURING words' own boundaries, not by a window
+            // around the removed word. A ±120 ms window was too loose to exclude the
+            // very case it was written for: a nucleus 55 ms past the word's end, which
+            // belongs to the next word, still passed and inflated the removed extent.
+            .filter(|&n| {
+                neighbours.0.map_or(true, |e| n >= e - NEIGHBOUR_TOL)
+                    && neighbours.1.map_or(true, |st| n <= st + NEIGHBOUR_TOL)
+            })
             .filter(|&n| n >= hint.0 - HINT_TOL && n <= hint.1 + HINT_TOL)
             .collect();
         let (first_in, last_in) = match (inner.first(), inner.last()) {
@@ -855,7 +882,7 @@ mod tests {
         // The anchor is in "pan", i.e. after the /p/ closure.
         assert!(a_prev > pan - 0.02, "anchor {a_prev} should be in 'pan' (>= {pan})");
         let a_next = an_.expect("ständig has a nucleus");
-        if let Ok(pl) = a.place_removal(a_prev, a_next, (japan_end, sch)) {
+        if let Ok(pl) = a.place_removal(a_prev, a_next, (japan_end, sch), (None, None)) {
             // Only a PLACED edge carries the invariant; an unmeasured one falls back
             // to the transcript in the caller.
             let (cut_s, cut_e) = (pl.start.unwrap_or(a_prev), pl.end.unwrap_or(a_next));
@@ -886,7 +913,7 @@ mod tests {
                     let (Some(p), Some(n)) =
                         a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)))
                     else { continue };
-                    if let Ok(pl) = a.place_removal(p, n, (w1_end, w2)) {
+                    if let Ok(pl) = a.place_removal(p, n, (w1_end, w2), (None, None)) {
                         let (cs, ce) = (pl.start.unwrap_or(p), pl.end.unwrap_or(n));
                         assert!(
                             cs >= p && ce <= n && ce >= cs,
@@ -925,7 +952,7 @@ mod tests {
             Some((fric_start, w2_end)),
         );
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let pl = a.place_removal(p, n, (rem, rem_end)).expect("placed");
+        let pl = a.place_removal(p, n, (rem, rem_end), (None, None)).expect("placed");
         let cut_e = pl.end.expect("end measured");
         assert!(
             cut_e <= fric_start + 0.02,
@@ -956,7 +983,7 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
         let (p, n) = a.anchors(Some((w1, w1_end)), (fric, w2), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let pl = a.place_removal(p, n, (fric, w2)).expect("placed");
+        let pl = a.place_removal(p, n, (fric, w2), (None, None)).expect("placed");
         let (cut_s, cut_e) = (pl.start.expect("start measured"), pl.end.expect("end measured"));
         assert!(
             cut_s <= fric + 0.015,
@@ -987,7 +1014,7 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
         let (p, n) = a.anchors(Some((w1, w1_end)), (w1_end, w2), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let pl = a.place_removal(p, n, (w1_end, w2)).expect("placed");
+        let pl = a.place_removal(p, n, (w1_end, w2), (None, None)).expect("placed");
         let cut_e = pl.end.expect("end measured");
         assert!(
             cut_e >= fric_end - 0.015,
@@ -1022,7 +1049,7 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
         let (p, n) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let (p, n) = (p.expect("prev nucleus"), n.expect("next nucleus"));
-        let pl = a.place_removal(p, n, (rem, rem_end)).expect("placed");
+        let pl = a.place_removal(p, n, (rem, rem_end), (None, None)).expect("placed");
         let cut_s = pl.start.expect("start measured");
         assert!(
             cut_s <= rem + 0.015,
@@ -1062,7 +1089,7 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, sr).expect("analysable");
         let (p, n2) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let (p, n2) = (p.expect("prev nucleus"), n2.expect("next nucleus"));
-        let pl = a.place_removal(p, n2, (rem, rem_end)).expect("placed");
+        let pl = a.place_removal(p, n2, (rem, rem_end), (None, None)).expect("placed");
         let cut_s = pl.start.expect("start measured");
         assert!(
             cut_s <= rem + 0.015,
@@ -1096,7 +1123,7 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, SR).expect("analysable");
         let (p, n) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let pl = a
-            .place_removal(p.expect("prev"), n.expect("next"), (rem, rem_end))
+            .place_removal(p.expect("prev"), n.expect("next"), (rem, rem_end), (None, None))
             .expect("placed");
         assert!(
             pl.gap >= 0.150,
@@ -1138,7 +1165,7 @@ mod tests {
         let a = SpeechAnalysis::new(&s.s, sr).expect("analysable");
         let (p, n2) = a.anchors(Some((w1, w1_end)), (rem, rem_end), Some((w2, w2_end)));
         let pl = a
-            .place_removal(p.expect("prev"), n2.expect("next"), (rem, rem_end))
+            .place_removal(p.expect("prev"), n2.expect("next"), (rem, rem_end), (None, None))
             .expect("a boundary exists even though nothing reaches the floor");
         let cs = pl.start.expect("start measured");
         assert!(cs <= rem + 0.02, "cut starts {cs:.3} after the word at {rem:.3}");
