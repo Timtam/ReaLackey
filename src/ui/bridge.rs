@@ -127,6 +127,22 @@ pub fn on_webview_message(json: &str) {
             resolve_editor(EditorResult::Save { keep });
         }
         Some("cut:cancel") => resolve_editor(EditorResult::Cancel),
+        // The editor's Play button: hand back the segments a cut with these flags
+        // would actually leave, so the preview auditions the real result rather than
+        // transcript times.
+        Some("cut:preview") => {
+            let keep: Vec<bool> = v
+                .get("keep")
+                .and_then(|k| k.as_array())
+                .map(|a| a.iter().map(|b| b.as_bool().unwrap_or(true)).collect())
+                .unwrap_or_default();
+            let segs = crate::ui::preview::kept_segments(&keep);
+            let json: Vec<serde_json::Value> = segs
+                .iter()
+                .map(|&(a, b)| serde_json::json!([a, b]))
+                .collect();
+            crate::ui::output::send_preview(&serde_json::Value::Array(json).to_string());
+        }
         _ => {}
     }
 }

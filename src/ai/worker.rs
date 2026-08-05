@@ -1604,6 +1604,14 @@ async fn run_cut_editor(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
+    // Cache the analysis so the editor's Play button can ask for the REAL cut
+    // boundaries instead of previewing transcript times.
+    {
+        use base64::Engine as _;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&wav_b64) {
+            crate::ui::preview::arm(&bytes, &t.transcript.words);
+        }
+    }
     let payload = json!({ "words": words_json, "wav": wav_b64, "item": item_name, "duration": total });
 
     // 5. Arm the reply slot, open the editor, await the user's result. The editor
@@ -1623,12 +1631,14 @@ async fn run_cut_editor(
                 Ok(EditorResult::Save { keep }) => break keep,
                 Ok(EditorResult::Cancel) | Err(_) => {
                     let _ = ui_tx.send(UiEvent::CloseCutEditor);
+    crate::ui::preview::disarm();
                     return CutEditorOutcome::Cancelled;
                 }
             },
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                 if !crate::ui::output::webview_active() {
                     let _ = ui_tx.send(UiEvent::CloseCutEditor);
+    crate::ui::preview::disarm();
                     return CutEditorOutcome::Cancelled;
                 }
             }
@@ -1637,6 +1647,7 @@ async fn run_cut_editor(
     // Guarantee the modal is gone (the JS self-closes on confirm; this also covers
     // any path where it didn't).
     let _ = ui_tx.send(UiEvent::CloseCutEditor);
+    crate::ui::preview::disarm();
 
     // 6. Cut the removed spans via the shared executor (one undo point). The user's
     // Confirm in the editor is the consent, so there's no extra mutation prompt.

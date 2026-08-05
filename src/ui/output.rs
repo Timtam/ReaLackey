@@ -374,6 +374,10 @@ pub fn announce(text: &str) {
 pub fn open_cut_editor(payload_json: &str) {
     STATE.with(|c| c.borrow().open_cut_editor(payload_json));
 }
+/// Hand the editor the real cut segments for its preview (main thread).
+pub fn send_preview(json: &str) {
+    STATE.with(|c| c.borrow().call_js("cutPreviewSegments", json));
+}
 /// Close the cut-by-text editor modal (main thread).
 pub fn close_cut_editor() {
     STATE.with(|c| c.borrow().close_cut_editor());
@@ -854,20 +858,36 @@ document.addEventListener('keydown',function(e){
   // 50 ms, which silently deleted every natural pause from the preview, so the
   // preview was always tighter than the real cut and could never be trusted to judge
   // it. Pauses BETWEEN kept words are part of the audio and stay.
-  function playEdited(){ if(!ctx||!buf){ announce('No audio to preview'); return; } resume(); stopAll();
-    var ranges=[],cur=null;
-    for(var i=0;i<st.words.length;i++){ var w=st.words[i];
-      if(w.rm){ if(cur){ranges.push(cur);cur=null;} continue; }
-      if(cur) cur.e=Math.max(cur.e,w.end); else cur={s:w.start,e:w.end};
+  // Ask the host for the segments the REAL cut would leave. The transcript times we
+  // hold are 50-200 ms out and the cut uses measured boundaries, so previewing from
+  // them auditions something that never gets written.
+  function playEdited(){ if(!ctx||!buf){ announce('No audio to preview'); return; }
+    try{ if(window.ipc){ window.ipc.postMessage(JSON.stringify({t:'cut:preview',
+      keep: st.words.map(function(w){return !w.rm;})})); announce('Preparing preview…'); return; } }catch(e){}
+    playSegments(null); }
+  window.cutPreviewSegments=function(json){
+    var segs=null; try{ segs=(typeof json==='string')?JSON.parse(json):json; }catch(e){}
+    playSegments(segs && segs.length ? segs : null); };
+  function playSegments(segs){ if(!ctx||!buf||!st)return; resume(); stopAll();
+    var ranges=[];
+    if(segs){ for(var j=0;j<segs.length;j++) ranges.push({s:segs[j][0], e:segs[j][1]}); }
+    else {
+      // Fallback only when the host could not measure: transcript times.
+      var cur=null;
+      for(var i=0;i<st.words.length;i++){ var w=st.words[i];
+        if(w.rm){ if(cur){ranges.push(cur);cur=null;} continue; }
+        if(cur) cur.e=Math.max(cur.e,w.end); else cur={s:w.start,e:w.end};
+      }
+      if(cur)ranges.push(cur);
     }
-    if(cur)ranges.push(cur);
     if(!ranges.length){ announce('Everything is removed'); return; }
     // Butt the kept runs together — that IS the cut. Half the pause on each side of
     // a removed span survives the real cut, so approximate that here too.
     var at=ctx.currentTime+0.03;
     ranges.forEach(function(r,k){ try{
-      var lead=(k===0)?0:0.03, o=Math.max(0,r.s-lead);
-      var d=Math.max(0.02,(r.e-o)+0.03);
+      // No invented lead-in: these ARE the cut boundaries.
+      var o=Math.max(0,r.s);
+      var d=Math.max(0.02,r.e-o);
       if(buf.duration) d=Math.min(d,Math.max(0.02,buf.duration-o));
       var n=ctx.createBufferSource(); n.buffer=buf; n.connect(ctx.destination);
       n.start(at,o,d); preview.push(n); at+=d; }catch(_){} });
