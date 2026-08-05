@@ -425,7 +425,18 @@ impl SpeechAnalysis {
             .quiet_runs(last_in, a_next)
             .first()
             .map(|&(a, _)| self.time_of(a));
-        (start, end)
+        // The word's own nucleus MUST lie inside its extent. Nothing forced that
+        // before, and the report showed both ways it fails: ~9% of words (nearly all
+        // short function words) came back zero-length because the two runs resolved to
+        // the same place, and others overshot by up to 0.68 s into the next word
+        // because the right-hand run was found far too late. A side that fails this
+        // is discarded so the caller falls back to the transcript for that edge alone.
+        let start = start.filter(|&t| t <= first_in);
+        let end = end.filter(|&t| t >= last_in);
+        match (start, end) {
+            (Some(a), Some(b)) if b <= a => (None, None),
+            other => other,
+        }
     }
 
     pub fn place_removal(
