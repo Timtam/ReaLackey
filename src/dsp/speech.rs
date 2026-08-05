@@ -425,9 +425,18 @@ impl SpeechAnalysis {
             .collect();
         let mut sorted = step.clone();
         sorted.sort_by(f64::total_cmp);
-        // Must stand clearly above the window's own churn, and be a real shift rather
-        // than estimator noise.
-        let bar = (sorted[sorted.len() / 2] * 3.0).max(MIN_TOL_DB);
+        let median = sorted[sorted.len() / 2];
+        // Outlier test against the window's own spread, not a multiple of its median.
+        // `median * 3` rejected EVERYTHING at the junction it was written for: the
+        // clip report showed "ihren"/"Schoss" unchanged to the millisecond after the
+        // refinement shipped, so no step ever qualified. A multiple of the median is
+        // not a measure of how much something stands out — over a window spanning two
+        // words the median step is already substantial, so the bar rides up with it.
+        // Median + 3 MAD is the standard robust criterion and does not.
+        let mut dev: Vec<f64> = step.iter().map(|v| (v - median).abs()).collect();
+        dev.sort_by(f64::total_cmp);
+        let mad = dev[dev.len() / 2] * 1.4826;
+        let bar = (median + 3.0 * mad).max(MIN_TOL_DB);
         // Contiguous groups of qualifying frames are single boundaries; take the peak
         // WITHIN the requested one rather than across the whole window.
         let mut groups: Vec<(usize, usize)> = Vec::new();
