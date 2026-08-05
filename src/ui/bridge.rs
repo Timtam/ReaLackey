@@ -127,6 +127,13 @@ pub fn on_webview_message(json: &str) {
             resolve_editor(EditorResult::Save { keep });
         }
         Some("cut:cancel") => resolve_editor(EditorResult::Cancel),
+        // "Clear" in the composer: drop the worker's history AND the visible log.
+        Some("chat:clear") => {
+            if let Some(tx) = TASK_TX.get() {
+                let _ = tx.send(MainTask::ClearHistory);
+            }
+            crate::ui::output::clear_log();
+        }
         // The editor's Play button: hand back the segments a cut with these flags
         // would actually leave, so the preview auditions the real result rather than
         // transcript times.

@@ -28,6 +28,17 @@ into a versioned heading and attaches its entries to the GitHub release — see
   (a numbered variant is used instead); the result is spoken and its path announced.
   A **progress dialog** (progress bar + Cancel) shows while a transcription action
   runs, so sighted users get visible progress and can cancel part-way through.
+- **Clear the conversation** — a **Clear** button next to Send empties the chat and
+  the assistant's memory of it. Handy when switching to a different provider: without
+  it the next message re-sends the whole previous conversation to the new model, which
+  costs tokens and can fail outright where two providers disagree about how a past turn
+  should look (a reasoning block or a tool call the new one won't accept). The button
+  is reachable by Tab and announced; it does nothing mid-reply, so it can't cut a
+  message off half-written.
+- **Keyboard shortcuts in the cut-by-text editor** — a **Keys** button in the editor's
+  header expands the full list (sentence and word navigation, selection, remove,
+  undo/redo, playback, and how to leave the transcript), so the keys are discoverable
+  without leaving the editor or hunting through documentation.
 - **Advanced mode (auto-approve edits)**: a toggle that lets the assistant apply
   changes **without asking for confirmation each time**. Flip it from **Extensions
   → ReaLackey → "Advanced mode (auto-approve edits)"** (the menu item shows the

@@ -374,6 +374,10 @@ pub fn announce(text: &str) {
 pub fn open_cut_editor(payload_json: &str) {
     STATE.with(|c| c.borrow().open_cut_editor(payload_json));
 }
+/// Clear the visible conversation log (main thread).
+pub fn clear_log() {
+    STATE.with(|c| c.borrow().eval("clearLog();"));
+}
 /// Hand the editor the real cut segments for its preview (main thread).
 pub fn send_preview(json: &str) {
     STATE.with(|c| c.borrow().call_js("cutPreviewSegments", json));
@@ -576,6 +580,7 @@ details.help li{margin:2px 0;}
 <textarea id="msg" rows="1" aria-label="Message the assistant" placeholder="Ask the assistant…"></textarea>
 <button id="preset" type="button" aria-label="Insert a saved prompt preset">Presets</button>
 <button id="send" type="submit">Send</button>
+<button id="clearchat" type="button" aria-label="Clear the conversation history">Clear</button>
 <button id="closewin" type="button" aria-label="Close the assistant window">Close</button>
 </form>
 <details class="help"><summary>Keyboard shortcuts</summary><ul><li>Enter sends; Shift+Enter starts a new line.</li><li>Alt+1 through Alt+0 read that message; press the same combo again quickly to copy it.</li><li>Alt+P inserts a saved prompt preset.</li><li>Escape stops the assistant while it is working.</li><li>Command/Ctrl+W closes the window (it keeps your conversation and reopens instantly).</li></ul></details>
@@ -586,6 +591,23 @@ details.help li{margin:2px 0;}
       <button id="cutAudioMode" type="button" class="cut-ico" title="Cycle audio feedback">Audio: both</button>
       <button id="cutUndo" type="button" class="cut-ico" title="Undo (Ctrl+Z)">Undo</button>
       <button id="cutRedo" type="button" class="cut-ico" title="Redo (Ctrl+Y)">Redo</button>
+      <button id="cutKeysBtn" type="button" class="cut-ico" aria-expanded="false"
+        aria-controls="cutKeys" title="Show keyboard shortcuts">Keys</button>
+    </div>
+    <div id="cutKeys" hidden role="region" aria-label="Keyboard shortcuts">
+      <ul>
+        <li><b>Up</b> / <b>Down</b> — previous / next sentence (reads the whole sentence)</li>
+        <li><b>Left</b> / <b>Right</b> — previous / next word, within the sentence</li>
+        <li><b>Shift</b> + arrows — extend the selection by word or sentence</li>
+        <li><b>Space</b> — select or deselect the word at the cursor</li>
+        <li><b>Delete</b> / <b>Backspace</b> — remove the word or selection (reversible)</li>
+        <li><b>Ctrl+Z</b> / <b>Ctrl+Y</b> — undo / redo, before anything is cut</li>
+        <li><b>Home</b> / <b>End</b> — start / end of the sentence</li>
+        <li><b>Ctrl+Home</b> / <b>Ctrl+End</b> — start / end of the transcript</li>
+        <li><b>Escape</b> — clear the selection; again to cancel</li>
+        <li><b>Tab</b> — leave the transcript for the buttons</li>
+        <li><b>Play</b> — hear the edited result; <b>Audio</b> cycles what each move plays</li>
+      </ul>
     </div>
     <div class="cut-transport">
       <button id="cutPlay" type="button" class="cut-ico" aria-label="Play the edited result">&#9654;</button>
@@ -630,6 +652,9 @@ var _liveT=null,_liveAlt=false;
 // string, which otherwise silences repeated words ("the" ... "the").
 function liveAnnounce(t){var l=document.getElementById('live');if(!l||!t)return;if(_liveT){clearTimeout(_liveT);_liveT=null;}_liveAlt=!_liveAlt;l.textContent=t+(_liveAlt?'\u200B':'');_liveT=setTimeout(function(){l.textContent='';_liveT=null;},4000);}
 function setStatus(t){var s=document.getElementById('status');if(s)s.textContent=t;}
+function clearLog(){var l=document.getElementById('log');if(l)l.innerHTML='';
+  var st=document.getElementById('status');if(st)st.textContent='Ready.';
+  if(window.liveAnnounce) liveAnnounce('Conversation cleared.');}
 function focusInput(){var m=document.getElementById('msg');if(m)m.focus();}
 // Prompt presets: the host shows a native picker; on a choice it calls
 // insertPreset with the chosen body, spliced at the caret so it stays editable.
@@ -685,6 +710,15 @@ function grow(){var m=document.getElementById('msg');if(!m)return;m.style.height
   });
   m.addEventListener('input',grow);
   var pbtn=document.getElementById('preset');if(pbtn)pbtn.addEventListener('click',pickPreset);
+  var kb=document.getElementById('cutKeysBtn'),kp=document.getElementById('cutKeys');
+  if(kb&&kp) kb.addEventListener('click',function(){
+    var open=kp.hidden; kp.hidden=!open; kb.setAttribute('aria-expanded',open?'true':'false');
+    if(window.liveAnnounce) liveAnnounce(open?'Keyboard shortcuts shown':'Keyboard shortcuts hidden');
+  });
+  var cbtn=document.getElementById('clearchat');
+  if(cbtn) cbtn.addEventListener('click',function(){
+    if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'chat:clear'}));
+  });
   var xbtn=document.getElementById('closewin');if(xbtn)xbtn.addEventListener('click',function(){window.ipc.postMessage(JSON.stringify({t:'window:close'}));});
   // Cmd/Ctrl+W closes the window everywhere (works even when the webview has focus,
   // which on macOS is the only reliable way for a VoiceOver user to close it).

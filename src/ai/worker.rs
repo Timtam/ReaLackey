@@ -92,6 +92,10 @@ async fn run(
     while let Some(task) = task_rx.recv().await {
         match task {
             MainTask::Cancel => { /* nothing in flight */ }
+            MainTask::ClearHistory => {
+                history.clear();
+                let _ = ui_tx.send(UiEvent::Announce("Conversation cleared.".into()));
+            }
             MainTask::Prompt(prompt) => {
                 handle_prompt(
                     &mut history,
@@ -672,7 +676,9 @@ async fn run_turn(
                     out.cancelled = true;
                     let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
                 }
-                Some(MainTask::Prompt(_))
+                // Clearing mid-turn would desync the history this turn is building.
+                Some(MainTask::ClearHistory)
+                | Some(MainTask::Prompt(_))
                 | Some(MainTask::Transcribe(_))
                 | Some(MainTask::OpenCutEditor) => {
                     // Phase 0/1: one generation at a time.
@@ -1199,7 +1205,8 @@ async fn run_transcription(
                         let _ = (&mut fut).await; // let the request unwind
                         return TranscribeOutcomeKind::Cancelled;
                     }
-                    Some(MainTask::Prompt(_))
+                    Some(MainTask::ClearHistory)
+                    | Some(MainTask::Prompt(_))
                     | Some(MainTask::Transcribe(_))
                     | Some(MainTask::OpenCutEditor) => {
                         let _ = ui_tx.send(UiEvent::Status(

@@ -11,6 +11,11 @@ pub enum MainTask {
     Prompt(String),
     /// Abort the current generation.
     Cancel,
+    /// Drop the conversation history. Makes switching provider cheap: the next turn
+    /// starts fresh instead of re-sending an entire chat to a different model (which
+    /// costs tokens, and can fail outright where the two providers disagree about
+    /// message shape — a thinking block or a tool-call turn the new one won't accept).
+    ClearHistory,
     /// Transcribe the selected item and write the result, triggered by a bindable
     /// REAPER action (no chat involved). Runs in the worker so the HTTP call is off
     /// the main thread.
