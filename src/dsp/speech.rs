@@ -384,6 +384,53 @@ impl SpeechAnalysis {
             .fold(f64::NEG_INFINITY, f64::max)
     }
 
+    /// Frame where voicing gives way to friction — the high band overtaking the voice
+    /// bar — searched in [from, to] and only where no silence precedes it.
+    ///
+    /// Measured on the real recording at "ihren Schoss": the /sch/ runs 8.150-8.230
+    /// and is loud in the VOICE BAR too (36-38 dB), so level() rightly calls it
+    /// speech. The only amplitude dip in the whole junction is 8.240-8.260, between
+    /// the /sch/ and the following vowel -- inside "Schoss". quiet_runs found the only
+    /// dip there is; that dip simply is not the word boundary, so every attempt to
+    /// re-rank or re-threshold runs was looking in the wrong place.
+    ///
+    /// The boundary is the tilt SIGN CHANGE at 8.150: -14.8 dB to +1.2 dB in one
+    /// frame. No magnitude threshold is needed and none is used -- "the high band now
+    /// dominates and did not a moment ago" is self-calibrating by construction.
+    ///
+    /// `before` is the first frame of the quiet run that would otherwise be used, and
+    /// it is what separates this from a normal pause: at "streichelt dabei" the level
+    /// really does fall to 4 dB, and the tilt rise that follows is the /d/ burst AFTER
+    /// that silence, so it is correctly ignored. Friction that begins while the
+    /// speaker is still going is a word boundary; friction after a pause is just the
+    /// next word starting where the pause already said it would.
+    fn friction_onset(&self, from: f64, to: f64, run: (usize, usize)) -> Option<f64> {
+        let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
+        let need = ((0.040 / self.hop).round() as usize).max(2);
+        // A run this long IS a pause, and the boundary belongs inside it. Only where
+        // there is no real pause does the friction onset have to carry the boundary --
+        // "Kopf. Sie" has a 190 ms silence and its /f/ runs right into it, so
+        // contiguity alone would drag "Sie" back into "Kopf".
+        if run.1 - run.0 >= need {
+            return None;
+        }
+        let before = run.0;
+        let tilt = |k: usize| (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb);
+        // Walk back from the run through CONTIGUOUS friction. Contiguity is what
+        // separates the two cases: at "ihren Schoss" the /sch/ runs right into the dip
+        // with no gap, so the dip is inside the next word; at "Kopf. Sie" the /f/ ends
+        // 90 ms before the pause, so the pause is a real boundary and the /f/ is just
+        // that word's coda. Without this the start edge of every word after a
+        // fricative-final one was dragged back onto the neighbour's coda -- 39 edges
+        // on this recording, all of them "du after bist", "Sie after Kopf", and so on.
+        let mut k = hi.min(before);
+        let stop = lo + 1;
+        while k > stop && tilt(k - 1) > 0.0 {
+            k -= 1;
+        }
+        (hi.min(before).saturating_sub(k) >= need && k > stop).then(|| self.time_of(k))
+    }
+
     /// True when no band has enough range to measure anything (a music bed, a very
     /// reverberant room, heavy compression). The caller must refuse rather than cut.
     fn bands_unusable(&self) -> bool {
@@ -562,8 +609,25 @@ impl SpeechAnalysis {
         // speech, and it has never been observed on real audio.
         let lrun = self.quiet_runs(a_prev, first_in).last().copied();
         let rrun = self.quiet_runs(last_in, a_next).first().copied();
-        let raw_start = lrun.map(|(_, b)| self.time_of(b));
-        let raw_end = rrun.map(|(a, _)| self.time_of(a));
+        // Friction that starts while the speaker is still voicing marks the boundary;
+        // the amplitude dip after it belongs to the next word, not between them.
+        // Friction, a dip, then a vowel is the same acoustic shape whether the
+        // friction is the next word's ONSET ("ihren | Schoss") or this word's CODA
+        // ("bist | du"). Energy cannot tell them apart, but the transcript can, and it
+        // is only ever asked to arbitrate between two candidates that are both real.
+        // Out of range, the RUN still stands -- falling back to the transcript instead
+        // would throw away 22 perfectly good edges on this recording.
+        let near = self.syllable_period * 0.5;
+        let raw_start = lrun.map(|(a, b)| {
+            self.friction_onset(a_prev, first_in, (a, b))
+                .filter(|&t| t >= hint.0 - near)
+                .unwrap_or(self.time_of(b))
+        });
+        let raw_end = rrun.map(|(a, b)| {
+            self.friction_onset(last_in, a_next, (a, b))
+                .filter(|&t| t <= hint.1 + near)
+                .unwrap_or(self.time_of(a))
+        });
         let llen = lrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         let rlen = rrun.map_or(-1.0, |(a, b)| (b - a) as f64);
         // The word's own nucleus MUST lie inside its extent. Nothing forced that
@@ -1558,3 +1622,221 @@ mod tests {
 
 
 
+
+/// Diagnostics against a real recording, off by default.
+///
+/// Seven attempts at the "ihren Schoss" junction each cost a full round trip
+/// through a human ear, so every one was a guess between measurements. With the
+/// source file these become local: `PARO_WAV=<path> cargo test --lib real_ -- --nocapture`.
+#[cfg(test)]
+mod real_audio {
+    use super::*;
+
+    fn load() -> Option<SpeechAnalysis> {
+        let path = std::env::var("PARO_WAV").ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let (samples, ch, sr) = crate::dsp::parse_wav(&bytes).ok()?;
+        let mono: Vec<f64> = if ch <= 1 {
+            samples
+        } else {
+            samples.chunks(ch).map(|f| f.iter().sum::<f64>() / ch as f64).collect()
+        };
+        SpeechAnalysis::new(&mono, sr)
+    }
+
+    /// Fetch the real transcript once and cache it beside the WAV, so the whole-clip
+    /// regression below runs offline. Uses the configured local Whisper endpoint and
+    /// the key from the credential store; the key is never printed.
+    /// `PARO_WAV=<path> PARO_FETCH=1 cargo test --lib real_fetch -- --nocapture`
+    #[test]
+    fn real_fetch_transcript() {
+        if std::env::var("PARO_FETCH").is_err() {
+            return;
+        }
+        let Ok(wav) = std::env::var("PARO_WAV") else { return };
+        let out = std::path::Path::new(&wav).with_extension("words.json");
+        let mp3 = std::env::var("PARO_MP3").unwrap_or_default();
+        let bytes = std::fs::read(&mp3).expect("PARO_MP3");
+        // Straight from the credential store into the request. Never printed, never
+        // written to disk, never passed through the environment.
+        let key = keyring::Entry::new("realackey", "apikey:whisper-local")
+            .ok()
+            .and_then(|e| e.get_password().ok())
+            .filter(|k| !k.trim().is_empty());
+        eprintln!("key from credential store: {}", if key.is_some() { "found" } else { "absent (keyless server?)" });
+        let base = std::env::var("PARO_BASE").expect("PARO_BASE");
+        let model = std::env::var("PARO_MODEL").expect("PARO_MODEL");
+        let t = crate::providers::transcription::OpenAiTranscriber::new(base, key, model);
+        let clip = crate::providers::transcription::AudioClip {
+            bytes,
+            filename: "paro.mp3".into(),
+            mime: "audio/mpeg".into(),
+        };
+        let opts = crate::providers::transcription::TranscribeOptions {
+            language: Some("de".into()),
+            prompt: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tr = rt
+            .block_on(async {
+                use crate::providers::transcription::TranscriptionProvider as _;
+                t.transcribe(clip, &opts, tokio_util::sync::CancellationToken::new()).await
+            })
+            .expect("transcribe");
+        let rows: Vec<String> = tr
+            .words
+            .iter()
+            .map(|w| format!("{:.3}|{:.3}|{}", w.start, w.end, w.text.replace('|', " ")))
+            .collect();
+        eprintln!("{} words -> {}", rows.len(), out.display());
+        std::fs::write(&out, rows.join("
+")).unwrap();
+    }
+
+    /// The nine labelled junctions, measured end to end on the real recording.
+    /// Transcript times are the Whisper output as printed by the clip report.
+    #[test]
+    fn real_labelled_junctions() {
+        let Some(a) = load() else { return };
+        // (label, prev, word, next) — the pair under test is `word`/`next`.
+        type Case = (&'static str, (f64, f64), (f64, f64), (f64, f64));
+        let cases: &[Case] = &[
+            ("BAD  ihren|Schoss", (7.843, 7.923), (7.983, 8.143), (8.183, 8.463)),
+            ("BAD  Senioren|schmiegt", (16.665, 16.746), (16.766, 17.166), (17.186, 17.506)),
+            ("BAD  grossen|schwarzen", (9.563, 9.703), (9.763, 10.143), (10.183, 10.603)),
+            ("BAD  weiche|Fell", (6.342, 6.622), (6.742, 7.002), (7.102, 7.322)),
+            ("BAD  Sie|schaut", (12.584, 12.824), (13.084, 13.184), (13.204, 13.384)),
+            ("GOOD streichelt|dabei", (4.702, 4.782), (4.822, 5.182), (5.222, 5.422)),
+            ("GOOD schon|seit", (107.486, 107.606), (107.606, 107.746), (107.786, 107.946)),
+        ];
+        for (name, prev, w, next) in cases {
+            let (ap, an) = a.anchors(Some(*prev), *w, Some(*next));
+            let (o, f) = match (ap, an) {
+                (Some(x), Some(y)) => a.word_extent(x, y, *w),
+                _ => (Edge::fail(EdgeCause::NoAnchor), Edge::fail(EdgeCause::NoAnchor)),
+            };
+            eprintln!(
+                "{name:26} transcript {:.3}-{:.3}  measured {:?}-{:?}  end drift {:+.3}",
+                w.0,
+                w.1,
+                o.time.map(|t| (t * 1000.0).round() / 1000.0),
+                f.time.map(|t| (t * 1000.0).round() / 1000.0),
+                f.time.unwrap_or(w.1) - w.1
+            );
+        }
+    }
+
+    /// The whole-clip tally, exactly as preview::word_bounds computes it, so a change
+    /// can be scored against all 821 words in a second instead of a REAPER round trip.
+    #[test]
+    fn real_clip_tally() {
+        let Some(a) = load() else { return };
+        let Ok(wav) = std::env::var("PARO_WAV") else { return };
+        let path = std::path::Path::new(&wav).with_extension("words.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("run real_fetch_transcript first");
+            return;
+        };
+        let words: Vec<(f64, f64, String)> = text
+            .lines()
+            .filter_map(|l| {
+                let mut p = l.split('|');
+                Some((p.next()?.parse().ok()?, p.next()?.parse().ok()?, p.next()?.to_string()))
+            })
+            .collect();
+        let bleed = a.syllable_period * 0.5;
+        let (clip_a, clip_b) = a.span();
+        let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
+        let mut bounds = Vec::new();
+        for i in 0..words.len() {
+            let w = (words[i].0, words[i].1);
+            let prev = i.checked_sub(1).map(|j| (words[j].0, words[j].1));
+            let next = words.get(i + 1).map(|n| (n.0, n.1));
+            let (ap, an) = a.anchors(prev, w, next);
+            let (o, f) = a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), w);
+            let lo = prev.map(|(_, pe)| pe.min(w.0) - bleed);
+            let hi = next.map(|(ns, _)| ns.max(w.1) + bleed);
+            let o = if o.time.is_some_and(|t| lo.is_some_and(|l| t < l)) {
+                o.reject(EdgeCause::BleedReject)
+            } else {
+                o
+            };
+            let f = if f.time.is_some_and(|t| hi.is_some_and(|h| t > h)) {
+                f.reject(EdgeCause::BleedReject)
+            } else {
+                f
+            };
+            *tally.entry(o.cause.token()).or_default() += 1;
+            *tally.entry(f.cause.token()).or_default() += 1;
+            bounds.push((o.time.unwrap_or(w.0), f.time.unwrap_or(w.1)));
+        }
+        let mut v: Vec<_> = tally.into_iter().collect();
+        v.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        eprintln!(
+            "TALLY {}",
+            v.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" | ")
+        );
+        let neg = bounds.windows(2).filter(|p| p[1].0 < p[0].1).count();
+        eprintln!("overlapping neighbours: {neg}");
+        if std::env::var("PARO_BLEED").is_ok() {
+            for (i, w) in words.iter().enumerate() {
+                let prev = i.checked_sub(1).map(|j| (words[j].0, words[j].1));
+                let next = words.get(i + 1).map(|n| (n.0, n.1));
+                let ww = (w.0, w.1);
+                let (ap, an) = a.anchors(prev, ww, next);
+                let (o, _) = a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), ww);
+                let lo = prev.map(|(_, pe)| pe.min(w.0) - bleed);
+                if o.time.is_some_and(|t| lo.is_some_and(|l| t < l)) {
+                    eprintln!(
+                        "BLEEDSTART {:>16} after {:<16} start {:.3} -> {:.3} (bound {:.3})",
+                        w.2,
+                        i.checked_sub(1).map(|j| words[j].2.clone()).unwrap_or_default(),
+                        w.0,
+                        o.time.unwrap(),
+                        lo.unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Does a /sch/ stand out in ANY band measure? Prints the frame-by-frame picture
+    /// across a known-bad junction and a known-good one, so the two can be compared
+    /// directly instead of inferred from boundary positions.
+    #[test]
+    fn real_junction_profile() {
+        let Some(a) = load() else {
+            eprintln!("set PARO_WAV to run");
+            return;
+        };
+        eprintln!(
+            "hop {:.3}  floors bb {:.1} hf {:.1} vb {:.1}  contrast bb {:.1} hf {:.1} vb {:.1}",
+            a.hop, a.floor_bb, a.floor_hf, a.floor_vb, a.contrast_bb, a.contrast_hf, a.contrast_vb
+        );
+        for (name, from, to) in [
+            ("ihren|Schoss  (BAD, /sch/)", 8.00, 8.40),
+            ("streichelt|dabei (GOOD, /d/)", 5.10, 5.30),
+            ("weiche|Fell   (BAD, /f/)", 6.95, 7.25),
+            ("schon|seit    (GOOD, /z/)", 107.70, 107.90),
+        ] {
+            eprintln!("\n--- {name} ---");
+            eprintln!("   time     bb     hf     vb   tilt  level  nucleus");
+            let (lo, hi) = (a.frame_at(from), a.frame_at(to));
+            for k in lo..=hi {
+                let t = a.time_of(k);
+                let tilt = (a.hf[k] - a.floor_hf) - (a.vb[k] - a.floor_vb);
+                let nuc = a.nuclei.iter().any(|&n| (n - t).abs() < a.hop / 2.0);
+                eprintln!(
+                    "{:7.3} {:6.1} {:6.1} {:6.1} {:6.1} {:6.1}  {}",
+                    t,
+                    a.bb[k] - a.floor_bb,
+                    a.hf[k] - a.floor_hf,
+                    a.vb[k] - a.floor_vb,
+                    tilt,
+                    a.level(k),
+                    if nuc { "*" } else { "" }
+                );
+            }
+        }
+    }
+}
