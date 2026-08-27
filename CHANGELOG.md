@@ -12,6 +12,21 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- **Take envelopes.** The assistant can now read and edit the automation lanes
+  drawn on an item's take: `get_take_envelopes` / `get_take_envelope_points` list
+  them, `create_take_envelope` makes a volume, pan, mute, or pitch lane (returning
+  an existing one untouched rather than hiding it), and
+  `insert_take_envelope_point` / `set_take_envelope_point` /
+  `delete_take_envelope_point` edit the curve. All edits are confirmation-gated and
+  undo-wrapped. Take envelope times are item-relative and scaled by the take's
+  playrate; the tools say so, so the model doesn't mistake them for project seconds.
+
+- **Take FX are now fully editable, not just readable.** `add_take_fx` puts a
+  plugin on a take's FX chain and `set_take_fx_param` changes a parameter
+  (normalized 0..1, reporting the resulting display value) — closing the odd
+  asymmetry where the assistant could list a take FX's parameters but only ever
+  change them on tracks. Both confirmation-gated and undo-wrapped.
+
 - **Cut-by-text editor: a whole-clip diagnostic report.** The editor's **Report**
   button copies a per-word table to the clipboard — transcript span, measured span,
   the drift between them, the gap to the next word, and, for each edge the analysis

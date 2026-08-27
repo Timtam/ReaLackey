@@ -521,6 +521,37 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
             ),
         },
         ToolDef {
+            name: "get_take_envelopes".into(),
+            description: "List a take's envelopes (the volume/pan/mute/pitch lanes drawn on the \
+                          item; defaults to the active take): index, name, point count. Take \
+                          envelope times are relative to the item start and scaled by the take's \
+                          playrate (project time = item position + time / playrate)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+                }),
+                json!(["item_index"]),
+            ),
+        },
+        ToolDef {
+            name: "get_take_envelope_points".into(),
+            description: "Read the points of a take envelope (envelope_index from \
+                          get_take_envelopes): time, value, shape, tension, selected. Times are \
+                          item-relative (project time = item position + time / playrate)."
+                .into(),
+            input_schema: obj(
+                json!({
+                    "item_index": { "type": "integer" },
+                    "envelope_index": { "type": "integer" },
+                    "take_index": { "type": "integer", "description": "0-based; omit for the active take" },
+                    "limit": { "type": "integer", "description": "max points (default 200)" }
+                }),
+                json!(["item_index", "envelope_index"]),
+            ),
+        },
+        ToolDef {
             name: "insert_envelope_point".into(),
             description: "Insert (or replace) an automation point on a track envelope. CHANGES the \
                           project (confirmed + undo-wrapped). Read get_envelope_points first to \
@@ -1726,6 +1757,37 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
         ),
     });
     defs.push(ToolDef {
+        name: "add_take_fx".into(),
+        description: "Add an FX/plugin by name to a take's FX chain (defaults to the active \
+                      take). CHANGES the project (confirmed + undo-wrapped). Returns fx_index."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer" },
+                "fx_name": { "type": "string", "description": "plugin name, e.g. \"ReaEQ\" or \"VST3: Serum\"" },
+                "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+            }),
+            json!(["item_index", "fx_name"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "set_take_fx_param".into(),
+        description: "Set a take-FX parameter to a normalized 0..1 value (defaults to the active \
+                      take). Call get_take_fx_params first to see indices and current values. \
+                      CHANGES the project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer" },
+                "fx_index": { "type": "integer" },
+                "param_index": { "type": "integer" },
+                "value": { "type": "number", "description": "normalized value 0..1" },
+                "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+            }),
+            json!(["item_index", "fx_index", "param_index", "value"]),
+        ),
+    });
+    defs.push(ToolDef {
         name: "create_empty_item".into(),
         description: "Create an empty media item (no take) on a track at a position, with a length \
                       in seconds. CHANGES the project (confirmed + undo-wrapped). For a MIDI item \
@@ -1867,6 +1929,75 @@ pub fn definitions(supports_images: bool, supports_audio: bool) -> Vec<ToolDef> 
                 "envelope_index": { "type": "integer" }
             }),
             json!(["track_index", "envelope_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "create_take_envelope".into(),
+        description: "Create a take envelope on the ACTIVE take of an item so \
+                      insert_take_envelope_point can target it. kind: volume, pan, mute, or \
+                      pitch. If it already exists it is returned unchanged (never hidden). \
+                      CHANGES the project (confirmed + undo-wrapped). Returns envelope_index."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer" },
+                "kind": { "type": "string", "enum": ["volume", "pan", "mute", "pitch"] }
+            }),
+            json!(["item_index", "kind"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "insert_take_envelope_point".into(),
+        description: "Insert an automation point on a take envelope (defaults to the active \
+                      take). time is relative to the item start and scaled by playrate (project \
+                      time = item position + time / playrate). Read get_take_envelope_points \
+                      first for the value scale. shape: 0=linear, 1=square, 2=slow, 3=fast start, \
+                      4=fast end, 5=bezier. CHANGES the project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer" },
+                "envelope_index": { "type": "integer" },
+                "time": { "type": "number", "description": "item-relative seconds (see above)" },
+                "value": { "type": "number", "description": "value in the envelope's native units" },
+                "shape": { "type": "integer", "description": "0=linear (default) .. 5=bezier" },
+                "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+            }),
+            json!(["item_index", "envelope_index", "time", "value"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "set_take_envelope_point".into(),
+        description: "Edit an existing take-envelope point by its 0-based point_index (order from \
+                      get_take_envelope_points); omitted fields are left unchanged. CHANGES the \
+                      project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer" },
+                "envelope_index": { "type": "integer" },
+                "point_index": { "type": "integer" },
+                "time": { "type": "number" },
+                "value": { "type": "number" },
+                "shape": { "type": "integer" },
+                "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+            }),
+            json!(["item_index", "envelope_index", "point_index"]),
+        ),
+    });
+    defs.push(ToolDef {
+        name: "delete_take_envelope_point".into(),
+        description: "Delete a single take-envelope point by its 0-based point_index. CHANGES the \
+                      project (confirmed + undo-wrapped)."
+            .into(),
+        input_schema: obj(
+            json!({
+                "item_index": { "type": "integer" },
+                "envelope_index": { "type": "integer" },
+                "point_index": { "type": "integer" },
+                "take_index": { "type": "integer", "description": "0-based; omit for the active take" }
+            }),
+            json!(["item_index", "envelope_index", "point_index"]),
         ),
     });
     defs.push(ToolDef {
@@ -2290,6 +2421,38 @@ mod definition_tests {
                 defs.iter().any(|d| d.name == name),
                 "{name} must be advertised"
             );
+        }
+    }
+
+    #[test]
+    fn take_envelope_and_fx_tools_advertised_and_gated() {
+        use serde_json::json;
+        let defs = super::definitions(false, false);
+        for name in [
+            "get_take_envelopes",
+            "get_take_envelope_points",
+            "create_take_envelope",
+            "insert_take_envelope_point",
+            "set_take_envelope_point",
+            "delete_take_envelope_point",
+            "add_take_fx",
+            "set_take_fx_param",
+        ] {
+            assert!(defs.iter().any(|d| d.name == name), "{name} must be advertised");
+        }
+        // Everything that writes is confirmation-gated; the reads are not.
+        for gated in [
+            "create_take_envelope",
+            "insert_take_envelope_point",
+            "set_take_envelope_point",
+            "delete_take_envelope_point",
+            "add_take_fx",
+            "set_take_fx_param",
+        ] {
+            assert!(super::preview(gated, &json!({})).is_some(), "{gated} must be gated");
+        }
+        for read in ["get_take_envelopes", "get_take_envelope_points"] {
+            assert!(super::preview(read, &json!({})).is_none(), "{read} is a read");
         }
     }
 
@@ -2900,6 +3063,18 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             req_u32(input, "track_index")?,
             req_u32(input, "envelope_index")?,
         ),
+        "get_take_envelopes" => get_take_envelopes(
+            reaper,
+            req_u32(input, "item_index")?,
+            opt_u32(input, "take_index"),
+        ),
+        "get_take_envelope_points" => get_take_envelope_points(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "envelope_index")?,
+            opt_u32(input, "take_index"),
+            opt_usize(input, "limit").unwrap_or(DEFAULT_LIMIT),
+        ),
         "insert_envelope_point" => insert_envelope_point(
             reaper,
             req_u32(input, "track_index")?,
@@ -2943,6 +3118,35 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_u32(input, "track_index")?,
             req_u32(input, "envelope_index")?,
+        ),
+        "create_take_envelope" => {
+            create_take_envelope(reaper, req_u32(input, "item_index")?, req_str(input, "kind")?)
+        }
+        "insert_take_envelope_point" => insert_take_envelope_point(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "envelope_index")?,
+            opt_u32(input, "take_index"),
+            req_f64(input, "time")?,
+            req_f64(input, "value")?,
+            input.get("shape").and_then(|v| v.as_i64()).unwrap_or(0) as c_int,
+        ),
+        "set_take_envelope_point" => set_take_envelope_point(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "envelope_index")?,
+            opt_u32(input, "take_index"),
+            req_u32(input, "point_index")?,
+            input.get("time").and_then(|v| v.as_f64()),
+            input.get("value").and_then(|v| v.as_f64()),
+            input.get("shape").and_then(|v| v.as_i64()).map(|s| s as c_int),
+        ),
+        "delete_take_envelope_point" => delete_take_envelope_point(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "envelope_index")?,
+            opt_u32(input, "take_index"),
+            req_u32(input, "point_index")?,
         ),
         "create_send_envelope" => create_send_envelope(
             reaper,
@@ -3005,6 +3209,20 @@ fn dispatch(reaper: &Reaper<MainThreadScope>, name: &str, input: &Value) -> Resu
             reaper,
             req_u32(input, "item_index")?,
             req_u32(input, "fx_index")?,
+            opt_u32(input, "take_index"),
+        ),
+        "add_take_fx" => add_take_fx(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_str(input, "fx_name")?,
+            opt_u32(input, "take_index"),
+        ),
+        "set_take_fx_param" => set_take_fx_param(
+            reaper,
+            req_u32(input, "item_index")?,
+            req_u32(input, "fx_index")?,
+            req_u32(input, "param_index")?,
+            req_f64(input, "value")?,
             opt_u32(input, "take_index"),
         ),
         "create_empty_item" => create_empty_item(
@@ -3505,6 +3723,30 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             show("envelope_index"),
             show("track_index"),
         )),
+        "create_take_envelope" => Some(format!(
+            "Create the take {} envelope on item {}",
+            show("kind"),
+            show("item_index"),
+        )),
+        "insert_take_envelope_point" => Some(format!(
+            "Insert a point on item {} take envelope {} at item time {} = {}",
+            show("item_index"),
+            show("envelope_index"),
+            show("time"),
+            show("value"),
+        )),
+        "set_take_envelope_point" => Some(format!(
+            "Edit point {} of take envelope {} on item {}",
+            show("point_index"),
+            show("envelope_index"),
+            show("item_index"),
+        )),
+        "delete_take_envelope_point" => Some(format!(
+            "Delete point {} of take envelope {} on item {}",
+            show("point_index"),
+            show("envelope_index"),
+            show("item_index"),
+        )),
         "create_send_envelope" => Some(format!(
             "Create the {} envelope for {} {} on track {}",
             show("kind"),
@@ -3522,6 +3764,22 @@ pub fn preview(name: &str, input: &Value) -> Option<String> {
             "Remove take FX {} from item {}",
             show("fx_index"),
             show("item_index"),
+        )),
+        "add_take_fx" => Some(format!(
+            "Add FX {} to item {}'s take",
+            input
+                .get("fx_name")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "?".into()),
+            show("item_index"),
+        )),
+        "set_take_fx_param" => Some(format!(
+            "Set item {} take FX {} parameter {} to {} (normalized 0..1)",
+            show("item_index"),
+            show("fx_index"),
+            show("param_index"),
+            show("value"),
         )),
         "create_empty_item" => Some(format!(
             "Create an empty item on track {} at {} s ({} s long)",
@@ -5688,6 +5946,70 @@ fn remove_take_fx(
     }
 }
 
+fn add_take_fx(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    fx_name: &str,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, take_index)?;
+    let name_c = CString::new(fx_name).map_err(|_| "bad FX name".to_string())?;
+    reaper.undo_begin_block_2(project);
+    // -1 = always create a new instance (the take-side spelling of
+    // AddFxBehavior::AlwaysAdd, which add_fx uses on tracks).
+    let fx_index = unsafe { reaper.low().TakeFX_AddByName(take.as_ptr(), name_c.as_ptr(), -1) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: add take FX \"{fx_name}\" to item {item_index}"),
+        UndoScope::All,
+    );
+    if fx_index >= 0 {
+        Ok(json!({
+            "added": true, "item_index": item_index, "fx_index": fx_index, "name": fx_name
+        }))
+    } else {
+        Err(format!("could not add FX \"{fx_name}\" (name not found?)"))
+    }
+}
+
+fn set_take_fx_param(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    fx_index: u32,
+    param_index: u32,
+    value: f64,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, take_index)?;
+    let t = take.as_ptr();
+    let low = reaper.low();
+    let (fx, param) = (fx_index as c_int, param_index as c_int);
+    let v = value.clamp(0.0, 1.0);
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.TakeFX_SetParamNormalized(t, fx, param, v) };
+    let display = read_string(NAME_BUF as usize, |b, sz| unsafe {
+        low.TakeFX_GetFormattedParamValue(t, fx, param, b, sz)
+    })
+    .unwrap_or_default();
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: set item {item_index} take FX {fx_index} param {param_index} to {v:.4}"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({
+            "set": true, "item_index": item_index, "fx_index": fx_index,
+            "param_index": param_index, "normalized": v, "display_value": display
+        }))
+    } else {
+        Err("failed to set parameter (bad fx/param index?)".to_string())
+    }
+}
+
 // ---- FX presets -------------------------------------------------------------
 // REAPER can LOAD presets (by name, index, or next/previous) and read the current
 // one, but exposes NO API to SAVE a new preset — that stays a manual FX-window
@@ -6278,6 +6600,292 @@ fn clear_envelope(
         UndoScope::All,
     );
     Ok(json!({ "cleared": ok, "track_index": track_index, "envelope_index": envelope_index }))
+}
+
+// ---- take envelopes ---------------------------------------------------------
+// Take envelopes reuse the TrackEnvelope handle type, so every point call below
+// is shared with the track-envelope tools; only resolution differs. Point times
+// are relative to the item start and scaled by the take's playrate (project time
+// = item position + time / playrate) — surfaced in every tool description so the
+// model never mistakes them for project seconds.
+
+/// Resolve (item, take, envelope index) to a take envelope handle.
+fn take_envelope_at(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    take_index: Option<u32>,
+    envelope_index: u32,
+) -> Result<*mut reaper_low::raw::TrackEnvelope, String> {
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, take_index)?;
+    let env = unsafe { reaper.low().GetTakeEnvelope(take.as_ptr(), envelope_index as c_int) };
+    if env.is_null() {
+        return Err(format!(
+            "no take envelope at index {envelope_index} (get_take_envelopes lists them; \
+             create_take_envelope makes one)"
+        ));
+    }
+    Ok(env)
+}
+
+fn take_envelope_index_of(
+    low: &reaper_low::Reaper,
+    take: MediaItemTake,
+    env: *mut reaper_low::raw::TrackEnvelope,
+) -> Option<u32> {
+    if env.is_null() {
+        return None;
+    }
+    let count = unsafe { low.CountTakeEnvelopes(take.as_ptr()) };
+    (0..count)
+        .find(|&i| unsafe { low.GetTakeEnvelope(take.as_ptr(), i) } == env)
+        .map(|i| i as u32)
+}
+
+fn get_take_envelopes(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    take_index: Option<u32>,
+) -> Result<Value, String> {
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, take_index)?;
+    let low = reaper.low();
+    let tp = take.as_ptr();
+    let count = unsafe { low.CountTakeEnvelopes(tp) };
+    let mut envs = Vec::new();
+    for i in 0..count {
+        let env = unsafe { low.GetTakeEnvelope(tp, i) };
+        if env.is_null() {
+            continue;
+        }
+        let name = read_string(NAME_BUF as usize, |b, sz| unsafe {
+            low.GetEnvelopeName(env, b, sz)
+        })
+        .unwrap_or_default();
+        envs.push(json!({
+            "index": i,
+            "name": name,
+            "point_count": unsafe { low.CountEnvelopePoints(env) },
+        }));
+    }
+    Ok(json!({ "item_index": item_index, "envelopes": envs }))
+}
+
+fn get_take_envelope_points(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    envelope_index: u32,
+    take_index: Option<u32>,
+    limit: usize,
+) -> Result<Value, String> {
+    let env = take_envelope_at(reaper, item_index, take_index, envelope_index)?;
+    let low = reaper.low();
+    let count = unsafe { low.CountEnvelopePoints(env) };
+    let cap = (limit as c_int).min(count);
+    let mut points = Vec::new();
+    for i in 0..cap {
+        let mut time = 0.0f64;
+        let mut value = 0.0f64;
+        let mut shape: c_int = 0;
+        let mut tension = 0.0f64;
+        let mut selected = false;
+        let ok = unsafe {
+            low.GetEnvelopePoint(
+                env,
+                i,
+                &mut time,
+                &mut value,
+                &mut shape,
+                &mut tension,
+                &mut selected,
+            )
+        };
+        if !ok {
+            continue;
+        }
+        points.push(json!({
+            "index": i, "time": time, "value": value,
+            "shape": shape, "tension": tension, "selected": selected
+        }));
+    }
+    Ok(json!({
+        "item_index": item_index,
+        "envelope_index": envelope_index,
+        "point_count": count,
+        "truncated": count > cap,
+        "points": points,
+    }))
+}
+
+fn create_take_envelope(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    kind: &str,
+) -> Result<Value, String> {
+    // Built-in envelope name (for GetTakeEnvelopeByName) + the "toggle visible"
+    // action that creates it. The actions operate on the ACTIVE take of the
+    // selected items, which is why this tool has no take_index: REAPER's API has
+    // no per-take creation call.
+    let (name, action): (&str, c_int) = match kind {
+        "volume" => ("Volume", 40693),
+        "pan" => ("Pan", 40694),
+        "mute" => ("Mute", 40695),
+        "pitch" => ("Pitch", 41612),
+        other => {
+            return Err(format!(
+                "unknown take envelope kind '{other}' (use volume, pan, mute, or pitch)"
+            ))
+        }
+    };
+    let project = ProjectContext::CurrentProject;
+    let item = item_at(reaper, item_index)?;
+    let take = resolve_take(reaper, item, None)?;
+    let low = reaper.low();
+    let name_c = CString::new(name).map_err(|_| "bad envelope name".to_string())?;
+
+    // Already exists? Return it — never toggle (that would HIDE a visible one).
+    let existing = unsafe { low.GetTakeEnvelopeByName(take.as_ptr(), name_c.as_ptr()) };
+    if !existing.is_null() {
+        return Ok(json!({
+            "created": false,
+            "already_existed": true,
+            "item_index": item_index,
+            "kind": kind,
+            "envelope_index": take_envelope_index_of(low, take, existing),
+        }));
+    }
+
+    // Create via the toggle-visible action (operates on the selected items);
+    // restore the prior item selection afterwards, mirroring create_track_envelope.
+    let prior = selected_item_set(reaper);
+    reaper.undo_begin_block_2(project);
+    unsafe { low.SelectAllMediaItems(CUR_PROJ, false) };
+    unsafe { low.SetMediaItemSelected(item.as_ptr(), true) };
+    low.Main_OnCommand(action, 0);
+    for i in 0..reaper.count_media_items(project) {
+        if let Some(it) = reaper.get_media_item(project, i) {
+            unsafe { low.SetMediaItemSelected(it.as_ptr(), prior.contains(&it)) };
+        }
+    }
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: create take {name} envelope on item {item_index}"),
+        UndoScope::All,
+    );
+    let env = unsafe { low.GetTakeEnvelopeByName(take.as_ptr(), name_c.as_ptr()) };
+    Ok(json!({
+        "created": !env.is_null(),
+        "item_index": item_index,
+        "kind": kind,
+        "envelope_index": take_envelope_index_of(low, take, env),
+    }))
+}
+
+fn insert_take_envelope_point(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    envelope_index: u32,
+    take_index: Option<u32>,
+    time: f64,
+    value: f64,
+    shape: c_int,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let env = take_envelope_at(reaper, item_index, take_index, envelope_index)?;
+    let low = reaper.low();
+    let mut no_sort = false;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.InsertEnvelopePoint(env, time, value, shape, 0.0, false, &mut no_sort) };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: insert take envelope point (item {item_index} env {envelope_index})"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({
+            "inserted": true, "item_index": item_index, "envelope_index": envelope_index,
+            "time": time, "value": value
+        }))
+    } else {
+        Err("could not insert point".to_string())
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // a flat point-edit parameter list, mirroring set_envelope_point
+fn set_take_envelope_point(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    envelope_index: u32,
+    take_index: Option<u32>,
+    point_index: u32,
+    time: Option<f64>,
+    value: Option<f64>,
+    shape: Option<c_int>,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let env = take_envelope_at(reaper, item_index, take_index, envelope_index)?;
+    let low = reaper.low();
+    // SetEnvelopePointEx: a null in-pointer leaves that field unchanged.
+    let mut t = time.unwrap_or(0.0);
+    let mut v = value.unwrap_or(0.0);
+    let mut sh = shape.unwrap_or(0);
+    let time_ptr = if time.is_some() { &mut t as *mut f64 } else { std::ptr::null_mut() };
+    let value_ptr = if value.is_some() { &mut v as *mut f64 } else { std::ptr::null_mut() };
+    let shape_ptr = if shape.is_some() { &mut sh as *mut c_int } else { std::ptr::null_mut() };
+    let mut no_sort = false;
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe {
+        low.SetEnvelopePointEx(
+            env,
+            -1,
+            point_index as c_int,
+            time_ptr,
+            value_ptr,
+            shape_ptr,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut no_sort,
+        )
+    };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!(
+            "AI: edit take envelope point {point_index} (item {item_index} env {envelope_index})"
+        ),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "updated": true, "point_index": point_index }))
+    } else {
+        Err(format!("no point at index {point_index}"))
+    }
+}
+
+fn delete_take_envelope_point(
+    reaper: &Reaper<MainThreadScope>,
+    item_index: u32,
+    envelope_index: u32,
+    take_index: Option<u32>,
+    point_index: u32,
+) -> Result<Value, String> {
+    let project = ProjectContext::CurrentProject;
+    let env = take_envelope_at(reaper, item_index, take_index, envelope_index)?;
+    let low = reaper.low();
+    reaper.undo_begin_block_2(project);
+    let ok = unsafe { low.DeleteEnvelopePointEx(env, -1, point_index as c_int) };
+    unsafe { low.Envelope_SortPoints(env) };
+    reaper.undo_end_block_2(
+        project,
+        format!("AI: delete take envelope point {point_index}"),
+        UndoScope::All,
+    );
+    if ok {
+        Ok(json!({ "deleted": true, "point_index": point_index }))
+    } else {
+        Err(format!("no point at index {point_index}"))
+    }
 }
 
 /// Line indices of every top-level `AUXRECV` (a receive) in a single track's
