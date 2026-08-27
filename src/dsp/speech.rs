@@ -759,8 +759,30 @@ impl SpeechAnalysis {
         // Earliest surviving run on the left, latest on the right — at RUN
         // granularity, where the preference is meaningful, rather than at frame
         // granularity, where it just picks whatever touches the neighbouring speech.
-        let lrun = left.first().map(|&(a, b)| (self.time_of(a), self.time_of(b)));
-        let rrun = right.last().map(|&(a, b)| (self.time_of(a), self.time_of(b)));
+        // Same correction as word_extent, and this is the path the CUT takes: where a
+        // word begins with friction there is no pause before it, only the dip AFTER
+        // the friction, which lies inside the word. Cutting at that dip leaves the
+        // "sch" of "Schoss" attached to the word before. A zero-width run, because
+        // there genuinely is no silence here for the allocation below to hand out.
+        let near = self.syllable_period * 0.5;
+        let lrun = left.first().map(|&(a, b)| {
+            match self
+                .friction_onset(a_prev, first_in, (a, b))
+                .filter(|&t| t >= hint.0 - near)
+            {
+                Some(t) => (t, t),
+                None => (self.time_of(a), self.time_of(b)),
+            }
+        });
+        let rrun = right.last().map(|&(a, b)| {
+            match self
+                .friction_onset(last_in, a_next, (a, b))
+                .filter(|&t| t <= hint.1 + near)
+            {
+                Some(t) => (t, t),
+                None => (self.time_of(a), self.time_of(b)),
+            }
+        });
         // Each side falls back to the removed word's own edge when unmeasurable, so
         // the allocation below still has a sane span to work with.
         let (lt0, lt1) = lrun.unwrap_or((first_in, first_in));
@@ -1796,6 +1818,35 @@ mod real_audio {
                         lo.unwrap()
                     );
                 }
+            }
+        }
+    }
+
+    /// What the CUT would do when a fricative-initial word is deleted.
+    #[test]
+    fn real_cut_placement() {
+        let Some(a) = load() else { return };
+        // (label, prev kept, removed, next kept)
+        let cases: [(&str, (f64, f64), (f64, f64), (f64, f64)); 2] = [
+            ("delete Schoss (/sch/ onset)", (7.983, 8.143), (8.183, 8.463), (8.823, 8.903)),
+            ("delete dabei (/d/ onset)", (4.822, 5.182), (5.222, 5.422), (5.502, 5.922)),
+        ];
+        for (name, prev, rem, next) in cases {
+            let (ap, an) = a.anchors(Some(prev), rem, Some(next));
+            match (ap, an) {
+                (Some(x), Some(y)) => {
+                    match a.place_removal(x, y, rem, (Some(prev.1), Some(next.0))) {
+                        Ok(p) => eprintln!(
+                            "CUT {name:32} transcript {:.3}-{:.3}  cut {:?}-{:?}",
+                            rem.0,
+                            rem.1,
+                            p.start.map(|t| (t * 1000.0).round() / 1000.0),
+                            p.end.map(|t| (t * 1000.0).round() / 1000.0)
+                        ),
+                        Err(e) => eprintln!("CUT {name:32} declined: {e:?}"),
+                    }
+                }
+                _ => eprintln!("CUT {name:32} unanchorable"),
             }
         }
     }
