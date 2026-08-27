@@ -12,6 +12,18 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
+- **Cut-by-text: word boundaries land on the right side of fricatives.** Cuts and
+  editor snippets used to split words at the quietest moment near the junction,
+  which is the wrong place whenever a fricative is involved: a word-initial "sch"
+  stayed glued to the word before ("ihren Schoss" played "ihrensch | oss"), a
+  word-final /s/ was handed to the word after ("bist du" played "bis | sdu"), and
+  a sustained fricative with no pause around it was itself mistaken for the pause
+  and split down the middle ("zaertlich ueber" played "zaertli | chueber"). The
+  analysis now finds the voicing-to-friction transition and decides which word the
+  friction belongs to before placing the boundary — measured against the source
+  recording of a real 271-second take at every step, with a labelled set of
+  fourteen junctions holding as regression tests.
+
 - **Take envelopes.** The assistant can now read and edit the automation lanes
   drawn on an item's take: `get_take_envelopes` / `get_take_envelope_points` list
   them, `create_take_envelope` makes a volume, pan, mute, or pitch lane (returning

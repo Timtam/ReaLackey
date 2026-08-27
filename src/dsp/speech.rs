@@ -429,14 +429,26 @@ impl SpeechAnalysis {
     ) -> Option<f64> {
         let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
         let need = ((0.040 / self.hop).round() as usize).max(2);
-        // A run this long IS a pause, and the boundary belongs inside it. Only where
-        // there is no real pause does the friction have to carry the boundary --
-        // "Kopf. Sie" has a 190 ms silence and its /f/ runs right into it, so
-        // contiguity alone would drag "Sie" back into "Kopf".
-        if run.1 - run.0 >= need {
+        let tilt = |k: usize| (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb);
+        // quiet_runs measures relative FLATNESS, not silence -- and a sustained
+        // fricative is the flattest thing in a junction with no pause, so the "run"
+        // is sometimes the fricative itself: Fell's /f/ read as a 13-frame "pause"
+        // at level 29 dB, "zaertlich"'s /ch/ as 6 frames at 29.3 dB, and treating
+        // them as pauses parked the boundary inside the consonant ("weichef | ell",
+        // "zaertli | chueber"). A real pause is flat AND QUIET; friction is flat,
+        // loud, and high-band dominant. Measured: real pauses here average 2-11 dB
+        // above floor, friction-as-run 29 dB, against a speech contrast of ~30.
+        let frames = (run.1 - run.0 + 1) as f64;
+        let run_level = (run.0..=run.1).map(|k| self.level(k)).sum::<f64>() / frames;
+        let run_tilt = (run.0..=run.1).map(&tilt).sum::<f64>() / frames;
+        let loud = 0.5 * self.contrast_bb.max(self.contrast_vb).max(self.contrast_hf);
+        let run_is_friction = run_level > loud && run_tilt > 0.0;
+        // A LONG run that is not friction is a real pause, and the boundary belongs
+        // inside it -- "Kopf. Sie" has a 190 ms silence and its /f/ runs right into
+        // it, so contiguity alone would drag "Sie" back into "Kopf".
+        if run.1 - run.0 >= need && !run_is_friction {
             return None;
         }
-        let tilt = |k: usize| (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb);
         // Friction contiguous BEFORE the run. Friction that stops short of the dip
         // is a coda with a real boundary after it, handled by the run itself.
         let mut k = hi.min(run.0);
@@ -444,11 +456,15 @@ impl SpeechAnalysis {
         while k > stop && tilt(k - 1) > 0.0 {
             k -= 1;
         }
-        if hi.min(run.0).saturating_sub(k) < need || k <= stop {
+        // The run's own frames count toward the friction when they ARE the friction
+        // (Fell: 1 frame before the run + the 13-frame /f/-as-run).
+        let flen = hi.min(run.0).saturating_sub(k)
+            + if run_is_friction { run.1 - run.0 } else { 0 };
+        if flen < need || k <= stop {
             return None; // no meaningful friction, or its onset predates the window
         }
         let onset = self.time_of(k);
-        let near = self.syllable_period * 0.5;
+        let near = self.syllable_period * 0.75;
         // ONE discriminator for both edges: word-initial friction reaches past the
         // transcript start of the word it begins ("Schoss": friction ends 8.240,
         // word starts 8.183; "Stimmen": ~87.71 vs 87.698), while a coda ends short
@@ -457,7 +473,11 @@ impl SpeechAnalysis {
         // friction STARTS relative to this word's transcript end instead, and the
         // margin does not exist: "die Stimmen"'s onset began 58 ms before a
         // drifted "die" end, "das"'s coda 62 ms before its own.
-        if self.time_of(run.0) > junction {
+        // Ownership: does the friction reach past the junction? Judged at the far
+        // side of the RUN, not any forward walk -- a bright voiced onset ("graue")
+        // keeps the tilt positive well into the next word and would drag the far
+        // side over the junction for true codas too.
+        if self.time_of(run.1) > junction {
             // Word-initial: the word begins where its friction does. The onset must
             // START no later than the junction — every genuine onset measured begins
             // 26-82 ms before its word's transcript start, while friction starting
@@ -468,8 +488,19 @@ impl SpeechAnalysis {
                 .then_some(onset);
         }
         if !place_after_coda {
-            // A coda stays with its word; the run's start is the dip after it.
-            return None;
+            if !run_is_friction {
+                // A coda stays with its word; the run's start is the dip after it.
+                return None;
+            }
+            // The "run" IS the coda friction ("zaertlich": the /ch/), so the dip
+            // never existed and falling back to the run start would cut the word
+            // before its own consonant. End after the friction instead, capped at
+            // the junction.
+            let mut f = run.1;
+            while f < hi && tilt(f + 1) > 0.0 {
+                f += 1;
+            }
+            return Some(self.time_of(run.1).min(junction).max(self.time_of(f).min(junction)));
         }
         // The friction is the PREVIOUS word's coda. Anything contiguous after the
         // run is the tail of the same cluster -- at "bist du" the /t/ release sits
@@ -1780,6 +1811,9 @@ mod real_audio {
             ("CODA graue start~6.34", (6.162, 6.282), (6.342, 6.622), (6.742, 7.002)),
             ("CODA bist end~2.92", (2.401, 2.481), (2.781, 2.941), (2.961, 3.001)),
             ("CODA du start~2.96", (2.781, 2.941), (2.961, 3.001), (3.061, 3.301)),
+            ("FRIC Fell start~7.02", (6.742, 7.002), (7.102, 7.322), (7.422, 7.522)),
+            ("FRIC zaertlich end~5.93", (5.222, 5.422), (5.502, 5.922), (5.982, 6.122)),
+            ("FRIC ueber start~5.94", (5.502, 5.922), (5.982, 6.122), (6.162, 6.282)),
             ("GOOD streichelt|dabei", (4.702, 4.782), (4.822, 5.182), (5.222, 5.422)),
             ("GOOD schon|seit", (107.486, 107.606), (107.606, 107.746), (107.786, 107.946)),
         ];
@@ -1925,7 +1959,7 @@ mod real_audio {
             a.hop, a.floor_bb, a.floor_hf, a.floor_vb, a.contrast_bb, a.contrast_hf, a.contrast_vb
         );
         for (name, from, to) in [
-            ("das|graue   (coda /s/ stolen?)", 6.20, 6.45),
+            ("zaertlich|ueber (/ch/ coda)", 5.80, 6.06),
             ("bist|du     (coda /st/ stolen?)", 2.83, 3.06),
             ("ihren|Schoss  (BAD, /sch/)", 8.00, 8.40),
             ("streichelt|dabei (GOOD, /d/)", 5.10, 5.30),
