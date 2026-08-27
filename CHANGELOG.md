@@ -12,18 +12,6 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ### Added
 
-- **Cut-by-text: word boundaries land on the right side of fricatives.** Cuts and
-  editor snippets used to split words at the quietest moment near the junction,
-  which is the wrong place whenever a fricative is involved: a word-initial "sch"
-  stayed glued to the word before ("ihren Schoss" played "ihrensch | oss"), a
-  word-final /s/ was handed to the word after ("bist du" played "bis | sdu"), and
-  a sustained fricative with no pause around it was itself mistaken for the pause
-  and split down the middle ("zaertlich ueber" played "zaertli | chueber"). The
-  analysis now finds the voicing-to-friction transition and decides which word the
-  friction belongs to before placing the boundary — measured against the source
-  recording of a real 271-second take at every step, with a labelled set of
-  fourteen junctions holding as regression tests.
-
 - **Take envelopes.** The assistant can now read and edit the automation lanes
   drawn on an item's take: `get_take_envelopes` / `get_take_envelope_points` list
   them, `create_take_envelope` makes a volume, pan, mute, or pitch lane (returning
@@ -132,19 +120,6 @@ into a versioned heading and attaches its entries to the GitHub release — see
   during thinking it shows "Reasoning…".)
 
 ### Fixed
-
-- **Cut-by-text: the first and last word of every clip are measurable again.** Word
-  boundaries are derived from the neighbouring words' syllabic nuclei, and word 0 has
-  no previous word (nor word N-1 a next one) — so both were falling back to raw
-  transcript times for no acoustic reason. More generally, a missing anchor on one
-  side no longer discards a perfectly good measurement on the other; the clip's own
-  edge stands in where there is no neighbour.
-- **Cut-by-text: short words are no longer rejected by frame rounding.** The check
-  that a measured boundary contains the word's own nucleus now tolerates half an
-  analysis frame. When a word has no nucleus of its own the check runs against the
-  transcript time, which does not sit on the frame grid, so correct measurements were
-  being discarded as if they had run into the neighbouring word — hardest on short
-  words, whose search windows are only a few frames wide.
 
 - **Connections behind antivirus / corporate proxies now work.** ReaLackey trusted
   only its own bundled list of certificate authorities, so on machines where security
