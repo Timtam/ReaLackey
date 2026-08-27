@@ -111,7 +111,7 @@ pub fn word_bounds_explained() -> Vec<Bound> {
     };
     let (clip_a, clip_b) = ctx.analysis.span();
     let bleed = ctx.analysis.syllable_period * NEIGHBOUR_BLEED_SYLLABLES;
-    (0..ctx.words.len())
+    let mut bounds: Vec<Bound> = (0..ctx.words.len())
         .map(|i| {
             let w = &ctx.words[i];
             let prev = i.checked_sub(1).and_then(|j| ctx.words.get(j)).map(|p| (p.start, p.end));
@@ -160,7 +160,23 @@ pub fn word_bounds_explained() -> Vec<Bound> {
                 ),
             }
         })
-        .collect()
+        .collect();
+    // The two sides of a junction are measured INDEPENDENTLY (word i's end edge,
+    // word i+1's start edge), and at a handful of junctions with no acoustic cue
+    // between two fused consonants they disagree by 20-80 ms. Auditioning both
+    // sides of that disagreement plays the blend twice, so adjacent overlaps are
+    // reconciled to their midpoint HERE, at the consumer -- the measurement, the
+    // report and its overlap health metric stay raw.
+    for i in 1..bounds.len() {
+        let (a, b) = bounds.split_at_mut(i);
+        let (prev, next) = (a.last_mut().unwrap(), b.first_mut().unwrap());
+        if next.start < prev.end {
+            let mid = (0.5 * (next.start + prev.end)).max(prev.start).min(next.end);
+            prev.end = mid;
+            next.start = mid;
+        }
+    }
+    bounds
 }
 
 /// A whole-clip diagnostic: every word with its transcript times, its MEASURED

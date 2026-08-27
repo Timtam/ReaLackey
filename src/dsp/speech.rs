@@ -449,19 +449,49 @@ impl SpeechAnalysis {
         if run.1 - run.0 >= need && !run_is_friction {
             return None;
         }
+        // A friction FRAME is tilt-positive AND loud. The level test is not
+        // optional: silence on real recordings can carry positive tilt (the
+        // high-band noise floor sits relatively above the voice bar's — measured
+        // +13..+17 dB in the dead pause before "fragt"), and a walk on tilt alone
+        // marched through entire pauses, extending "Sattelrobbe." 430 ms to the
+        // brink of the next word.
+        let fric = |k: usize| tilt(k) > 0.0 && self.level(k) > loud;
         // Friction contiguous BEFORE the run. Friction that stops short of the dip
         // is a coda with a real boundary after it, handled by the run itself.
         let mut k = hi.min(run.0);
         let stop = lo + 1;
-        while k > stop && tilt(k - 1) > 0.0 {
+        while k > stop && fric(k - 1) {
             k -= 1;
         }
+        // Friction contiguous AFTER the run: a stop release. "fragt Irmgard" has a
+        // 30 ms /kt/ closure dip followed by a 50-60 ms aspirated release and NO
+        // friction before the dip -- the release is as real as any pre-run friction
+        // and used to be invisible here, so Irmgard's start fell back to the run and
+        // captured it ("tirmgart").
+        let mut f = run.1;
+        while f < hi && fric(f + 1) {
+            f += 1;
+        }
+        // First frame AFTER all friction on the run's far side. One past the last
+        // friction frame, not the frame itself: a boundary placed ON it hands 10 ms
+        // of the consonant to the wrong word ("zaertlich"'s /ch/ tail played at the
+        // start of "ueber").
+        let after = if f > run.1 {
+            f + 1
+        } else if run_is_friction {
+            run.1 + 1
+        } else {
+            run.1
+        };
+        let after_t = self.time_of(after);
         // The run's own frames count toward the friction when they ARE the friction
         // (Fell: 1 frame before the run + the 13-frame /f/-as-run).
-        let flen = hi.min(run.0).saturating_sub(k)
+        let pre_len = hi.min(run.0).saturating_sub(k)
             + if run_is_friction { run.1 - run.0 } else { 0 };
-        if flen < need || k <= stop {
-            return None; // no meaningful friction, or its onset predates the window
+        let has_pre = pre_len >= need && k > stop;
+        let post_len = f.saturating_sub(run.1);
+        if !has_pre && post_len < need && !run_is_friction {
+            return None; // no meaningful friction on either side of the run
         }
         let onset = self.time_of(k);
         let near = self.syllable_period * 0.75;
@@ -477,7 +507,7 @@ impl SpeechAnalysis {
         // side of the RUN, not any forward walk -- a bright voiced onset ("graue")
         // keeps the tilt positive well into the next word and would drag the far
         // side over the junction for true codas too.
-        if self.time_of(run.1) > junction {
+        if has_pre && self.time_of(run.1) > junction {
             // Word-initial: the word begins where its friction does. The onset must
             // START no later than the junction — every genuine onset measured begins
             // 26-82 ms before its word's transcript start, while friction starting
@@ -488,31 +518,47 @@ impl SpeechAnalysis {
                 .then_some(onset);
         }
         if !place_after_coda {
-            if !run_is_friction {
-                // A coda stays with its word; the run's start is the dip after it.
-                return None;
+            // End edge. The word keeps friction on the run's far side only when it
+            // is plainly its own: a coda-as-run ("zaertlich"'s /ch/), or a stop
+            // release that finishes by the next word's start ("fragt"'s /kt/ ends
+            // at 3.88, "Irmgard" starts 3.901). A tail that runs on INTO the next
+            // word is that word's own onset ramp ("graue" after "das") and claiming
+            // it would eat the neighbour -- there the run fallback stands.
+            if run_is_friction && after_t <= junction {
+                // Coda-as-run ("zaertlich"): end after the friction. Only when the
+                // walk finished BEFORE the junction: a marginally bright vowel can
+                // carry the walk deep into the next word ("an," after "freundlich":
+                // tilt +1..+4 at full level), and capping that at the junction
+                // manufactured ends glued to raw transcript times. Past the
+                // junction, the run itself is the honest fallback.
+                return Some(self.time_of(run.1).min(junction).max(after_t));
             }
-            // The "run" IS the coda friction ("zaertlich": the /ch/), so the dip
-            // never existed and falling back to the run start would cut the word
-            // before its own consonant. End after the friction instead, capped at
-            // the junction.
-            let mut f = run.1;
-            while f < hi && tilt(f + 1) > 0.0 {
-                f += 1;
+            if !run_is_friction && f > run.1 && after_t <= junction {
+                // A release that finishes clearly before the next word: keep it.
+                // NOT "within a hop of the junction" — a release ending AT the
+                // junction produces an end snapped to the next word's raw
+                // transcript time, which is no measurement, and the neighbour's
+                // real audio usually starts earlier than its drifted transcript
+                // says ("freundlich" ended at exactly "an,"s transcript start,
+                // 45 ms inside its measured audio).
+                return Some(after_t.max(self.time_of(run.1)));
             }
-            return Some(self.time_of(run.1).min(junction).max(self.time_of(f).min(junction)));
+            // A coda stays with its word; the run's start is the dip after it.
+            return None;
         }
-        // The friction is the PREVIOUS word's coda. Anything contiguous after the
-        // run is the tail of the same cluster -- at "bist du" the /t/ release sits
-        // between the closure dip and the vowel -- and belongs to the neighbour
-        // too, so this word starts after it. Capped at the word's own transcript
-        // start, which is what stops the walk from swallowing a bright voiced
-        // onset ("graue": /r au/ keeps the tilt positive well into the word).
-        let mut f = run.1;
-        while f < hi && tilt(f + 1) > 0.0 {
-            f += 1;
+        // The friction is the PREVIOUS word's coda or release. Anything contiguous
+        // after the run is the tail of the same cluster -- at "bist du" the /t/
+        // release sits between the closure dip and the vowel -- and belongs to the
+        // neighbour too, so this word starts after it. But ONLY when the tail
+        // finishes by the word's own transcript start (the mirror of the end-edge
+        // rule): a tail that runs past it is this word's own onset material -- KI's
+        // aspiration, Webseite's /v/ -- and the earlier version's cap then snapped
+        // the start to the raw transcript time, which is no measurement at all and
+        // planted it under the neighbour's honestly-measured end.
+        if after > run.1 && after_t > junction + self.hop {
+            return None;
         }
-        Some(self.time_of(run.1).max(self.time_of(f).min(junction)))
+        Some(self.time_of(run.1).min(junction).max(after_t.min(junction)))
     }
 
     /// True when no band has enough range to measure anything (a music bed, a very
@@ -1811,6 +1857,10 @@ mod real_audio {
             ("CODA graue start~6.34", (6.162, 6.282), (6.342, 6.622), (6.742, 7.002)),
             ("CODA bist end~2.92", (2.401, 2.481), (2.781, 2.941), (2.961, 3.001)),
             ("CODA du start~2.96", (2.781, 2.941), (2.961, 3.001), (3.061, 3.301)),
+            ("RPT fragt start", (3.061, 3.301), (3.641, 3.881), (3.901, 4.181)),
+            ("RPT Irmgard start", (3.641, 3.881), (3.901, 4.181), (4.201, 4.561)),
+            ("RPT und end", (4.201, 4.561), (4.702, 4.782), (4.822, 5.182)),
+            ("RPT streichelt start", (4.702, 4.782), (4.822, 5.182), (5.222, 5.422)),
             ("FRIC Fell start~7.02", (6.742, 7.002), (7.102, 7.322), (7.422, 7.522)),
             ("FRIC zaertlich end~5.93", (5.222, 5.422), (5.502, 5.922), (5.982, 6.122)),
             ("FRIC ueber start~5.94", (5.502, 5.922), (5.982, 6.122), (6.162, 6.282)),
@@ -1885,7 +1935,7 @@ mod real_audio {
             v.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" | ")
         );
         let neg = bounds.windows(2).filter(|p| p[1].0 < p[0].1).count();
-        eprintln!("overlapping neighbours: {neg}");
+        eprintln!("overlapping neighbours: {neg} (raw; the editor reconciles them to midpoints)");
         for (i, w) in bounds.windows(2).enumerate() {
             if w[1].0 < w[0].1 {
                 eprintln!(
@@ -1959,7 +2009,9 @@ mod real_audio {
             a.hop, a.floor_bb, a.floor_hf, a.floor_vb, a.contrast_bb, a.contrast_hf, a.contrast_vb
         );
         for (name, from, to) in [
-            ("zaertlich|ueber (/ch/ coda)", 5.80, 6.06),
+            ("freundlich|an (/ch/ + vowel)", 14.68, 14.90),
+            ("fragt|Irmgard (/t/ burst)", 3.72, 3.95),
+            ("und|streichelt (/t/+/scht/)", 4.68, 4.95),
             ("bist|du     (coda /st/ stolen?)", 2.83, 3.06),
             ("ihren|Schoss  (BAD, /sch/)", 8.00, 8.40),
             ("streichelt|dabei (GOOD, /d/)", 5.10, 5.30),
