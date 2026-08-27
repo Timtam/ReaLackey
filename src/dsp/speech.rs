@@ -1654,6 +1654,9 @@ mod tests {
 mod real_audio {
     use super::*;
 
+    /// (label, previous word, word under test, next word) — all transcript spans.
+    type Case = (&'static str, (f64, f64), (f64, f64), (f64, f64));
+
     fn load() -> Option<SpeechAnalysis> {
         let path = std::env::var("PARO_WAV").ok()?;
         let bytes = std::fs::read(path).ok()?;
@@ -1721,7 +1724,6 @@ mod real_audio {
     fn real_labelled_junctions() {
         let Some(a) = load() else { return };
         // (label, prev, word, next) — the pair under test is `word`/`next`.
-        type Case = (&'static str, (f64, f64), (f64, f64), (f64, f64));
         let cases: &[Case] = &[
             ("BAD  ihren|Schoss", (7.843, 7.923), (7.983, 8.143), (8.183, 8.463)),
             ("BAD  Senioren|schmiegt", (16.665, 16.746), (16.766, 17.166), (17.186, 17.506)),
