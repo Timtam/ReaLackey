@@ -404,31 +404,84 @@ impl SpeechAnalysis {
     /// that silence, so it is correctly ignored. Friction that begins while the
     /// speaker is still going is a word boundary; friction after a pause is just the
     /// next word starting where the pause already said it would.
-    fn friction_onset(&self, from: f64, to: f64, run: (usize, usize)) -> Option<f64> {
+    /// Boundary at a friction junction, or `None` when the run already answers.
+    ///
+    /// `edge_hint` is this word's transcript edge nearest the junction, and
+    /// `start_edge` says which edge is being placed. Both are needed because
+    /// friction-dip-vowel is the same acoustic shape whether the friction is the
+    /// next word's ONSET ("ihren | Schoss") or the previous word's CODA
+    /// ("das | graue", "bist | du") — and the two need OPPOSITE boundaries: an
+    /// onset starts its word, a coda stays with the word before. The first
+    /// version of this ignored codas and split "das" in the middle of its /s/.
+    ///
+    /// `junction` is the transcript start of the word FOLLOWING the friction —
+    /// this word's own start when placing a start edge, the NEXT word's start
+    /// when placing an end edge. `place_after_coda` is true for start edges,
+    /// where a coda-classified junction still needs a boundary placed after the
+    /// neighbour's consonant cluster; an end edge falls back to the run instead.
+    fn friction_boundary(
+        &self,
+        from: f64,
+        to: f64,
+        run: (usize, usize),
+        junction: f64,
+        place_after_coda: bool,
+    ) -> Option<f64> {
         let (lo, hi) = (self.frame_at(from.min(to)), self.frame_at(from.max(to)));
         let need = ((0.040 / self.hop).round() as usize).max(2);
         // A run this long IS a pause, and the boundary belongs inside it. Only where
-        // there is no real pause does the friction onset have to carry the boundary --
+        // there is no real pause does the friction have to carry the boundary --
         // "Kopf. Sie" has a 190 ms silence and its /f/ runs right into it, so
         // contiguity alone would drag "Sie" back into "Kopf".
         if run.1 - run.0 >= need {
             return None;
         }
-        let before = run.0;
         let tilt = |k: usize| (self.hf[k] - self.floor_hf) - (self.vb[k] - self.floor_vb);
-        // Walk back from the run through CONTIGUOUS friction. Contiguity is what
-        // separates the two cases: at "ihren Schoss" the /sch/ runs right into the dip
-        // with no gap, so the dip is inside the next word; at "Kopf. Sie" the /f/ ends
-        // 90 ms before the pause, so the pause is a real boundary and the /f/ is just
-        // that word's coda. Without this the start edge of every word after a
-        // fricative-final one was dragged back onto the neighbour's coda -- 39 edges
-        // on this recording, all of them "du after bist", "Sie after Kopf", and so on.
-        let mut k = hi.min(before);
+        // Friction contiguous BEFORE the run. Friction that stops short of the dip
+        // is a coda with a real boundary after it, handled by the run itself.
+        let mut k = hi.min(run.0);
         let stop = lo + 1;
         while k > stop && tilt(k - 1) > 0.0 {
             k -= 1;
         }
-        (hi.min(before).saturating_sub(k) >= need && k > stop).then(|| self.time_of(k))
+        if hi.min(run.0).saturating_sub(k) < need || k <= stop {
+            return None; // no meaningful friction, or its onset predates the window
+        }
+        let onset = self.time_of(k);
+        let near = self.syllable_period * 0.5;
+        // ONE discriminator for both edges: word-initial friction reaches past the
+        // transcript start of the word it begins ("Schoss": friction ends 8.240,
+        // word starts 8.183; "Stimmen": ~87.71 vs 87.698), while a coda ends short
+        // of the next word ("das|graue": 6.300 vs 6.342; "bist|du": 2.920 vs
+        // 2.961). An earlier version thresholded the end edge on where the
+        // friction STARTS relative to this word's transcript end instead, and the
+        // margin does not exist: "die Stimmen"'s onset began 58 ms before a
+        // drifted "die" end, "das"'s coda 62 ms before its own.
+        if self.time_of(run.0) > junction {
+            // Word-initial: the word begins where its friction does. The onset must
+            // START no later than the junction — every genuine onset measured begins
+            // 26-82 ms before its word's transcript start, while friction starting
+            // AFTER it is the next word's own interior ("mehr | als": the /s/ inside
+            // "als" at +75 ms; "diese | oft" at +50 ms) and accepting it dragged this
+            // word's end over the top of its neighbour.
+            return (onset >= junction - near && onset <= junction + self.hop)
+                .then_some(onset);
+        }
+        if !place_after_coda {
+            // A coda stays with its word; the run's start is the dip after it.
+            return None;
+        }
+        // The friction is the PREVIOUS word's coda. Anything contiguous after the
+        // run is the tail of the same cluster -- at "bist du" the /t/ release sits
+        // between the closure dip and the vowel -- and belongs to the neighbour
+        // too, so this word starts after it. Capped at the word's own transcript
+        // start, which is what stops the walk from swallowing a bright voiced
+        // onset ("graue": /r au/ keeps the tilt positive well into the word).
+        let mut f = run.1;
+        while f < hi && tilt(f + 1) > 0.0 {
+            f += 1;
+        }
+        Some(self.time_of(run.1).max(self.time_of(f).min(junction)))
     }
 
     /// True when no band has enough range to measure anything (a music bed, a very
@@ -576,6 +629,10 @@ impl SpeechAnalysis {
         a_prev: f64,
         a_next: f64,
         hint: (f64, f64),
+        // The NEXT word's transcript start, when known: it is the junction the end
+        // edge's friction decision needs. Without it, friction there is left to
+        // the run (the conservative pre-friction behaviour).
+        next_start: Option<f64>,
     ) -> (Edge, Edge) {
         if self.bands_unusable() {
             let e = Edge::fail(EdgeCause::BandsUnusable);
@@ -610,22 +667,15 @@ impl SpeechAnalysis {
         let lrun = self.quiet_runs(a_prev, first_in).last().copied();
         let rrun = self.quiet_runs(last_in, a_next).first().copied();
         // Friction that starts while the speaker is still voicing marks the boundary;
-        // the amplitude dip after it belongs to the next word, not between them.
-        // Friction, a dip, then a vowel is the same acoustic shape whether the
-        // friction is the next word's ONSET ("ihren | Schoss") or this word's CODA
-        // ("bist | du"). Energy cannot tell them apart, but the transcript can, and it
-        // is only ever asked to arbitrate between two candidates that are both real.
-        // Out of range, the RUN still stands -- falling back to the transcript instead
-        // would throw away 22 perfectly good edges on this recording.
-        let near = self.syllable_period * 0.5;
+        // the amplitude dip after it belongs to a word, not between two. Which word
+        // is friction_boundary's decision.
         let raw_start = lrun.map(|(a, b)| {
-            self.friction_onset(a_prev, first_in, (a, b))
-                .filter(|&t| t >= hint.0 - near)
+            self.friction_boundary(a_prev, first_in, (a, b), hint.0, true)
                 .unwrap_or(self.time_of(b))
         });
         let raw_end = rrun.map(|(a, b)| {
-            self.friction_onset(last_in, a_next, (a, b))
-                .filter(|&t| t <= hint.1 + near)
+            next_start
+                .and_then(|ns| self.friction_boundary(last_in, a_next, (a, b), ns, false))
                 .unwrap_or(self.time_of(a))
         });
         let llen = lrun.map_or(-1.0, |(a, b)| (b - a) as f64);
@@ -764,20 +814,16 @@ impl SpeechAnalysis {
         // the friction, which lies inside the word. Cutting at that dip leaves the
         // "sch" of "Schoss" attached to the word before. A zero-width run, because
         // there genuinely is no silence here for the allocation below to hand out.
-        let near = self.syllable_period * 0.5;
         let lrun = left.first().map(|&(a, b)| {
-            match self
-                .friction_onset(a_prev, first_in, (a, b))
-                .filter(|&t| t >= hint.0 - near)
-            {
+            match self.friction_boundary(a_prev, first_in, (a, b), hint.0, true) {
                 Some(t) => (t, t),
                 None => (self.time_of(a), self.time_of(b)),
             }
         });
         let rrun = right.last().map(|&(a, b)| {
-            match self
-                .friction_onset(last_in, a_next, (a, b))
-                .filter(|&t| t <= hint.1 + near)
+            match neighbours
+                .1
+                .and_then(|ns| self.friction_boundary(last_in, a_next, (a, b), ns, false))
             {
                 Some(t) => (t, t),
                 None => (self.time_of(a), self.time_of(b)),
@@ -1106,13 +1152,13 @@ mod tests {
             .vowel(0.20, 140.0, 0.5) // next word
             .quiet(0.30);
         let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
-        let (o, f) = a.word_extent(0.40, 1.10, (0.65, 0.85));
+        let (o, f) = a.word_extent(0.40, 1.10, (0.65, 0.85), None);
         assert_eq!(o.cause, EdgeCause::Measured, "left edge: {o:?}");
         assert_eq!(f.cause, EdgeCause::Measured, "right edge: {f:?}");
         assert!(o.time.unwrap() < f.time.unwrap());
 
         // Degenerate anchors must name themselves, not masquerade as a measurement.
-        let (o, f) = a.word_extent(1.0, 0.5, (0.65, 0.85));
+        let (o, f) = a.word_extent(1.0, 0.5, (0.65, 0.85), None);
         assert_eq!(o.cause, EdgeCause::NoAnchor);
         assert_eq!(f.cause, EdgeCause::NoAnchor);
         assert!(o.time.is_none() && f.time.is_none());
@@ -1137,7 +1183,7 @@ mod tests {
         // flip an edge from measured to rejected.
         for k in 0..10 {
             let d = k as f64 * a.hop() / 10.0;
-            let (o, f) = a.word_extent(0.40, 1.10, (0.65 + d, 0.85 + d));
+            let (o, f) = a.word_extent(0.40, 1.10, (0.65 + d, 0.85 + d), None);
             assert_ne!(o.cause, EdgeCause::ContainmentReject, "offset {d:.4}: {o:?}");
             assert_ne!(f.cause, EdgeCause::ContainmentReject, "offset {d:.4}: {f:?}");
         }
@@ -1164,7 +1210,7 @@ mod tests {
             .vowel(0.20, 140.0, 0.6)
             .quiet(0.30);
         let a = SpeechAnalysis::new(&syn.s, SR).expect("analysable");
-        let (o, f) = a.word_extent(0.55, 1.00, (0.72, 0.82));
+        let (o, f) = a.word_extent(0.55, 1.00, (0.72, 0.82), None);
         assert_eq!(o.cause, EdgeCause::Measured, "start: {o:?}");
         assert_eq!(f.cause, EdgeCause::Measured, "end: {f:?}");
         let (st, en) = (o.time.unwrap(), f.time.unwrap());
@@ -1730,13 +1776,17 @@ mod real_audio {
             ("BAD  grossen|schwarzen", (9.563, 9.703), (9.763, 10.143), (10.183, 10.603)),
             ("BAD  weiche|Fell", (6.342, 6.622), (6.742, 7.002), (7.102, 7.322)),
             ("BAD  Sie|schaut", (12.584, 12.824), (13.084, 13.184), (13.204, 13.384)),
+            ("CODA das end~6.30", (5.982, 6.122), (6.162, 6.282), (6.342, 6.622)),
+            ("CODA graue start~6.34", (6.162, 6.282), (6.342, 6.622), (6.742, 7.002)),
+            ("CODA bist end~2.92", (2.401, 2.481), (2.781, 2.941), (2.961, 3.001)),
+            ("CODA du start~2.96", (2.781, 2.941), (2.961, 3.001), (3.061, 3.301)),
             ("GOOD streichelt|dabei", (4.702, 4.782), (4.822, 5.182), (5.222, 5.422)),
             ("GOOD schon|seit", (107.486, 107.606), (107.606, 107.746), (107.786, 107.946)),
         ];
         for (name, prev, w, next) in cases {
             let (ap, an) = a.anchors(Some(*prev), *w, Some(*next));
             let (o, f) = match (ap, an) {
-                (Some(x), Some(y)) => a.word_extent(x, y, *w),
+                (Some(x), Some(y)) => a.word_extent(x, y, *w, Some(next.0)),
                 _ => (Edge::fail(EdgeCause::NoAnchor), Edge::fail(EdgeCause::NoAnchor)),
             };
             eprintln!(
@@ -1777,7 +1827,7 @@ mod real_audio {
             let prev = i.checked_sub(1).map(|j| (words[j].0, words[j].1));
             let next = words.get(i + 1).map(|n| (n.0, n.1));
             let (ap, an) = a.anchors(prev, w, next);
-            let (o, f) = a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), w);
+            let (o, f) = a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), w, next.map(|n| n.0));
             let lo = prev.map(|(_, pe)| pe.min(w.0) - bleed);
             let hi = next.map(|(ns, _)| ns.max(w.1) + bleed);
             let o = if o.time.is_some_and(|t| lo.is_some_and(|l| t < l)) {
@@ -1802,13 +1852,21 @@ mod real_audio {
         );
         let neg = bounds.windows(2).filter(|p| p[1].0 < p[0].1).count();
         eprintln!("overlapping neighbours: {neg}");
+        for (i, w) in bounds.windows(2).enumerate() {
+            if w[1].0 < w[0].1 {
+                eprintln!(
+                    "OVERLAP {:>3} {:<14} {:.3}-{:.3} | {:<14} {:.3}-{:.3}",
+                    i, words[i].2, w[0].0, w[0].1, words[i + 1].2, w[1].0, w[1].1
+                );
+            }
+        }
         if std::env::var("PARO_BLEED").is_ok() {
             for (i, w) in words.iter().enumerate() {
                 let prev = i.checked_sub(1).map(|j| (words[j].0, words[j].1));
                 let next = words.get(i + 1).map(|n| (n.0, n.1));
                 let ww = (w.0, w.1);
                 let (ap, an) = a.anchors(prev, ww, next);
-                let (o, _) = a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), ww);
+                let (o, _) = a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), ww, next.map(|n| n.0));
                 let lo = prev.map(|(_, pe)| pe.min(w.0) - bleed);
                 if o.time.is_some_and(|t| lo.is_some_and(|l| t < l)) {
                     eprintln!(
@@ -1867,6 +1925,8 @@ mod real_audio {
             a.hop, a.floor_bb, a.floor_hf, a.floor_vb, a.contrast_bb, a.contrast_hf, a.contrast_vb
         );
         for (name, from, to) in [
+            ("das|graue   (coda /s/ stolen?)", 6.20, 6.45),
+            ("bist|du     (coda /st/ stolen?)", 2.83, 3.06),
             ("ihren|Schoss  (BAD, /sch/)", 8.00, 8.40),
             ("streichelt|dabei (GOOD, /d/)", 5.10, 5.30),
             ("weiche|Fell   (BAD, /f/)", 6.95, 7.25),

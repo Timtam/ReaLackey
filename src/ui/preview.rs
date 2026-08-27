@@ -130,6 +130,7 @@ pub fn word_bounds_explained() -> Vec<Bound> {
                 ap.unwrap_or(clip_a),
                 an.unwrap_or(clip_b),
                 (w.start, w.end),
+                next.map(|n| n.0),
             );
             // A measured edge may bleed a little past the neighbour's transcript
             // boundary, but not INTO the neighbour. Without this, a gap too short to
