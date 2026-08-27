@@ -1827,7 +1827,7 @@ mod real_audio {
     fn real_cut_placement() {
         let Some(a) = load() else { return };
         // (label, prev kept, removed, next kept)
-        let cases: [(&str, (f64, f64), (f64, f64), (f64, f64)); 2] = [
+        let cases: [Case; 2] = [
             ("delete Schoss (/sch/ onset)", (7.983, 8.143), (8.183, 8.463), (8.823, 8.903)),
             ("delete dabei (/d/ onset)", (4.822, 5.182), (5.222, 5.422), (5.502, 5.922)),
         ];
