@@ -10,6 +10,8 @@
 //! resamples for us) so the BS.1770 K-weighting coefficients below are exact.
 
 pub mod speech;
+#[cfg(test)]
+mod align_probe;
 
 use serde::Serialize;
 

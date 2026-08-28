@@ -99,3 +99,9 @@ embed-resource = "3"    # compiles the Win32 dialog .rc via rc.exe (cc cannot)
 [profile.release]
 lto = true
 codegen-units = 1
+
+[dev-dependencies]
+# Phase-0 forced-alignment probe only (src/dsp/align_probe.rs, env-gated tests).
+# A dev-dependency on purpose: the shipped cdylib is unchanged until the
+# in-process aligner graduates from probe to feature.
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
