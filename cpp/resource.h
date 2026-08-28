@@ -42,6 +42,7 @@
 #define ID_PE_KEYDOWN        1035   // move the selected key down
 #define ID_PE_AUDIO          1036   // "Supports audio (listening)" checkbox
 #define ID_PE_THINKING       1037   // "Extended thinking (reasoning)" checkbox (Anthropic)
+#define ID_PE_ALIGN          1038   // "Refine word timings locally" checkbox (transcription)
 
 // Prompt presets: reusable prompt bodies inserted into the chat composer.
 // List dialog (add / edit / delete; no reorder).

@@ -288,6 +288,9 @@ struct ProvSession {
     /// Whether Anthropic extended thinking is on ("Extended thinking" checkbox,
     /// Anthropic accounts only).
     thinking: bool,
+    /// Whether local word-timing refinement is on ("Refine word timings locally"
+    /// checkbox, transcription accounts only).
+    align: bool,
     /// The working list of API keys, in priority order (top tried first). Edited
     /// live via the Add / Delete / Move up / Move down buttons; saved on OK.
     keys: Vec<String>,
@@ -334,6 +337,7 @@ fn add_provider(role: ProviderRole) -> bool {
         vision: preset.vision,
         audio: infer_audio(preset.model),
         thinking: false,
+        align: false,
         keys: Vec::new(),
         keys_loaded: true, // a brand-new account genuinely has no stored keys yet
         keys_dirty: false,
@@ -371,6 +375,7 @@ fn edit_provider(index: i32, role: ProviderRole) -> bool {
         vision: cfg.supports_images,
         audio: cfg.supports_audio,
         thinking: cfg.thinking,
+        align: cfg.align_locally,
         keys,
         keys_loaded,
         keys_dirty: false,
@@ -489,6 +494,14 @@ pub fn edit_dialog_init() {
             ui::ffi::pe_set_check(ui::ffi::PE_THINKING, sess.thinking);
         } else {
             ui::ffi::pe_show(ui::ffi::PE_THINKING, false);
+        }
+        // Transcription-only: local word-timing refinement. Shares the audio
+        // checkbox's row — the two are never shown together (audio is a chat
+        // capability, hidden for transcription accounts above).
+        if transcription {
+            ui::ffi::pe_set_check(ui::ffi::PE_ALIGN, sess.align);
+        } else {
+            ui::ffi::pe_show(ui::ffi::PE_ALIGN, false);
         }
         // Fill the key list (masked) + its summary hint.
         repopulate_keys(&sess.keys, None, sess.keys_loaded, sess.env_active);
@@ -800,6 +813,9 @@ pub fn edit_dialog_ok() -> bool {
     // Extended thinking (reasoning) is Anthropic-only — the checkbox is shown just
     // for Anthropic accounts; OpenAI-compatible models expose reasoning inherently.
     let thinking = kind == AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_THINKING);
+    // Local word-timing refinement is transcription-only — same rule as vision
+    // above: never read a hidden checkbox's stale state.
+    let align_locally = transcription && ui::ffi::pe_get_check(ui::ffi::PE_ALIGN);
     let cfg = ProviderConfig {
         id,
         label,
@@ -812,6 +828,7 @@ pub fn edit_dialog_ok() -> bool {
         supports_images: vision,
         supports_audio,
         thinking,
+        align_locally,
     };
 
     // The final key list is the working list plus a key typed into the field but
@@ -853,6 +870,45 @@ pub fn edit_dialog_ok() -> bool {
                 "Provider {name} {}.",
                 if is_new { "added" } else { "updated" }
             ));
+            // Local refinement was enabled but its files aren't installed: offer
+            // the download now (per the user's request — enabling should prompt).
+            // Declining keeps the setting on; transcription simply runs without
+            // refinement (with a spoken note) until the files exist — e.g. from
+            // the "with-models" release bundle on data-limited machines.
+            if align_locally && crate::align::installed().is_none() {
+                match crate::align::platform_support() {
+                    Err(why) => {
+                        ui::ffi::message_box(
+                            "Local timing refinement",
+                            &format!(
+                                "The setting was saved, but {why}. Transcription will \
+                                 run without local refinement on this machine."
+                            ),
+                            false,
+                        );
+                    }
+                    Ok(()) => {
+                        let mb = crate::align::download_megabytes();
+                        let msg = format!(
+                            "Refining word timings locally needs a one-time download \
+                             of about {mb} MB (the alignment model plus the ONNX \
+                             Runtime library), stored under REAPER's resource path in \
+                             ReaLackey/models.\n\n\
+                             Alignment runs on your CPU after each transcription and \
+                             can add up to a third of the clip's length in processing \
+                             time on older machines.\n\n\
+                             Download now? Choosing No keeps the setting on; \
+                             transcription runs without refinement until the files \
+                             are installed (they also ship in the \"with-models\" \
+                             release bundle for machines where a large download is \
+                             not an option)."
+                        );
+                        if ui::ffi::message_box("Local timing refinement", &msg, true) {
+                            crate::ui::bridge::download_align_model();
+                        }
+                    }
+                }
+            }
             SESSION.with(|s| {
                 if let Some(x) = s.borrow_mut().as_mut() {
                     x.changed = true;

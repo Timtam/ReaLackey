@@ -24,6 +24,11 @@ pub enum MainTask {
     /// REAPER action: transcribe it, show the editor, then cut what the user
     /// removed. Runs in the worker (transcription is async HTTP).
     OpenCutEditor,
+    /// Download the local forced-alignment files (model + ONNX Runtime) into
+    /// the resource-path models dir. Triggered from the provider settings
+    /// dialog when "Refine word timings locally" is enabled and the files are
+    /// missing. Runs in the worker: it is a large streamed HTTP download.
+    DownloadAlignModel,
 }
 
 /// The outcome of a cut-by-text editor session, sent from the webview (main

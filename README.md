@@ -113,6 +113,33 @@ ReaLackey is designed to be driven entirely by keyboard and screen reader:
 5. **Extensions → ReaLackey → Open window** — type a message, press **Send**, and
    the reply streams into the chat.
 
+## Local word-timing refinement (optional)
+
+Cut-by-text lives and dies by how precisely each word's start and end are known.
+Some transcription endpoints return excellent timings; plain Whisper endpoints
+are often 50–200 ms off — the difference between a clean cut and a clipped
+consonant. ReaLackey can close that gap **on your own machine** with a local
+forced-alignment model (no audio leaves your computer for this step):
+
+- **Per provider, off by default.** In the provider settings (Transcription
+  tab), enable **"Refine word timings locally"** on the account you use for
+  cut-by-text. When you save with the checkbox on and the files aren't
+  installed yet, ReaLackey offers a one-time download (~318 MB: the alignment
+  model plus the ONNX Runtime library) into
+  `<resource path>/ReaLackey/models`.
+- **It costs CPU time.** Alignment runs after each transcription; on an older
+  CPU expect up to a third of the clip's length in extra processing (a 2017
+  quad-core aligns a 5-minute clip in ~110 s; modern machines are faster). The
+  progress dialog shows the stage, and Cancel works throughout.
+- **Limited data plan?** Every release also ships
+  `realackey-<version>-with-models-<platform>.zip` with the model already
+  bundled: unzip and merge its `UserPlugins/` and `ReaLackey/` folders into
+  your REAPER resource path — nothing is downloaded then.
+- The model (Meta AI's MMS forced aligner, ONNX conversion by onnx-community)
+  is licensed **CC-BY-NC 4.0** — non-commercial use. ONNX Runtime is MIT.
+- macOS: Apple Silicon only (ONNX Runtime no longer ships Intel-mac builds);
+  transcription simply runs without refinement elsewhere.
+
 ## Configuration
 
 - **Config is portable.** Your provider list lives under REAPER's *resource path*

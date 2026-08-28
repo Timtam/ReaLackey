@@ -46,6 +46,17 @@ crossbeam-channel = "0.5"
 # (in-memory + env var only).
 keyring = "3"
 
+# --- Local forced alignment (opt-in per transcription provider) --------------
+# ONNX Runtime bindings with `load-dynamic` ONLY: nothing of ONNX Runtime is
+# linked into the cdylib — the runtime library is dlopened at run time by
+# ABSOLUTE path from <resource path>/ReaLackey/models (never by name: inside
+# reaper.exe the DLL search order finds the stale onnxruntime.dll in System32).
+# Pinned exactly: 2.0 is an rc series; rc.13 targets ONNX Runtime 1.28.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+# Integrity check for the downloaded model + runtime library (the latter is
+# executable code — both are verified against pinned digests).
+sha2 = "0.10"
+
 # --- Misc --------------------------------------------------------------------
 thiserror = "2"
 # Markdown -> clean prose (OSARA announcements) and -> HTML (output pane).
@@ -100,8 +111,3 @@ embed-resource = "3"    # compiles the Win32 dialog .rc via rc.exe (cc cannot)
 lto = true
 codegen-units = 1
 
-[dev-dependencies]
-# Phase-0 forced-alignment probe only (src/dsp/align_probe.rs, env-gated tests).
-# A dev-dependency on purpose: the shipped cdylib is unchanged until the
-# in-process aligner graduates from probe to feature.
-ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }

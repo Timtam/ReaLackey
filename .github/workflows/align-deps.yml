@@ -1,0 +1,68 @@
+name: Publish alignment runtime assets
+
+# Repackages the official Microsoft ONNX Runtime archives into FLAT files and
+# attaches them to a fixed release (tag `align-deps-1`), which is where the
+# extension's in-app downloader fetches the runtime library from
+# (`src/align.rs::RUNTIME_URL` — the official downloads are zip/tgz archives,
+# and shipping an unzipper for one file isn't worth it). Run once per ONNX
+# Runtime version bump; the printed SHA-256 digests MUST match the pinned
+# values in src/align.rs (the downloader rejects anything else).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ort_version:
+        description: "ONNX Runtime version to package (must match the ort crate's target, see src/align.rs)"
+        required: true
+        default: "1.28.0"
+        type: string
+
+permissions:
+  contents: write # create/update the align-deps release and its assets
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and repackage the official archives
+        run: |
+          set -euo pipefail
+          V="${{ inputs.ort_version }}"
+          mkdir -p flat
+          # Windows x64: lib/onnxruntime.dll out of the official zip.
+          curl -fsSL -o win.zip \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${V}/onnxruntime-win-x64-${V}.zip"
+          unzip -q win.zip "onnxruntime-win-x64-${V}/lib/onnxruntime.dll"
+          cp "onnxruntime-win-x64-${V}/lib/onnxruntime.dll" "flat/onnxruntime-win-x64-${V}.dll"
+          # macOS arm64 (ONNX Runtime no longer ships Intel-mac builds):
+          # lib/libonnxruntime.<V>.dylib out of the official tgz.
+          curl -fsSL -o mac.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${V}/onnxruntime-osx-arm64-${V}.tgz"
+          tar -xzf mac.tgz "onnxruntime-osx-arm64-${V}/lib/libonnxruntime.${V}.dylib"
+          cp "onnxruntime-osx-arm64-${V}/lib/libonnxruntime.${V}.dylib" \
+             "flat/libonnxruntime-osx-arm64-${V}.dylib"
+
+      - name: Print digests (must match src/align.rs)
+        run: |
+          set -euo pipefail
+          echo "Pin these in src/align.rs (RUNTIME_SIZE / RUNTIME_SHA256):"
+          for f in flat/*; do
+            echo "$f  $(stat -c %s "$f") bytes"
+            sha256sum "$f"
+          done
+
+      - name: Create or update the align-deps release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="align-deps-1"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Alignment runtime dependencies" \
+              --notes "ONNX Runtime libraries repackaged as flat files from the official Microsoft releases (MIT license). Fetched by ReaLackey's in-app alignment-model download; not meant for manual installation — use the with-models release bundles instead." \
+              --prerelease
+          fi
+          gh release upload "$TAG" flat/* --clobber

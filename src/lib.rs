@@ -9,12 +9,14 @@
 //!   * `tools`     — the tool/function catalog the model drives.
 //!   * `dsp`       — pure-Rust audio feature extraction (loudness/spectral).
 //!   * `edit`      — pure-Rust cut-by-text planning (transcript diff -> cuts).
+//!   * `align`     — opt-in local CTC forced alignment (word-timing refinement).
 //!
 //! Phase 0 scope: the extension loads, the shim shows the modeless dialog,
 //! OSARA is detected, and a hello-world streaming round-trip with Claude runs
 //! (no tools yet).
 
 mod ai;
+mod align;
 mod app;
 mod config;
 mod dsp;

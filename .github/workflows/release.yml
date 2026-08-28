@@ -101,6 +101,88 @@ jobs:
       - name: Set Cargo.toml version
         run: sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
 
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # "with-models" bundles: the extension plus the local-alignment files
+      # (model + ONNX Runtime library) laid out as they sit under REAPER's
+      # resource path — for users on limited data plans where the in-app 300 MB
+      # download is not an option. Every fetched file is verified against the
+      # same SHA-256 digests the in-app downloader pins (src/align.rs).
+      - name: Assemble with-models bundles
+        run: |
+          set -euo pipefail
+          ORT_V="1.28.0"
+          MODEL_SHA="2eb5c3d2f6db2ef476aa7a7e1e5800145973e9064eb5292b1b9b8ada1207712a"
+          WIN_DLL_SHA="18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257"
+          MAC_DYLIB_SHA="dc19bbcb2f5c9fb3c68b4f9248aa0a35065ff702c5dbeae75eac54a74da97b6d"
+
+          curl -fsSL -o model.onnx \
+            "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/main/onnx/model_int8.onnx"
+          echo "${MODEL_SHA}  model.onnx" | sha256sum -c -
+          curl -fsSL --retry 3 -o win.zip \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_V}/onnxruntime-win-x64-${ORT_V}.zip"
+          unzip -q win.zip "onnxruntime-win-x64-${ORT_V}/lib/onnxruntime.dll"
+          echo "${WIN_DLL_SHA}  onnxruntime-win-x64-${ORT_V}/lib/onnxruntime.dll" | sha256sum -c -
+          curl -fsSL --retry 3 -o mac.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_V}/onnxruntime-osx-arm64-${ORT_V}.tgz"
+          tar -xzf mac.tgz "onnxruntime-osx-arm64-${ORT_V}/lib/libonnxruntime.${ORT_V}.dylib"
+          echo "${MAC_DYLIB_SHA}  onnxruntime-osx-arm64-${ORT_V}/lib/libonnxruntime.${ORT_V}.dylib" | sha256sum -c -
+
+          cat > THIRD-PARTY-LICENSES.txt <<'EOF'
+          This bundle contains, alongside ReaLackey itself:
+
+          * ReaLackey/models/mms300m-align-int8.onnx
+            The MMS forced-alignment model (int8 ONNX conversion by
+            onnx-community, from Meta AI's Massively Multilingual Speech
+            project). License: CC-BY-NC 4.0 — attribution: MMS, Meta AI
+            (https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX).
+            Non-commercial use only.
+
+          * ReaLackey/models/onnxruntime.dll / libonnxruntime.*.dylib
+            ONNX Runtime, (c) Microsoft Corporation. MIT license
+            (https://github.com/microsoft/onnxruntime).
+          EOF
+
+          make_bundle() { # $1 = platform, $2 = extension file, $3 = runtime file source, $4 = runtime dest name
+            local root="realackey-with-models-$1"
+            mkdir -p "$root/UserPlugins" "$root/ReaLackey/models"
+            cp "dist/$2" "$root/UserPlugins/"
+            cp model.onnx "$root/ReaLackey/models/mms300m-align-int8.onnx"
+            cp "$3" "$root/ReaLackey/models/$4"
+            cp THIRD-PARTY-LICENSES.txt "$root/"
+            cp INSTALL.txt "$root/"
+            (cd "$root" && zip -qr "../dist/realackey-${{ inputs.version }}-with-models-$1.zip" .)
+          }
+
+          cat > INSTALL.txt <<'EOF'
+          ReaLackey with bundled alignment models
+          =======================================
+
+          Merge the two folders in this archive into your REAPER resource path
+          (REAPER: Options > Show REAPER resource path in explorer/finder):
+
+            UserPlugins/  -> the ReaLackey extension itself
+            ReaLackey/    -> the local word-timing alignment files
+
+          Then restart REAPER, open the provider settings, and enable
+          "Refine word timings locally" on your transcription provider —
+          with these files in place, nothing needs to be downloaded.
+
+          macOS note: if the extension or alignment library is blocked as
+          quarantined (downloaded archives are), clear the flag with:
+            xattr -dr com.apple.quarantine <REAPER resource path>/UserPlugins <REAPER resource path>/ReaLackey
+          EOF
+
+          make_bundle windows reaper_realackey.dll \
+            "onnxruntime-win-x64-${ORT_V}/lib/onnxruntime.dll" onnxruntime.dll
+          make_bundle macos reaper_realackey.dylib \
+            "onnxruntime-osx-arm64-${ORT_V}/lib/libonnxruntime.${ORT_V}.dylib" \
+            "libonnxruntime.${ORT_V}.dylib"
+
       - name: Commit, tag, push
         run: |
           git config user.name  "github-actions[bot]"
@@ -110,12 +192,6 @@ jobs:
           git tag "v${{ inputs.version }}"
           git push origin HEAD:main
           git push origin "v${{ inputs.version }}"
-
-      - name: Download built artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
 
       - name: Create GitHub release
         env:

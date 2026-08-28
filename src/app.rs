@@ -89,5 +89,9 @@ pub fn init(context: PluginContext) -> Result<(), Box<dyn Error>> {
     crate::config::init_key_cache();
     // Load the prompt-preset store (empty on first run; shares the config dir).
     crate::prompts::registry::init();
+    // Cache the alignment models dir (resource path) while we're on the main
+    // thread — the worker can't resolve it later without silently falling back
+    // to the per-user app dir, which would strand models on portable installs.
+    crate::align::init();
     Ok(())
 }

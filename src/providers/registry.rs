@@ -103,6 +103,13 @@ pub struct ProviderConfig {
     /// OpenAI-compatible models expose reasoning inherently, with no request flag.
     #[serde(default)]
     pub thinking: bool,
+    /// Transcription accounts only: refine word timings on THIS machine with the
+    /// local forced-alignment model after each transcription (CPU inference;
+    /// needs a one-time ~318 MB download, see `crate::align`). Off by default —
+    /// most endpoints' timings are good enough to start with, and not every
+    /// machine wants the download or the extra processing time.
+    #[serde(default)]
+    pub align_locally: bool,
 }
 
 impl ProviderConfig {
@@ -519,6 +526,7 @@ fn load_or_seed() -> Store {
             supports_images: true,
             supports_audio: false,
             thinking: false,
+            align_locally: false,
         }],
         auto_approve: false,
     };

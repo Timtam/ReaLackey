@@ -62,6 +62,14 @@ pub fn transcribe(output: TranscribeOutput) {
     }
 }
 
+/// Download the local alignment files (provider settings enabled the feature and
+/// the files are missing). Handed to the worker: a large streamed HTTP download.
+pub fn download_align_model() {
+    if let Some(tx) = TASK_TX.get() {
+        let _ = tx.send(MainTask::DownloadAlignModel);
+    }
+}
+
 /// "Send" pressed.
 pub fn submit(text: String) {
     let text = text.trim().to_string();

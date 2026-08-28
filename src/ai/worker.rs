@@ -48,6 +48,22 @@ impl Drop for GeneratingGuard {
     }
 }
 
+/// A `DownloadAlignModel` confirmed while another job held the worker. The busy
+/// races consume queued tasks; dropping a download the user explicitly said Yes
+/// to — silently, in a product whose primary user hears rather than sees —
+/// would leave them believing a 318 MB download is running. Deferred here and
+/// run by the main loop the moment the worker goes idle.
+static PENDING_ALIGN_DOWNLOAD: AtomicBool = AtomicBool::new(false);
+
+/// Remember a deferred alignment download and say so ONCE, audibly.
+fn defer_align_download(ui_tx: &CbSender<UiEvent>) {
+    if !PENDING_ALIGN_DOWNLOAD.swap(true, Ordering::SeqCst) {
+        let _ = ui_tx.send(UiEvent::Announce(
+            "The alignment download will start when the current work finishes.".into(),
+        ));
+    }
+}
+
 /// Spawn the worker on its own thread. Returns immediately.
 pub fn spawn(
     task_rx: UnboundedReceiver<MainTask>,
@@ -114,6 +130,14 @@ async fn run(
             MainTask::OpenCutEditor => {
                 handle_open_cut_editor_action(&ui_tx, &op_tx, &mut task_rx).await;
             }
+            MainTask::DownloadAlignModel => {
+                handle_download_align_model(&ui_tx, &op_tx, &mut task_rx).await;
+            }
+        }
+        // A download confirmed while the arms above were busy was deferred, not
+        // dropped — run it now that the worker is idle again.
+        if PENDING_ALIGN_DOWNLOAD.swap(false, Ordering::SeqCst) {
+            handle_download_align_model(&ui_tx, &op_tx, &mut task_rx).await;
         }
     }
 }
@@ -676,6 +700,8 @@ async fn run_turn(
                     out.cancelled = true;
                     let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
                 }
+                // A confirmed download is deferred, never dropped (spoken note).
+                Some(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
                 // Clearing mid-turn would desync the history this turn is building.
                 Some(MainTask::ClearHistory)
                 | Some(MainTask::Prompt(_))
@@ -1125,15 +1151,63 @@ async fn run_transcription(
         prompt: None,
     };
 
+    // 4b. Opt-in local timing refinement: load the alignment engine once for the
+    // whole run (about a second — the 300 MB model is read and prepared), drop
+    // it when the run ends so the memory isn't held between transcriptions. Any
+    // problem here degrades to plain transcription with a spoken note —
+    // refinement must never cost the user their transcript.
+    let mut aligner: Option<crate::align::Engine> = None;
+    if cfg.align_locally {
+        match crate::align::installed() {
+            Some(files) => {
+                let _ = ui_tx.send(UiEvent::Status("Loading the alignment model\u{2026}".into()));
+                match tokio::task::spawn_blocking(move || crate::align::Engine::load(&files)).await
+                {
+                    Ok(Ok(e)) => aligner = Some(e),
+                    Ok(Err(e)) => {
+                        let _ = ui_tx.send(UiEvent::Announce(format!(
+                            "Word-timing refinement unavailable ({e}) — transcribing without it."
+                        )));
+                    }
+                    Err(_) => {
+                        let _ = ui_tx.send(UiEvent::Announce(
+                            "Word-timing refinement crashed while loading — transcribing without it."
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            None => {
+                let _ = ui_tx.send(UiEvent::Announce(
+                    "Word-timing refinement is enabled for this provider, but its files \
+                     aren't installed — transcribing without it. Re-save the provider in \
+                     the settings to download them."
+                        .into(),
+                ));
+            }
+        }
+    }
+
     // 5. Chunk the item, render + transcribe each, offsetting timestamps.
     let chunks = transcription::plan_chunks(total, TRANSCRIBE_CHUNK_SECONDS);
     let n = chunks.len();
     let mut parts: Vec<(f64, transcription::Transcript)> = Vec::new();
     let mut any_read_error = false;
     for (i, (start, length)) in chunks.iter().enumerate() {
-        // Honor a Stop pressed between chunks (the loop won't otherwise drain task_rx).
-        if let Ok(MainTask::Cancel) = task_rx.try_recv() {
-            return TranscribeOutcomeKind::Cancelled;
+        // Honor a Stop pressed between chunks (the loop won't otherwise drain
+        // task_rx). Drain everything queued rather than eating one task blind:
+        // a confirmed alignment download must survive to run after this job.
+        loop {
+            match task_rx.try_recv() {
+                Ok(MainTask::Cancel) => return TranscribeOutcomeKind::Cancelled,
+                Ok(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
+                Ok(_) => {
+                    let _ = ui_tx.send(UiEvent::Status(
+                        "Please wait until transcription finishes\u{2026}".into(),
+                    ));
+                }
+                Err(_) => break,
+            }
         }
         // A window below the ASR minimum (only a whole clip shorter than the minimum
         // reaches here — plan_chunks folds sub-minimum tails) has no meaningful speech.
@@ -1182,6 +1256,10 @@ async fn run_transcription(
                 ))
             }
         };
+        // Keep the rendered audio for the aligner (the clip consumes the
+        // original) — the chunk-relative word times map 1:1 onto exactly these
+        // samples. Cloned only when refinement is actually armed.
+        let align_wav = aligner.is_some().then(|| bytes.clone());
         let clip = AudioClip {
             bytes,
             filename: "audio.wav".into(),
@@ -1205,6 +1283,7 @@ async fn run_transcription(
                         let _ = (&mut fut).await; // let the request unwind
                         return TranscribeOutcomeKind::Cancelled;
                     }
+                    Some(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
                     Some(MainTask::ClearHistory)
                     | Some(MainTask::Prompt(_))
                     | Some(MainTask::Transcribe(_))
@@ -1217,7 +1296,19 @@ async fn run_transcription(
             }
         };
         match result {
-            Ok(t) => {
+            Ok(mut t) => {
+                // Refine this chunk's word timings against its own audio while
+                // both are in hand (times are chunk-relative here, matching the
+                // samples exactly; merge_transcripts adds the offset later).
+                if let (Some(engine), Some(wav)) = (aligner.take(), align_wav) {
+                    match refine_chunk_words(ui_tx, task_rx, engine, wav, &mut t.words, user_initiated, i, n)
+                        .await
+                    {
+                        RefineEnd::Done(engine) => aligner = Some(engine),
+                        RefineEnd::Lost => {} // crashed; words restored, engine gone
+                        RefineEnd::Cancelled => return TranscribeOutcomeKind::Cancelled,
+                    }
+                }
                 parts.push((*start, t));
                 // Advance the bar to the fraction of chunks now complete.
                 if user_initiated {
@@ -1238,6 +1329,364 @@ async fn run_transcription(
         read_error: any_read_error,
         chunks: n,
     })
+}
+
+/// How one chunk's refinement pass ended.
+enum RefineEnd {
+    /// Finished (fully, partially, or skipped) — the engine comes back for the
+    /// next chunk, and the words hold the best timings available.
+    Done(crate::align::Engine),
+    /// The blocking task panicked: the engine is gone (skip later chunks) and
+    /// the words were restored to their transcript timings.
+    Lost,
+    /// The user pressed Stop mid-refinement.
+    Cancelled,
+}
+
+/// Run the aligner over one transcribed chunk's words, on a blocking thread so
+/// the worker stays responsive, raced against `task_rx` so Stop works with at
+/// most one ~30 s window of latency. Mirrors the transcribe-race idiom above.
+/// Failures refine nothing (or partially) and report by voice — never by
+/// failing the transcription.
+#[allow(clippy::too_many_arguments)]
+async fn refine_chunk_words(
+    ui_tx: &CbSender<UiEvent>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    mut engine: crate::align::Engine,
+    wav: Vec<u8>,
+    words: &mut Vec<crate::providers::transcription::Word>,
+    user_initiated: bool,
+    chunk_i: usize,
+    chunk_n: usize,
+) -> RefineEnd {
+    if words.is_empty() {
+        return RefineEnd::Done(engine);
+    }
+    let (samples, ch, sr) = match crate::dsp::parse_wav(&wav) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = ui_tx.send(UiEvent::Announce(format!(
+                "Word-timing refinement skipped (couldn't parse the rendered audio: {e})."
+            )));
+            return RefineEnd::Done(engine);
+        }
+    };
+    if ch != 1 {
+        let _ = ui_tx.send(UiEvent::Announce(
+            "Word-timing refinement skipped (expected mono render).".into(),
+        ));
+        return RefineEnd::Done(engine);
+    }
+    let samples: Vec<f32> = samples.iter().map(|&x| x as f32).collect();
+    let base_msg = if chunk_n > 1 {
+        format!("Refining word timings\u{2026} (part {}/{})", chunk_i + 1, chunk_n)
+    } else {
+        "Refining word timings\u{2026}".to_string()
+    };
+    let _ = ui_tx.send(UiEvent::Status(base_msg.clone()));
+    // The bar stays at this chunk's pre-completion position; only the text moves.
+    let percent_now = ((chunk_i as u32 * 100) / chunk_n.max(1) as u32) as u8;
+    if user_initiated {
+        let _ = ui_tx.send(UiEvent::ProgressUpdate { percent: percent_now, message: base_msg.clone() });
+    }
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_in = cancel.clone();
+    let ui_in = ui_tx.clone();
+    let msg_in = base_msg.clone();
+    let orig = words.clone();
+    let mut work = std::mem::take(words);
+    let mut handle = tokio::task::spawn_blocking(move || {
+        let mut progress = |done: usize, total: usize| {
+            let m = format!("{msg_in} \u{2014} {done}/{total}");
+            let _ = ui_in.send(UiEvent::Status(m.clone()));
+            if user_initiated {
+                let _ = ui_in.send(UiEvent::ProgressUpdate { percent: percent_now, message: m });
+            }
+        };
+        let r = engine.refine(&samples, sr, &mut work, &cancel_in, &mut progress);
+        (engine, work, r)
+    });
+    let joined = loop {
+        tokio::select! {
+            biased;
+            r = &mut handle => break r,
+            msg = task_rx.recv() => match msg {
+                Some(MainTask::Cancel) | None => {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = (&mut handle).await; // let the current window finish
+                    return RefineEnd::Cancelled;
+                }
+                Some(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
+                Some(_) => {
+                    let _ = ui_tx.send(UiEvent::Status(
+                        "Please wait until transcription finishes\u{2026}".into(),
+                    ));
+                }
+            },
+        }
+    };
+    match joined {
+        Ok((engine, refined, Ok(_stats))) => {
+            *words = refined;
+            RefineEnd::Done(engine)
+        }
+        // A stray cancel result without a Stop (shouldn't happen) — keep quiet.
+        Ok((engine, refined, Err(e))) if e == crate::align::CANCELLED => {
+            *words = refined;
+            RefineEnd::Done(engine)
+        }
+        Ok((engine, refined, Err(e))) => {
+            // Windows already aligned hold valid times; the rest keep the
+            // transcript's. Partial refinement is strictly better than none.
+            *words = refined;
+            let _ = ui_tx.send(UiEvent::Announce(format!(
+                "Word-timing refinement stopped early ({e}) — the remaining words keep \
+                 the transcription's timings."
+            )));
+            RefineEnd::Done(engine)
+        }
+        Err(_) => {
+            *words = orig;
+            let _ = ui_tx.send(UiEvent::Announce(
+                "Word-timing refinement crashed — using the transcription's timings.".into(),
+            ));
+            RefineEnd::Lost
+        }
+    }
+}
+
+/// The `DownloadAlignModel` task: fetch the local-alignment files (ONNX Runtime
+/// library + model, ~318 MB total) into the resource-path models dir. Streamed
+/// with progress + Cancel; each file downloads to a `.part` name and is
+/// SHA-256-verified before the final rename, so no unverified file ever wears a
+/// final name (the runtime library is executable code). Terminal outcomes use
+/// native alerts (visible to sighted users AND read by the screen reader); a
+/// cancel closes quietly, like a cancelled transcription.
+async fn handle_download_align_model(
+    ui_tx: &CbSender<UiEvent>,
+    op_tx: &CbSender<ReaperOp>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+) {
+    if let Err(why) = crate::align::platform_support() {
+        alert(op_tx, format!("Can't set up local alignment: {why}.")).await;
+        return;
+    }
+    let Some(dir) = crate::align::models_dir() else {
+        alert(
+            op_tx,
+            "Can't set up local alignment: REAPER's resource path is unavailable.".to_string(),
+        )
+        .await;
+        return;
+    };
+    let items = crate::align::download_items();
+    if items.is_empty() {
+        alert(op_tx, "The local alignment files are already installed.".to_string()).await;
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        alert(
+            op_tx,
+            format!("Couldn't create the models directory {}: {e}", dir.display()),
+        )
+        .await;
+        return;
+    }
+    let total: u64 = items.iter().map(|i| i.size).sum();
+    let _ = ui_tx.send(UiEvent::ProgressOpen("Downloading the alignment files\u{2026}".into()));
+    let _ = ui_tx.send(UiEvent::Announce(format!(
+        "Downloading the alignment files \u{2014} about {} megabytes.",
+        total / 1_000_000
+    )));
+    // No TOTAL timeout: a 300 MB file on a slow line legitimately takes a while.
+    // The read timeout instead bounds every silent gap — the response-header
+    // wait included — so a proxy that accepts the connection and then goes mute
+    // can't park the worker forever, while a slow-but-flowing download never
+    // trips it. Cancel covers the rest.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let mut done: u64 = 0;
+    for item in &items {
+        match download_verified(ui_tx, task_rx, &client, item, &dir, done, total).await {
+            Ok(()) => done += item.size,
+            Err(DownloadEnd::Cancelled) => {
+                let _ = ui_tx.send(UiEvent::ProgressClose);
+                let _ = ui_tx.send(UiEvent::Announce("Download cancelled.".into()));
+                return;
+            }
+            Err(DownloadEnd::Failed(e)) => {
+                let _ = ui_tx.send(UiEvent::ProgressClose);
+                alert(
+                    op_tx,
+                    format!(
+                        "Downloading {} failed: {e}\n\nYou can retry by re-saving the \
+                         transcription provider in the settings, or install the files \
+                         from the \"with-models\" release bundle instead.",
+                        item.label
+                    ),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+    let _ = ui_tx.send(UiEvent::ProgressClose);
+    alert(
+        op_tx,
+        "The local alignment files are installed. Transcription providers with \
+         \"Refine word timings locally\" enabled will now refine timings on this machine."
+            .to_string(),
+    )
+    .await;
+}
+
+/// Why a single-file download ended without a verified file on disk.
+enum DownloadEnd {
+    Cancelled,
+    Failed(String),
+}
+
+/// Stream one file to `<dir>/<file>.part`, hashing as it goes; verify size and
+/// SHA-256, then rename into place. Any failure or cancel removes the partial
+/// file — a half-written 300 MB model must never be mistaken for a real one
+/// (`installed()` also size-checks as a second line of defence).
+async fn download_verified(
+    ui_tx: &CbSender<UiEvent>,
+    task_rx: &mut UnboundedReceiver<MainTask>,
+    client: &reqwest::Client,
+    item: &crate::align::DownloadItem,
+    dir: &std::path::Path,
+    done_before: u64,
+    total: u64,
+) -> Result<(), DownloadEnd> {
+    use futures_util::StreamExt as _;
+    use sha2::Digest as _;
+    use std::io::Write as _;
+
+    let dest = dir.join(item.file);
+    let part = dir.join(format!("{}.part", item.file));
+    let fail = |e: String, part: &std::path::Path| {
+        let _ = std::fs::remove_file(part);
+        Err(DownloadEnd::Failed(e))
+    };
+    // The header phase is raced against Stop too — the body loop's select can't
+    // help while send() itself is pending (redirect chains included).
+    let sent = {
+        let send_fut = client.get(item.url).send();
+        tokio::pin!(send_fut);
+        loop {
+            tokio::select! {
+                biased;
+                r = &mut send_fut => break r,
+                msg = task_rx.recv() => match msg {
+                    Some(MainTask::Cancel) | None => return Err(DownloadEnd::Cancelled),
+                    Some(_) => {
+                        let _ = ui_tx.send(UiEvent::Status(
+                            "Please wait until the download finishes\u{2026}".into(),
+                        ));
+                    }
+                },
+            }
+        }
+    };
+    let resp = match sent {
+        Ok(r) => r,
+        Err(e) => return Err(DownloadEnd::Failed(crate::providers::http_error_detail(&e))),
+    };
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // Distinguish "not published" from a transient failure: retrying can't
+        // help until the hosting side changes.
+        return Err(DownloadEnd::Failed(format!(
+            "HTTP 404 — {} isn't published at its expected address yet. Use the \
+             \"with-models\" release bundle instead, or update ReaLackey.",
+            item.label
+        )));
+    }
+    if !resp.status().is_success() {
+        return Err(DownloadEnd::Failed(format!("HTTP {}", resp.status())));
+    }
+    let mut file = match std::fs::File::create(&part) {
+        Ok(f) => f,
+        Err(e) => return Err(DownloadEnd::Failed(format!("couldn't create the file: {e}"))),
+    };
+    let mut hasher = sha2::Sha256::new();
+    let mut got: u64 = 0;
+    let mut last_pct: i32 = -1;
+    let mut stream = resp.bytes_stream();
+    loop {
+        tokio::select! {
+            biased;
+            chunk = stream.next() => match chunk {
+                Some(Ok(bytes)) => {
+                    if let Err(e) = file.write_all(&bytes) {
+                        drop(file);
+                        return fail(format!("write failed: {e}"), &part);
+                    }
+                    hasher.update(&bytes);
+                    got += bytes.len() as u64;
+                    let pct = (((done_before + got) * 100) / total.max(1)) as i32;
+                    if pct != last_pct {
+                        last_pct = pct;
+                        let msg = format!(
+                            "Downloading {}\u{2026} ({} of {} MB)",
+                            item.label,
+                            (done_before + got) / 1_000_000,
+                            total / 1_000_000
+                        );
+                        let _ = ui_tx.send(UiEvent::ProgressUpdate {
+                            percent: pct.clamp(0, 100) as u8,
+                            message: msg.clone(),
+                        });
+                        let _ = ui_tx.send(UiEvent::Status(msg));
+                    }
+                }
+                Some(Err(e)) => {
+                    drop(file);
+                    return fail(crate::providers::http_error_detail(&e), &part);
+                }
+                None => break,
+            },
+            msg = task_rx.recv() => match msg {
+                Some(MainTask::Cancel) | None => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&part);
+                    return Err(DownloadEnd::Cancelled);
+                }
+                Some(_) => {
+                    let _ = ui_tx.send(UiEvent::Status(
+                        "Please wait until the download finishes\u{2026}".into(),
+                    ));
+                }
+            },
+        }
+    }
+    drop(file);
+    if got != item.size {
+        return fail(
+            format!("size mismatch (got {got} bytes, expected {})", item.size),
+            &part,
+        );
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    if digest != item.sha256 {
+        // With pinned, revision-addressed URLs this should never fire for an
+        // upstream change — so a mismatch is transit corruption or tampering.
+        // Retrying may help for the former; say what to do if it doesn't.
+        return fail(
+            "checksum mismatch \u{2014} the downloaded file doesn't match the expected \
+             digest. Try again; if it keeps failing, use the \"with-models\" release \
+             bundle or update ReaLackey."
+                .to_string(),
+            &part,
+        );
+    }
+    if let Err(e) = std::fs::rename(&part, &dest) {
+        return fail(format!("couldn't move the finished file into place: {e}"), &part);
+    }
+    Ok(())
 }
 
 /// The chat tool `transcribe_item`: run the shared core and return the transcript
