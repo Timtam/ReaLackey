@@ -814,14 +814,34 @@ document.addEventListener('keydown',function(e){
   function $(id){return document.getElementById(id);}
   function announce(t){ if(window.liveAnnounce) liveAnnounce(t); }
   function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function bare(s){ return (s||'').replace(/[^A-Za-z0-9']/g,''); }
+  // Strip PUNCTUATION for announcements, not "everything non-ASCII": the old
+  // [^A-Za-z0-9'] deleted umlauts and every non-Latin letter, so the screen
+  // reader was fed "zrtlich" for "zärtlich". List what to remove, keep the rest.
+  function bare(s){ return (s||'').replace(/["'.,!?;:()\[\]{}«»„“”‚‘’…\/\\-]/g,''); }
   function isArrow(k){ return k==='ArrowLeft'||k==='ArrowRight'||k==='ArrowUp'||k==='ArrowDown'; }
   function b64bytes(b){ var s=atob(b),n=s.length,u=new Uint8Array(n); for(var i=0;i<n;i++)u[i]=s.charCodeAt(i); return u; }
 
   window.openCutEditor=function(json){
     try{
       var d=(typeof json==='string')?JSON.parse(json):json;
-      st={words:(d.words||[]),caret:0,anchor:null,mode:'both',undo:[],redo:[],duration:(d.duration||0)};
+      // Merge continuation tokens (j-flagged by the host: Whisper split ONE
+      // spoken word, e.g. "89"+"-Jährige") into a single navigable token that
+      // spans head start to tail end — including any bogus gap between the
+      // halves, so the whole compound auditions as the one word it is. `n`
+      // remembers how many transcript words each token stands for, so the
+      // keep flags sent back to the host stay per-WORD (indices are
+      // load-bearing there).
+      var raw=(d.words||[]),words=[];
+      for(var wi=0;wi<raw.length;wi++){ var rw=raw[wi];
+        var g=words.length?words[words.length-1]:null;
+        if(rw.j && g){
+          g.t=(g.t||'')+(rw.t||'');
+          g.end=rw.end;
+          if(typeof rw.f==='number') g.f=rw.f;
+          g.n=(g.n||1)+1;
+        } else { rw.n=1; words.push(rw); }
+      }
+      st={words:words,caret:0,anchor:null,mode:'both',undo:[],redo:[],duration:(d.duration||0)};
       cancelArmed=false;
       ctx=null;buf=null;
       try{ var AC=window.AudioContext||window.webkitAudioContext;
@@ -948,7 +968,7 @@ document.addEventListener('keydown',function(e){
   // them auditions something that never gets written.
   function playEdited(){ if(!ctx||!buf){ announce('No audio to preview'); return; }
     try{ if(window.ipc){ window.ipc.postMessage(JSON.stringify({t:'cut:preview',
-      keep: st.words.map(function(w){return !w.rm;})})); announce('Preparing preview…'); return; } }catch(e){}
+      keep: keepFlags()})); announce('Preparing preview…'); return; } }catch(e){}
     playSegments(null); }
   window.cutPreviewSegments=function(json){
     var segs=null; try{ segs=(typeof json==='string')?JSON.parse(json):json; }catch(e){}
@@ -998,7 +1018,10 @@ document.addEventListener('keydown',function(e){
   function requestCancel(){ var pending=st.words.some(function(w){return w.rm;})||st.undo.length;
     if(pending && !cancelArmed){ cancelArmed=true; announce('You have edits. Press Cancel or Escape again to discard.'); if(cancelTimer)clearTimeout(cancelTimer); cancelTimer=setTimeout(function(){cancelArmed=false;},4000); return; }
     postCancel(); }
-  function confirmCut(){ var keep=st.words.map(function(w){return !w.rm;}); try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:save',keep:keep})); }catch(e){} closeCutEditor(); }
+  // Per-WORD keep flags: merged tokens expand back to one flag per transcript
+  // word (the host's indices are load-bearing).
+  function keepFlags(){ var k=[]; st.words.forEach(function(w){ var v=!w.rm; for(var m=0;m<(w.n||1);m++) k.push(v); }); return k; }
+  function confirmCut(){ var keep=keepFlags(); try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:save',keep:keep})); }catch(e){} closeCutEditor(); }
 
   document.addEventListener('keydown',function(e){
     if(!st) return; var m=$('cutModal'); if(!m||m.hidden) return;

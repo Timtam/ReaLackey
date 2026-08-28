@@ -2115,10 +2115,19 @@ async fn run_cut_editor(
         .enumerate()
         .map(|(i, w)| {
             let (o, f) = measured.get(i).copied().unwrap_or((w.start, w.end));
+            // One SPOKEN word that Whisper tokenized in two ("89" + "-Jährige"
+            // for "neunundachtzigjährige"): the hyphen marks the continuation.
+            // The editor shows such runs as ONE navigable token — half a
+            // compound can never audition right, whatever the boundaries say.
+            let joins_prev = i > 0 && {
+                let prev = t.transcript.words[i - 1].text.trim_end();
+                w.text.trim_start().starts_with('-') || prev.ends_with('-')
+            };
             json!({
                 "t": w.text, "start": w.start, "end": w.end,
                 "s": sids.get(i).copied().unwrap_or(0),
                 "o": o, "f": f,
+                "j": joins_prev,
             })
         })
         .collect();
