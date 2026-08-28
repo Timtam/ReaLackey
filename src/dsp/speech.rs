@@ -137,6 +137,11 @@ pub enum EdgeCause {
     CrossedMulti,
     /// The edge landed inside a neighbouring word.
     BleedReject,
+    /// The edge strayed too far from an ALIGNER-GRADE hint. When word times come
+    /// from forced alignment they are trustworthy to a frame or two; a measured
+    /// edge outside the refinement corridor is the measurement wandering (fast
+    /// function-word chains), not a discovery, and the hint wins.
+    CorridorReject,
 }
 
 impl EdgeCause {
@@ -153,6 +158,7 @@ impl EdgeCause {
             EdgeCause::CrossedOneNucleus => "crossed-1nuc",
             EdgeCause::CrossedMulti => "crossed-multi",
             EdgeCause::BleedReject => "bleed",
+            EdgeCause::CorridorReject => "corridor",
         }
     }
 }
@@ -1920,36 +1926,84 @@ mod real_audio {
             .collect();
         let bleed = a.syllable_period * 0.5;
         let (clip_a, clip_b) = a.span();
-        let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
-        let mut bounds = Vec::new();
-        for i in 0..words.len() {
-            let w = (words[i].0, words[i].1);
-            let prev = i.checked_sub(1).map(|j| (words[j].0, words[j].1));
-            let next = words.get(i + 1).map(|n| (n.0, n.1));
-            let (ap, an) = a.anchors(prev, w, next);
-            let (o, f) = a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), w, next.map(|n| n.0));
-            let lo = prev.map(|(_, pe)| pe.min(w.0) - bleed);
-            let hi = next.map(|(ns, _)| ns.max(w.1) + bleed);
-            let o = if o.time.is_some_and(|t| lo.is_some_and(|l| t < l)) {
-                o.reject(EdgeCause::BleedReject)
-            } else {
-                o
+        // `refined` = apply the aligner-grade corridor exactly as the editor
+        // does when local refinement ran. This clip's server times are already
+        // aligner-grade (measured: our CTC reproduces them within a frame), so
+        // the refined pass predicts the refined-editor experience faithfully.
+        let measure = |refined: bool| {
+            use crate::ui::preview::{
+                REFINED_END_EARLY, REFINED_END_LATE, REFINED_START_EARLY, REFINED_START_LATE,
             };
-            let f = if f.time.is_some_and(|t| hi.is_some_and(|h| t > h)) {
-                f.reject(EdgeCause::BleedReject)
-            } else {
-                f
-            };
-            *tally.entry(o.cause.token()).or_default() += 1;
-            *tally.entry(f.cause.token()).or_default() += 1;
-            bounds.push((o.time.unwrap_or(w.0), f.time.unwrap_or(w.1)));
-        }
-        let mut v: Vec<_> = tally.into_iter().collect();
-        v.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
-        eprintln!(
-            "TALLY {}",
+            let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
+            let mut bounds = Vec::new();
+            for i in 0..words.len() {
+                let w = (words[i].0, words[i].1);
+                let prev = i.checked_sub(1).map(|j| (words[j].0, words[j].1));
+                let next = words.get(i + 1).map(|n| (n.0, n.1));
+                let (ap, an) = a.anchors(prev, w, next);
+                let (o, f) =
+                    a.word_extent(ap.unwrap_or(clip_a), an.unwrap_or(clip_b), w, next.map(|n| n.0));
+                let lo = prev.map(|(_, pe)| pe.min(w.0) - bleed);
+                let hi = next.map(|(ns, _)| ns.max(w.1) + bleed);
+                let mut o = if o.time.is_some_and(|t| lo.is_some_and(|l| t < l)) {
+                    o.reject(EdgeCause::BleedReject)
+                } else {
+                    o
+                };
+                let mut f = if f.time.is_some_and(|t| hi.is_some_and(|h| t > h)) {
+                    f.reject(EdgeCause::BleedReject)
+                } else {
+                    f
+                };
+                if refined {
+                    if o.time.is_some_and(|t| {
+                        t < w.0 - REFINED_START_EARLY || t > w.0 + REFINED_START_LATE
+                    }) {
+                        o = o.reject(EdgeCause::CorridorReject);
+                    }
+                    if f.time.is_some_and(|t| {
+                        t < w.1 - REFINED_END_EARLY || t > w.1 + REFINED_END_LATE
+                    }) {
+                        f = f.reject(EdgeCause::CorridorReject);
+                    }
+                }
+                *tally.entry(o.cause.token()).or_default() += 1;
+                *tally.entry(f.cause.token()).or_default() += 1;
+                bounds.push((o.time.unwrap_or(w.0), f.time.unwrap_or(w.1)));
+            }
+            (tally, bounds)
+        };
+        let (tally, bounds) = measure(false);
+        let (tally_r, bounds_r) = measure(true);
+        let fmt = |t: std::collections::BTreeMap<&str, usize>| {
+            let mut v: Vec<_> = t.into_iter().collect();
+            v.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
             v.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" | ")
+        };
+        eprintln!("TALLY {}", fmt(tally));
+        eprintln!(
+            "TALLY-REFINED {}  (overlapping neighbours: {})",
+            fmt(tally_r),
+            bounds_r.windows(2).filter(|p| p[1].0 < p[0].1).count()
         );
+        // The junction chain a live report came from ("langen Wimpern und hebt
+        // den Kopf" fragmenting into "langenw impernun n dhe denk"): the
+        // refined spans after onset-wins reconciliation — the exact audition
+        // the refined editor plays.
+        let mut rec = bounds_r.clone();
+        for i in 1..rec.len() {
+            if rec[i].0 < rec[i - 1].1 {
+                rec[i - 1].1 = rec[i].0.max(rec[i - 1].0);
+            }
+        }
+        for (i, w) in words.iter().enumerate() {
+            if w.0 > 11.3 && w.1 < 12.9 {
+                eprintln!(
+                    "REFINED {:>3} {:<12} hint {:.3}-{:.3} play {:.3}-{:.3}",
+                    i, w.2, w.0, w.1, rec[i].0, rec[i].1
+                );
+            }
+        }
         let neg = bounds.windows(2).filter(|p| p[1].0 < p[0].1).count();
         eprintln!("overlapping neighbours: {neg} (raw; the editor reconciles them to midpoints)");
         for (i, w) in bounds.windows(2).enumerate() {

@@ -1058,6 +1058,10 @@ struct ItemTranscription {
     read_error: bool,
     /// How many chunks the item was split into.
     chunks: usize,
+    /// The word times went through local forced alignment (every chunk) — they
+    /// are trustworthy to a frame or two, and the editor's boundary measurement
+    /// confines itself to a refinement corridor around them.
+    refined: bool,
 }
 
 /// The outcome of a transcription run — user cancel / decline / a missing provider
@@ -1340,6 +1344,10 @@ async fn run_transcription(
         source_file,
         read_error: any_read_error,
         chunks: n,
+        // The engine surviving to the end means every chunk was refined (a
+        // crash drops it and later chunks stay on transcription timings, so
+        // the corridor must not be claimed).
+        refined: aligner.is_some(),
     })
 }
 
@@ -2095,7 +2103,7 @@ async fn run_cut_editor(
     {
         use base64::Engine as _;
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&wav_b64) {
-            crate::ui::preview::arm(&bytes, &t.transcript.words);
+            crate::ui::preview::arm(&bytes, &t.transcript.words, t.refined);
         }
     }
     let measured = crate::ui::preview::word_bounds();

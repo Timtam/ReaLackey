@@ -15,13 +15,18 @@ use crate::providers::transcription::Word;
 struct Ctx {
     analysis: SpeechAnalysis,
     words: Vec<Word>,
+    /// Word times went through local forced alignment: they are trustworthy to a
+    /// frame or two, and measured extents may only REFINE near them (see the
+    /// corridor in `word_bounds_explained`), never wander.
+    refined: bool,
 }
 
 static CTX: Mutex<Option<Ctx>> = Mutex::new(None);
 
 /// Cache the analysis for the item the editor is about to open. Cheap: it reuses the
 /// WAV already rendered for in-editor playback, so no extra audio read.
-pub fn arm(wav: &[u8], words: &[Word]) {
+/// `refined` = the word times went through local forced alignment.
+pub fn arm(wav: &[u8], words: &[Word], refined: bool) {
     let analysis = crate::dsp::parse_wav(wav)
         .ok()
         .and_then(|(samples, ch, sr)| {
@@ -33,7 +38,7 @@ pub fn arm(wav: &[u8], words: &[Word]) {
             SpeechAnalysis::new(&mono, sr)
         });
     if let (Some(analysis), Ok(mut g)) = (analysis, CTX.lock()) {
-        *g = Some(Ctx { analysis, words: words.to_vec() });
+        *g = Some(Ctx { analysis, words: words.to_vec(), refined });
     }
 }
 
@@ -73,6 +78,23 @@ pub fn disarm() {
 /// tight to hold them. Half a syllable is the natural scale: an edge further than
 /// that past the neighbour's start is not this word's boundary in anyone's speech.
 const NEIGHBOUR_BLEED_SYLLABLES: f64 = 0.5;
+
+/// Refinement corridor around ALIGNER-GRADE word times, seconds. When the words
+/// went through forced alignment, the DSP's job shrinks to sub-frame refinement
+/// NEAR the aligned boundary — free-range re-measurement made things worse than
+/// the times it was handed ("langen Wimpern und hebt den": aligned times were
+/// correct to a frame, measured extents shifted ~100 ms and midpoint
+/// reconciliation shredded "und" down to its final /n/). The corridor is
+/// asymmetric on purpose, from measured CTC behaviour:
+/// * a word's real onset starts BEFORE its first CTC emission (peakiness — the
+///   /f/ of "Fell" 82 ms early), so starts may move earlier generously but
+///   later barely;
+/// * a word's real end runs past its last emission (codas, releases —
+///   "graue"+108 ms), so ends get the mirror.
+pub(crate) const REFINED_START_EARLY: f64 = 0.10;
+pub(crate) const REFINED_START_LATE: f64 = 0.02;
+pub(crate) const REFINED_END_EARLY: f64 = 0.02;
+pub(crate) const REFINED_END_LATE: f64 = 0.12;
 
 /// One word's measured extent, with the reason for each edge that is a fallback.
 pub struct Bound {
@@ -145,6 +167,23 @@ pub fn word_bounds_explained() -> Vec<Bound> {
             let bleed = |e: Edge, out: bool| if out { e.reject(EdgeCause::BleedReject) } else { e };
             let o = bleed(o, o.time.is_some_and(|t| lo.is_some_and(|l| t < l)));
             let f = bleed(f, f.time.is_some_and(|t| hi.is_some_and(|h| t > h)));
+            // Aligner-grade times: measurements may only refine near them (the
+            // corridor constants above); outside it the hint wins via the
+            // rejected edge's fallback below.
+            let corridor = |e: Edge, hint: f64, early: f64, late: f64| match e.time {
+                Some(t) if t < hint - early || t > hint + late => {
+                    e.reject(EdgeCause::CorridorReject)
+                }
+                _ => e,
+            };
+            let (o, f) = if ctx.refined {
+                (
+                    corridor(o, w.start, REFINED_START_EARLY, REFINED_START_LATE),
+                    corridor(f, w.end, REFINED_END_EARLY, REFINED_END_LATE),
+                )
+            } else {
+                (o, f)
+            };
             Bound {
                 start: o.time.unwrap_or(w.start),
                 end: f.time.unwrap_or(w.end),
@@ -165,15 +204,23 @@ pub fn word_bounds_explained() -> Vec<Bound> {
     // word i+1's start edge), and at a handful of junctions with no acoustic cue
     // between two fused consonants they disagree by 20-80 ms. Auditioning both
     // sides of that disagreement plays the blend twice, so adjacent overlaps are
-    // reconciled to their midpoint HERE, at the consumer -- the measurement, the
-    // report and its overlap health metric stay raw.
+    // reconciled HERE, at the consumer -- the measurement, the report and its
+    // overlap health metric stay raw. Which way to reconcile depends on how much
+    // the times are worth: with aligner-grade words the ONSET side wins (a word
+    // missing its first consonant is the audible failure -- "grossen" playing as
+    // "rossen"; a coda trimmed a few hundredths early is not), while unrefined
+    // times get the midpoint, since neither side deserves more trust.
     for i in 1..bounds.len() {
         let (a, b) = bounds.split_at_mut(i);
         let (prev, next) = (a.last_mut().unwrap(), b.first_mut().unwrap());
         if next.start < prev.end {
-            let mid = (0.5 * (next.start + prev.end)).max(prev.start).min(next.end);
-            prev.end = mid;
-            next.start = mid;
+            if ctx.refined {
+                prev.end = next.start.max(prev.start);
+            } else {
+                let mid = (0.5 * (next.start + prev.end)).max(prev.start).min(next.end);
+                prev.end = mid;
+                next.start = mid;
+            }
         }
     }
     bounds
