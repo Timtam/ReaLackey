@@ -324,17 +324,30 @@ impl SpeechAnalysis {
         removed: (f64, f64),
         next: Option<(f64, f64)>,
     ) -> (Option<f64>, Option<f64>) {
-        let mid = |(a, b): (f64, f64)| (a + b) / 2.0;
-        let cr = mid(removed);
-        let cp = prev.map(mid);
-        let cn = next.map(mid);
-        let owns = |n: f64, own: f64| {
-            (n - own).abs() <= (n - cr).abs()
-                && cp.map_or(true, |c| c == own || (n - own).abs() <= (n - c).abs())
-                && cn.map_or(true, |c| c == own || (n - own).abs() <= (n - c).abs())
+        // Ownership by distance to the word's SPAN (zero inside it), not to its
+        // midpoint. A long word's midpoint sits far from its own first nucleus,
+        // and by midpoints "ihre" owned the first nucleus OF "grossen" (9.78:
+        // 147 ms from ihre's centre, 173 ms from grossen's) — the start-edge
+        // search band then began at the next word's own nucleus, skipped the
+        // real closure dip at 9.72-9.75, and measured the word as starting at
+        // its VOWEL ("roßen"). A nucleus inside a word's transcript span
+        // belongs to that word, however long the word is.
+        let d = |n: f64, (a, b): (f64, f64)| {
+            if n < a {
+                a - n
+            } else if n > b {
+                n - b
+            } else {
+                0.0
+            }
         };
-        let a_prev = cp.and_then(|c| self.nuclei.iter().copied().rfind(|&n| owns(n, c)));
-        let a_next = cn.and_then(|c| self.nuclei.iter().copied().find(|&n| owns(n, c)));
+        let owns = |n: f64, own: (f64, f64)| {
+            d(n, own) <= d(n, removed)
+                && prev.map_or(true, |s| s == own || d(n, own) <= d(n, s))
+                && next.map_or(true, |s| s == own || d(n, own) <= d(n, s))
+        };
+        let a_prev = prev.and_then(|s| self.nuclei.iter().copied().rfind(|&n| owns(n, s)));
+        let a_next = next.and_then(|s| self.nuclei.iter().copied().find(|&n| owns(n, s)));
         (a_prev, a_next)
     }
 
@@ -1857,6 +1870,7 @@ mod real_audio {
             ("CODA graue start~6.34", (6.162, 6.282), (6.342, 6.622), (6.742, 7.002)),
             ("CODA bist end~2.92", (2.401, 2.481), (2.781, 2.941), (2.961, 3.001)),
             ("CODA du start~2.96", (2.781, 2.941), (2.961, 3.001), (3.061, 3.301)),
+            ("VSTOP ihre end", (9.223, 9.503), (9.563, 9.703), (9.763, 10.143)),
             ("RPT fragt start", (3.061, 3.301), (3.641, 3.881), (3.901, 4.181)),
             ("RPT Irmgard start", (3.641, 3.881), (3.901, 4.181), (4.201, 4.561)),
             ("RPT und end", (4.201, 4.561), (4.702, 4.782), (4.822, 5.182)),
@@ -1874,11 +1888,13 @@ mod real_audio {
                 _ => (Edge::fail(EdgeCause::NoAnchor), Edge::fail(EdgeCause::NoAnchor)),
             };
             eprintln!(
-                "{name:26} transcript {:.3}-{:.3}  measured {:?}-{:?}  end drift {:+.3}",
+                "{name:26} transcript {:.3}-{:.3}  measured {:?}({:?})-{:?}({:?})  end drift {:+.3}",
                 w.0,
                 w.1,
                 o.time.map(|t| (t * 1000.0).round() / 1000.0),
+                o.cause,
                 f.time.map(|t| (t * 1000.0).round() / 1000.0),
+                f.cause,
                 f.time.unwrap_or(w.1) - w.1
             );
         }
@@ -2017,6 +2033,7 @@ mod real_audio {
             ("streichelt|dabei (GOOD, /d/)", 5.10, 5.30),
             ("weiche|Fell   (BAD, /f/)", 6.95, 7.25),
             ("schon|seit    (GOOD, /z/)", 107.70, 107.90),
+            ("ihre|grossen  (voiced /g/ stop)", 9.60, 10.00),
         ] {
             eprintln!("\n--- {name} ---");
             eprintln!("   time     bb     hf     vb   tilt  level  nucleus");
