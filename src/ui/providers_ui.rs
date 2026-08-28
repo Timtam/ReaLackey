@@ -510,7 +510,10 @@ pub fn edit_dialog_init() {
         // DirectML, hence Windows-only.
         if transcription {
             ui::ffi::pe_set_check(ui::ffi::PE_ALIGN, sess.align);
-            if crate::align::gpu_supported() {
+            // The GPU sub-option shows only while its parent is ticked (and the
+            // platform has a GPU lane); toggling the parent mirrors this live
+            // (edit_dialog_key action 4).
+            if crate::align::gpu_supported() && sess.align {
                 ui::ffi::pe_set_check(ui::ffi::PE_ALIGN_GPU, sess.align_gpu);
             } else {
                 ui::ffi::pe_show(ui::ffi::PE_ALIGN_GPU, false);
@@ -572,9 +575,19 @@ fn mask_key(key: &str) -> String {
     }
 }
 
-/// A key-list button was pressed: 0=add, 1=delete, 2=move up, 3=move down. Mutate
-/// the working list, then refresh the listbox and announce the result. Main thread.
+/// A dialog action fired: 0=add key, 1=delete key, 2=move up, 3=move down
+/// (mutate the working key list, refresh, announce), or 4 = the "Refine word
+/// timings locally" checkbox was toggled. Main thread.
 pub fn edit_dialog_key(action: i32) {
+    if action == 4 {
+        // The GPU sub-option only exists while local refinement is on (and the
+        // platform has a GPU lane) — show it exactly then. Its check state is
+        // whatever the user last set this dialog session; OK reads it only
+        // when the parent is on, so a hidden stale tick can never be saved.
+        let on = ui::ffi::pe_get_check(ui::ffi::PE_ALIGN);
+        ui::ffi::pe_show(ui::ffi::PE_ALIGN_GPU, on && crate::align::gpu_supported());
+        return;
+    }
     let refreshed = SESSION.with(|s| {
         let mut b = s.borrow_mut();
         let sess = b.as_mut()?;

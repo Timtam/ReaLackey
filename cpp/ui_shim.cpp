@@ -402,6 +402,10 @@ static RAAI_DLGRET ProviderEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case ID_PE_KEYDEL:   if (g_pe_key) g_pe_key(1); update_pe_key_buttons(hwnd); return TRUE;
         case ID_PE_KEYUP:    if (g_pe_key) g_pe_key(2); update_pe_key_buttons(hwnd); return TRUE;
         case ID_PE_KEYDOWN:  if (g_pe_key) g_pe_key(3); update_pe_key_buttons(hwnd); return TRUE;
+        // "Refine word timings locally" toggled: its GPU sub-option only means
+        // anything while it is on. Rust decides visibility (it knows role and
+        // platform), via the same action callback as the key buttons (code 4).
+        case ID_PE_ALIGN:    if (g_pe_key) g_pe_key(4); return TRUE;
         // Live-enable Add as the user types a key, and Delete/Move as they select.
         case ID_PE_KEY:
           if (HIWORD(wParam) == EN_CHANGE) update_pe_key_buttons(hwnd);

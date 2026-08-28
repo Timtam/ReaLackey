@@ -8,7 +8,7 @@
 use std::cell::Cell;
 
 use crossbeam_channel::Receiver;
-use reaper_medium::{ControlSurface, MessageBoxResult, MessageBoxType};
+use reaper_medium::ControlSurface;
 
 use crate::ai::protocol::UiEvent;
 use crate::reaper::{api, history, osara};
@@ -214,26 +214,22 @@ impl PumpSurface {
                 let _ = reply.send(outcome);
             }
             ReaperOp::Confirm { message, reply } => {
-                // Native, screen-reader-accessible Yes/No confirmation.
-                let yes = api::with(|reaper| {
-                    matches!(
-                        reaper.show_message_box(
-                            message.as_str(),
-                            "ReaLackey",
-                            MessageBoxType::YesNo,
-                        ),
-                        MessageBoxResult::Yes
-                    )
-                })
-                .unwrap_or(false);
+                // Platform-native Yes/No box (MessageBoxW / SWELL) OWNED by the
+                // innermost open ReaLackey dialog, falling back to the assistant
+                // window / foreground. Ownership is why this is our shim's box
+                // and not REAPER's ShowMessageBox (which can't take an owner):
+                // when an unowned box closed, focus fell to REAPER's main window,
+                // stranding the user outside the dialog they were working in
+                // (observed live with NVDA). Screen readers expose the native
+                // box themselves — it is never pre-spoken.
+                let yes = crate::ui::ffi::message_box("ReaLackey", &message, true);
                 let _ = reply.send(yes);
             }
             ReaperOp::Alert { message, reply } => {
-                // A native OK box: visible to sighted users, read by the screen
-                // reader, and correctly focused for both.
-                api::with(|reaper| {
-                    reaper.show_message_box(message.as_str(), "ReaLackey", MessageBoxType::Okay)
-                });
+                // Native OK box: visible, screen-reader-exposed, and owned like
+                // Confirm above so dismissing it restores focus to the dialog
+                // the user was in.
+                crate::ui::ffi::message_box("ReaLackey", &message, false);
                 let _ = reply.send(());
             }
             ReaperOp::EnsureEditorWindow { reply } => {
