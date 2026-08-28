@@ -1493,6 +1493,38 @@ async fn handle_download_align_model(
         alert(op_tx, "The local alignment files are already installed.".to_string()).await;
         return;
     }
+    let total: u64 = items.iter().map(|i| i.size).sum();
+    // Consent, HERE and not in the settings dialog: asked via the main-thread
+    // REAPER message box after the dialog has closed and focus settled, so
+    // screen readers actually read the question (an owned box popped from the
+    // dialog's OK callback raced the OSARA "Provider updated." announcement
+    // and NVDA stayed silent). Declining keeps the setting; transcription says
+    // so and runs unrefined until the files exist.
+    let speed = if gpu {
+        "Alignment runs on your graphics card after each transcription (seconds \
+         per clip; it falls back to the CPU if the card can't serve)."
+    } else {
+        "Alignment runs on your CPU after each transcription and can add up to a \
+         third of the clip's length in processing time on older machines."
+    };
+    let consent = format!(
+        "Refining word timings locally needs a one-time download of about {} MB \
+         (the alignment model plus the ONNX Runtime libraries), stored under \
+         REAPER's resource path in ReaLackey/models.\n\n{speed}\n\n\
+         Download now? Choosing No keeps the setting on; transcription runs \
+         without refinement until the files are installed (the CPU set also \
+         ships in the \"with-models\" release bundle for machines where a large \
+         download is not an option).",
+        total / 1_000_000
+    );
+    if !confirm(op_tx, consent).await {
+        let _ = ui_tx.send(UiEvent::Announce(
+            "Download declined — transcription will run without timing refinement \
+             until the files are installed."
+                .into(),
+        ));
+        return;
+    }
     if let Err(e) = std::fs::create_dir_all(&dir) {
         alert(
             op_tx,
@@ -1501,7 +1533,6 @@ async fn handle_download_align_model(
         .await;
         return;
     }
-    let total: u64 = items.iter().map(|i| i.size).sum();
     let _ = ui_tx.send(UiEvent::ProgressOpen("Downloading the alignment files\u{2026}".into()));
     let _ = ui_tx.send(UiEvent::Announce(format!(
         "Downloading the alignment files \u{2014} about {} megabytes.",

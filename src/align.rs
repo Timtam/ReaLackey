@@ -247,10 +247,6 @@ pub fn download_items(gpu: bool) -> Vec<&'static DownloadItem> {
     items
 }
 
-/// Rough total download size for a lane, for the consent prompt.
-pub fn download_megabytes(gpu: bool) -> u64 {
-    download_items(gpu).iter().map(|i| i.size).sum::<u64>() / 1_000_000
-}
 
 // ---- the engine --------------------------------------------------------------
 

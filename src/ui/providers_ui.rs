@@ -896,45 +896,18 @@ pub fn edit_dialog_ok() -> bool {
             // Declining keeps the setting on; transcription simply runs without
             // refinement (with a spoken note) until the files exist — e.g. from
             // the "with-models" release bundle on data-limited machines.
+            // Local refinement enabled but its files aren't installed: hand the
+            // download (INCLUDING its Yes/No consent) to the worker. The
+            // question must NOT be asked from this dialog callback: the box
+            // would open while the settings dialog is closing, right after the
+            // "Provider updated." OSARA announcement — whose speech stomps
+            // NVDA's automatic reading of the new dialog, leaving a blind user
+            // with a silent question (observed live; only the review cursor
+            // could read it). The worker asks via ReaperOp::Confirm — a plain
+            // REAPER-owned message box that opens after focus has settled, the
+            // same pattern as the cloud-upload consent, which reads correctly.
             if align_locally && crate::align::installed(align_gpu).is_none() {
-                match crate::align::platform_support() {
-                    Err(why) => {
-                        ui::ffi::message_box(
-                            "Local timing refinement",
-                            &format!(
-                                "The setting was saved, but {why}. Transcription will \
-                                 run without local refinement on this machine."
-                            ),
-                            false,
-                        );
-                    }
-                    Ok(()) => {
-                        let mb = crate::align::download_megabytes(align_gpu);
-                        let speed = if align_gpu {
-                            "Alignment runs on your graphics card after each \
-                             transcription (seconds per clip; it falls back to the \
-                             CPU if the card can't serve)."
-                        } else {
-                            "Alignment runs on your CPU after each transcription and \
-                             can add up to a third of the clip's length in processing \
-                             time on older machines."
-                        };
-                        let msg = format!(
-                            "Refining word timings locally needs a one-time download \
-                             of about {mb} MB (the alignment model plus the ONNX \
-                             Runtime libraries), stored under REAPER's resource path \
-                             in ReaLackey/models.\n\n{speed}\n\n\
-                             Download now? Choosing No keeps the setting on; \
-                             transcription runs without refinement until the files \
-                             are installed (the CPU set also ships in the \
-                             \"with-models\" release bundle for machines where a \
-                             large download is not an option)."
-                        );
-                        if ui::ffi::message_box("Local timing refinement", &msg, true) {
-                            crate::ui::bridge::download_align_model(align_gpu);
-                        }
-                    }
-                }
+                crate::ui::bridge::download_align_model(align_gpu);
             }
             SESSION.with(|s| {
                 if let Some(x) = s.borrow_mut().as_mut() {
