@@ -813,8 +813,11 @@ async fn run_tool(
     // before the tool runs. These are not mutations, so the preview path below
     // never applies to them.
     if let Some(consent) = tools::consent_prompt(name, &input) {
+        // The Notice is the visual record in the pane. The QUESTION itself is
+        // never spoken via OSARA: the native Yes/No box below is the properly
+        // exposed channel (NVDA/JAWS/VoiceOver read it themselves), and OSARA
+        // speech right before it opens can stomp that reading (observed live).
         let _ = ui_tx.send(UiEvent::Notice(format!("{consent}?")));
-        let _ = ui_tx.send(UiEvent::Announce(format!("{consent}. Allow?")));
         let approved = confirm(
             op_tx,
             format!("{consent}?\n\nThis will be sent to the cloud AI provider."),
@@ -858,8 +861,8 @@ async fn capture_video_clip(
     // One consent for the whole clip (frames + audio are sent to the cloud).
     let consent = tools::consent_prompt("capture_video_clip", &input)
         .unwrap_or_else(|| "The assistant wants to capture a short video clip".to_string());
+    // Visual notice only — the native box speaks for itself (see consent above).
     let _ = ui_tx.send(UiEvent::Notice(format!("{consent}?")));
-    let _ = ui_tx.send(UiEvent::Announce(format!("{consent}. Allow?")));
     if !confirm(
         op_tx,
         format!("{consent}?\n\nThis will be sent to the cloud AI provider."),
@@ -1107,8 +1110,9 @@ async fn run_transcription(
     if !user_initiated && transcription_is_remote(&cfg) {
         let msg =
             "The assistant wants to render this item's audio and send it to the transcription provider";
+        // Visual notice only — the question is asked by the native box, which
+        // screen readers expose properly on their own (never pre-speak it).
         let _ = ui_tx.send(UiEvent::Notice(format!("{msg}?")));
-        let _ = ui_tx.send(UiEvent::Announce(format!("{msg}. Allow?")));
         if !confirm(
             op_tx,
             format!("{msg}?\n\nThis uploads the audio to the cloud transcription provider."),
