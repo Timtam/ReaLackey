@@ -52,7 +52,10 @@ keyring = "3"
 # ABSOLUTE path from <resource path>/ReaLackey/models (never by name: inside
 # reaper.exe the DLL search order finds the stale onnxruntime.dll in System32).
 # Pinned exactly: 2.0 is an rc series; rc.13 targets ONNX Runtime 1.28.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+# `directml` only compiles the EP registration API — whether DirectML actually
+# runs is decided by the dylib loaded at run time (a DML-enabled build), with
+# graceful CPU fallback otherwise.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "directml"] }
 # Integrity check for the downloaded model + runtime library (the latter is
 # executable code — both are verified against pinned digests).
 sha2 = "0.10"

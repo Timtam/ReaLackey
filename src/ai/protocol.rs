@@ -28,7 +28,8 @@ pub enum MainTask {
     /// the resource-path models dir. Triggered from the provider settings
     /// dialog when "Refine word timings locally" is enabled and the files are
     /// missing. Runs in the worker: it is a large streamed HTTP download.
-    DownloadAlignModel,
+    /// `gpu` picks the lane: the fp16 model for DirectML vs the int8 for CPU.
+    DownloadAlignModel { gpu: bool },
 }
 
 /// The outcome of a cut-by-text editor session, sent from the webview (main

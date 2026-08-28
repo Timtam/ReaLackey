@@ -291,6 +291,9 @@ struct ProvSession {
     /// Whether local word-timing refinement is on ("Refine word timings locally"
     /// checkbox, transcription accounts only).
     align: bool,
+    /// Whether refinement runs on the graphics card ("Use the graphics card"
+    /// checkbox, transcription accounts on Windows only).
+    align_gpu: bool,
     /// The working list of API keys, in priority order (top tried first). Edited
     /// live via the Add / Delete / Move up / Move down buttons; saved on OK.
     keys: Vec<String>,
@@ -338,6 +341,7 @@ fn add_provider(role: ProviderRole) -> bool {
         audio: infer_audio(preset.model),
         thinking: false,
         align: false,
+        align_gpu: false,
         keys: Vec::new(),
         keys_loaded: true, // a brand-new account genuinely has no stored keys yet
         keys_dirty: false,
@@ -376,6 +380,7 @@ fn edit_provider(index: i32, role: ProviderRole) -> bool {
         audio: cfg.supports_audio,
         thinking: cfg.thinking,
         align: cfg.align_locally,
+        align_gpu: cfg.align_gpu,
         keys,
         keys_loaded,
         keys_dirty: false,
@@ -490,18 +495,29 @@ pub fn edit_dialog_init() {
                 ui::ffi::pe_set_check(ui::ffi::PE_AUDIO, sess.audio);
             }
         }
-        if sess.kind == AdapterKind::Anthropic {
+        // `!transcription` keeps the thinking row free for the align checkbox
+        // below — no preset creates an Anthropic transcription account, but a
+        // hand-edited providers.json could, and two stacked checkboxes would be
+        // chaos under a screen reader.
+        if sess.kind == AdapterKind::Anthropic && !transcription {
             ui::ffi::pe_set_check(ui::ffi::PE_THINKING, sess.thinking);
         } else {
             ui::ffi::pe_show(ui::ffi::PE_THINKING, false);
         }
-        // Transcription-only: local word-timing refinement. Shares the audio
-        // checkbox's row — the two are never shown together (audio is a chat
-        // capability, hidden for transcription accounts above).
+        // Transcription-only: local word-timing refinement (vision's row) and
+        // its GPU variant (audio's row) — those chat capabilities are hidden for
+        // transcription accounts above, so the rows are free. The GPU lane is
+        // DirectML, hence Windows-only.
         if transcription {
             ui::ffi::pe_set_check(ui::ffi::PE_ALIGN, sess.align);
+            if crate::align::gpu_supported() {
+                ui::ffi::pe_set_check(ui::ffi::PE_ALIGN_GPU, sess.align_gpu);
+            } else {
+                ui::ffi::pe_show(ui::ffi::PE_ALIGN_GPU, false);
+            }
         } else {
             ui::ffi::pe_show(ui::ffi::PE_ALIGN, false);
+            ui::ffi::pe_show(ui::ffi::PE_ALIGN_GPU, false);
         }
         // Fill the key list (masked) + its summary hint.
         repopulate_keys(&sess.keys, None, sess.keys_loaded, sess.env_active);
@@ -814,8 +830,12 @@ pub fn edit_dialog_ok() -> bool {
     // for Anthropic accounts; OpenAI-compatible models expose reasoning inherently.
     let thinking = kind == AdapterKind::Anthropic && ui::ffi::pe_get_check(ui::ffi::PE_THINKING);
     // Local word-timing refinement is transcription-only — same rule as vision
-    // above: never read a hidden checkbox's stale state.
+    // above: never read a hidden checkbox's stale state. The GPU box is
+    // additionally Windows-only (DirectML).
     let align_locally = transcription && ui::ffi::pe_get_check(ui::ffi::PE_ALIGN);
+    let align_gpu = align_locally
+        && crate::align::gpu_supported()
+        && ui::ffi::pe_get_check(ui::ffi::PE_ALIGN_GPU);
     let cfg = ProviderConfig {
         id,
         label,
@@ -829,6 +849,7 @@ pub fn edit_dialog_ok() -> bool {
         supports_audio,
         thinking,
         align_locally,
+        align_gpu,
     };
 
     // The final key list is the working list plus a key typed into the field but
@@ -875,7 +896,7 @@ pub fn edit_dialog_ok() -> bool {
             // Declining keeps the setting on; transcription simply runs without
             // refinement (with a spoken note) until the files exist — e.g. from
             // the "with-models" release bundle on data-limited machines.
-            if align_locally && crate::align::installed().is_none() {
+            if align_locally && crate::align::installed(align_gpu).is_none() {
                 match crate::align::platform_support() {
                     Err(why) => {
                         ui::ffi::message_box(
@@ -888,23 +909,29 @@ pub fn edit_dialog_ok() -> bool {
                         );
                     }
                     Ok(()) => {
-                        let mb = crate::align::download_megabytes();
+                        let mb = crate::align::download_megabytes(align_gpu);
+                        let speed = if align_gpu {
+                            "Alignment runs on your graphics card after each \
+                             transcription (seconds per clip; it falls back to the \
+                             CPU if the card can't serve)."
+                        } else {
+                            "Alignment runs on your CPU after each transcription and \
+                             can add up to a third of the clip's length in processing \
+                             time on older machines."
+                        };
                         let msg = format!(
                             "Refining word timings locally needs a one-time download \
                              of about {mb} MB (the alignment model plus the ONNX \
-                             Runtime library), stored under REAPER's resource path in \
-                             ReaLackey/models.\n\n\
-                             Alignment runs on your CPU after each transcription and \
-                             can add up to a third of the clip's length in processing \
-                             time on older machines.\n\n\
+                             Runtime libraries), stored under REAPER's resource path \
+                             in ReaLackey/models.\n\n{speed}\n\n\
                              Download now? Choosing No keeps the setting on; \
                              transcription runs without refinement until the files \
-                             are installed (they also ship in the \"with-models\" \
-                             release bundle for machines where a large download is \
-                             not an option)."
+                             are installed (the CPU set also ships in the \
+                             \"with-models\" release bundle for machines where a \
+                             large download is not an option)."
                         );
                         if ui::ffi::message_box("Local timing refinement", &msg, true) {
-                            crate::ui::bridge::download_align_model();
+                            crate::ui::bridge::download_align_model(align_gpu);
                         }
                     }
                 }

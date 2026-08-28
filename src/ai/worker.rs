@@ -53,11 +53,12 @@ impl Drop for GeneratingGuard {
 /// to — silently, in a product whose primary user hears rather than sees —
 /// would leave them believing a 318 MB download is running. Deferred here and
 /// run by the main loop the moment the worker goes idle.
-static PENDING_ALIGN_DOWNLOAD: AtomicBool = AtomicBool::new(false);
+/// 0 = none pending, 1 = CPU lane, 2 = GPU lane (a later request wins).
+static PENDING_ALIGN_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
 
 /// Remember a deferred alignment download and say so ONCE, audibly.
-fn defer_align_download(ui_tx: &CbSender<UiEvent>) {
-    if !PENDING_ALIGN_DOWNLOAD.swap(true, Ordering::SeqCst) {
+fn defer_align_download(ui_tx: &CbSender<UiEvent>, gpu: bool) {
+    if PENDING_ALIGN_DOWNLOAD.swap(if gpu { 2 } else { 1 }, Ordering::SeqCst) == 0 {
         let _ = ui_tx.send(UiEvent::Announce(
             "The alignment download will start when the current work finishes.".into(),
         ));
@@ -130,14 +131,17 @@ async fn run(
             MainTask::OpenCutEditor => {
                 handle_open_cut_editor_action(&ui_tx, &op_tx, &mut task_rx).await;
             }
-            MainTask::DownloadAlignModel => {
-                handle_download_align_model(&ui_tx, &op_tx, &mut task_rx).await;
+            MainTask::DownloadAlignModel { gpu } => {
+                handle_download_align_model(&ui_tx, &op_tx, &mut task_rx, gpu).await;
             }
         }
         // A download confirmed while the arms above were busy was deferred, not
         // dropped — run it now that the worker is idle again.
-        if PENDING_ALIGN_DOWNLOAD.swap(false, Ordering::SeqCst) {
-            handle_download_align_model(&ui_tx, &op_tx, &mut task_rx).await;
+        match PENDING_ALIGN_DOWNLOAD.swap(0, Ordering::SeqCst) {
+            0 => {}
+            lane => {
+                handle_download_align_model(&ui_tx, &op_tx, &mut task_rx, lane == 2).await;
+            }
         }
     }
 }
@@ -701,7 +705,7 @@ async fn run_turn(
                     let _ = ui_tx.send(UiEvent::Status("Cancelled.".into()));
                 }
                 // A confirmed download is deferred, never dropped (spoken note).
-                Some(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
+                Some(MainTask::DownloadAlignModel { gpu }) => defer_align_download(ui_tx, gpu),
                 // Clearing mid-turn would desync the history this turn is building.
                 Some(MainTask::ClearHistory)
                 | Some(MainTask::Prompt(_))
@@ -1158,10 +1162,12 @@ async fn run_transcription(
     // refinement must never cost the user their transcript.
     let mut aligner: Option<crate::align::Engine> = None;
     if cfg.align_locally {
-        match crate::align::installed() {
+        let gpu = cfg.align_gpu;
+        match crate::align::installed(gpu) {
             Some(files) => {
                 let _ = ui_tx.send(UiEvent::Status("Loading the alignment model\u{2026}".into()));
-                match tokio::task::spawn_blocking(move || crate::align::Engine::load(&files)).await
+                match tokio::task::spawn_blocking(move || crate::align::Engine::load(&files, gpu))
+                    .await
                 {
                     Ok(Ok(e)) => aligner = Some(e),
                     Ok(Err(e)) => {
@@ -1200,7 +1206,7 @@ async fn run_transcription(
         loop {
             match task_rx.try_recv() {
                 Ok(MainTask::Cancel) => return TranscribeOutcomeKind::Cancelled,
-                Ok(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
+                Ok(MainTask::DownloadAlignModel { gpu }) => defer_align_download(ui_tx, gpu),
                 Ok(_) => {
                     let _ = ui_tx.send(UiEvent::Status(
                         "Please wait until transcription finishes\u{2026}".into(),
@@ -1283,7 +1289,9 @@ async fn run_transcription(
                         let _ = (&mut fut).await; // let the request unwind
                         return TranscribeOutcomeKind::Cancelled;
                     }
-                    Some(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
+                    Some(MainTask::DownloadAlignModel { gpu }) => {
+                        defer_align_download(ui_tx, gpu)
+                    }
                     Some(MainTask::ClearHistory)
                     | Some(MainTask::Prompt(_))
                     | Some(MainTask::Transcribe(_))
@@ -1416,7 +1424,7 @@ async fn refine_chunk_words(
                     let _ = (&mut handle).await; // let the current window finish
                     return RefineEnd::Cancelled;
                 }
-                Some(MainTask::DownloadAlignModel) => defer_align_download(ui_tx),
+                Some(MainTask::DownloadAlignModel { gpu }) => defer_align_download(ui_tx, gpu),
                 Some(_) => {
                     let _ = ui_tx.send(UiEvent::Status(
                         "Please wait until transcription finishes\u{2026}".into(),
@@ -1466,6 +1474,7 @@ async fn handle_download_align_model(
     ui_tx: &CbSender<UiEvent>,
     op_tx: &CbSender<ReaperOp>,
     task_rx: &mut UnboundedReceiver<MainTask>,
+    gpu: bool,
 ) {
     if let Err(why) = crate::align::platform_support() {
         alert(op_tx, format!("Can't set up local alignment: {why}.")).await;
@@ -1479,7 +1488,7 @@ async fn handle_download_align_model(
         .await;
         return;
     };
-    let items = crate::align::download_items();
+    let items = crate::align::download_items(gpu);
     if items.is_empty() {
         alert(op_tx, "The local alignment files are already installed.".to_string()).await;
         return;
@@ -1509,7 +1518,7 @@ async fn handle_download_align_model(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut done: u64 = 0;
-    for item in &items {
+    for item in items {
         match download_verified(ui_tx, task_rx, &client, item, &dir, done, total).await {
             Ok(()) => done += item.size,
             Err(DownloadEnd::Cancelled) => {

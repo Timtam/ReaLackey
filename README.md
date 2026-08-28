@@ -131,6 +131,13 @@ forced-alignment model (no audio leaves your computer for this step):
   CPU expect up to a third of the clip's length in extra processing (a 2017
   quad-core aligns a 5-minute clip in ~110 s; modern machines are faster). The
   progress dialog shows the stage, and Cancel works throughout.
+- **Have a graphics card? (Windows)** Also check **"Use the graphics card for
+  refinement"**: alignment then runs via DirectML on any DirectX-12 GPU —
+  NVIDIA, AMD, or Intel, no driver toolkits to install — and is dramatically
+  faster (measured 7–8× on a 2016 GTX 1060: a 4½-minute clip aligns in ~14 s).
+  The GPU lane uses a different model variant, so the one-time download is
+  ~670 MB instead of ~350 MB; if the card can't serve, it quietly falls back
+  to CPU inference.
 - **Limited data plan?** Every release also ships
   `realackey-<version>-with-models-<platform>.zip` with the model already
   bundled: unzip and merge its `UserPlugins/` and `ReaLackey/` folders into

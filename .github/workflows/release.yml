@@ -115,22 +115,35 @@ jobs:
       - name: Assemble with-models bundles
         run: |
           set -euo pipefail
-          ORT_V="1.28.0"
+          DMLORT_V="1.24.4"
+          DML_V="1.15.4"
+          MAC_ORT_V="1.28.0"
           MODEL_SHA="2eb5c3d2f6db2ef476aa7a7e1e5800145973e9064eb5292b1b9b8ada1207712a"
-          WIN_DLL_SHA="18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257"
+          WIN_DLL_SHA="e7eedec6a6f26dc39dc948276a75ef6d2bee3fff944d874ceed0bbd3b97bff40"
+          DML_SHA="9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1"
           MAC_DYLIB_SHA="dc19bbcb2f5c9fb3c68b4f9248aa0a35065ff702c5dbeae75eac54a74da97b6d"
 
-          curl -fsSL -o model.onnx \
-            "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/main/onnx/model_int8.onnx"
+          # Revision-pinned (main is mutable; the digest below pins these bytes).
+          # Bundles carry the CPU lane (int8) - GPU users have working downloads
+          # by definition and fetch the fp16 model in-app.
+          curl -fsSL --retry 3 -o model.onnx \
+            "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/2100fb247d8e43962eef24491597fbeb8b469531/onnx/model_int8.onnx"
           echo "${MODEL_SHA}  model.onnx" | sha256sum -c -
-          curl -fsSL --retry 3 -o win.zip \
-            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_V}/onnxruntime-win-x64-${ORT_V}.zip"
-          unzip -q win.zip "onnxruntime-win-x64-${ORT_V}/lib/onnxruntime.dll"
-          echo "${WIN_DLL_SHA}  onnxruntime-win-x64-${ORT_V}/lib/onnxruntime.dll" | sha256sum -c -
+          # Windows runtime = the DirectML-enabled build (contains the CPU
+          # execution provider too, so one runtime serves both lanes) plus the
+          # DirectML redistributable it delay-loads from beside itself.
+          curl -fsSL --retry 3 -o ortdml.nupkg \
+            "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/${DMLORT_V}"
+          unzip -q ortdml.nupkg "runtimes/win-x64/native/onnxruntime.dll"
+          echo "${WIN_DLL_SHA}  runtimes/win-x64/native/onnxruntime.dll" | sha256sum -c -
+          curl -fsSL --retry 3 -o directml.nupkg \
+            "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/${DML_V}"
+          unzip -q directml.nupkg "bin/x64-win/DirectML.dll"
+          echo "${DML_SHA}  bin/x64-win/DirectML.dll" | sha256sum -c -
           curl -fsSL --retry 3 -o mac.tgz \
-            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_V}/onnxruntime-osx-arm64-${ORT_V}.tgz"
-          tar -xzf mac.tgz "onnxruntime-osx-arm64-${ORT_V}/lib/libonnxruntime.${ORT_V}.dylib"
-          echo "${MAC_DYLIB_SHA}  onnxruntime-osx-arm64-${ORT_V}/lib/libonnxruntime.${ORT_V}.dylib" | sha256sum -c -
+            "https://github.com/microsoft/onnxruntime/releases/download/v${MAC_ORT_V}/onnxruntime-osx-arm64-${MAC_ORT_V}.tgz"
+          tar -xzf mac.tgz "onnxruntime-osx-arm64-${MAC_ORT_V}/lib/libonnxruntime.${MAC_ORT_V}.dylib"
+          echo "${MAC_DYLIB_SHA}  onnxruntime-osx-arm64-${MAC_ORT_V}/lib/libonnxruntime.${MAC_ORT_V}.dylib" | sha256sum -c -
 
           cat > THIRD-PARTY-LICENSES.txt <<'EOF'
           This bundle contains, alongside ReaLackey itself:
@@ -145,17 +158,22 @@ jobs:
           * ReaLackey/models/onnxruntime.dll / libonnxruntime.*.dylib
             ONNX Runtime, (c) Microsoft Corporation. MIT license
             (https://github.com/microsoft/onnxruntime).
+
+          * ReaLackey/models/DirectML.dll (Windows only)
+            DirectML, (c) Microsoft Corporation. MIT license
+            (https://www.nuget.org/packages/Microsoft.AI.DirectML).
           EOF
 
-          make_bundle() { # $1 = platform, $2 = extension file, $3 = runtime file source, $4 = runtime dest name
+          bundle_root() { # $1 = platform, $2 = extension file
             local root="realackey-with-models-$1"
             mkdir -p "$root/UserPlugins" "$root/ReaLackey/models"
             cp "dist/$2" "$root/UserPlugins/"
             cp model.onnx "$root/ReaLackey/models/mms300m-align-int8.onnx"
-            cp "$3" "$root/ReaLackey/models/$4"
             cp THIRD-PARTY-LICENSES.txt "$root/"
             cp INSTALL.txt "$root/"
-            (cd "$root" && zip -qr "../dist/realackey-${{ inputs.version }}-with-models-$1.zip" .)
+          }
+          bundle_zip() { # $1 = platform
+            (cd "realackey-with-models-$1" && zip -qr "../dist/realackey-${{ inputs.version }}-with-models-$1.zip" .)
           }
 
           cat > INSTALL.txt <<'EOF'
@@ -177,11 +195,29 @@ jobs:
             xattr -dr com.apple.quarantine <REAPER resource path>/UserPlugins <REAPER resource path>/ReaLackey
           EOF
 
-          make_bundle windows reaper_realackey.dll \
-            "onnxruntime-win-x64-${ORT_V}/lib/onnxruntime.dll" onnxruntime.dll
-          make_bundle macos reaper_realackey.dylib \
-            "onnxruntime-osx-arm64-${ORT_V}/lib/libonnxruntime.${ORT_V}.dylib" \
-            "libonnxruntime.${ORT_V}.dylib"
+          bundle_root windows reaper_realackey.dll
+          cp runtimes/win-x64/native/onnxruntime.dll \
+            realackey-with-models-windows/ReaLackey/models/onnxruntime.dll
+          cp bin/x64-win/DirectML.dll \
+            realackey-with-models-windows/ReaLackey/models/DirectML.dll
+          bundle_zip windows
+          bundle_root macos reaper_realackey.dylib
+          cp "onnxruntime-osx-arm64-${MAC_ORT_V}/lib/libonnxruntime.${MAC_ORT_V}.dylib" \
+            "realackey-with-models-macos/ReaLackey/models/libonnxruntime.${MAC_ORT_V}.dylib"
+          bundle_zip macos
+
+          # The in-app downloader fetches the runtimes from this repo's fixed
+          # align-deps-1 release (src/align.rs). Fail the release loudly if
+          # those assets are missing or drifted from the pinned digests - a
+          # green release must not ship a dead in-app download path. Run the
+          # align-deps.yml workflow once to (re)publish them.
+          DEPS="https://github.com/${{ github.repository }}/releases/download/align-deps-1"
+          curl -fsSL --retry 3 -o dep-win.dll "${DEPS}/onnxruntime-win-x64-dml-${DMLORT_V}.dll"
+          echo "${WIN_DLL_SHA}  dep-win.dll" | sha256sum -c -
+          curl -fsSL --retry 3 -o dep-dml.dll "${DEPS}/directml-${DML_V}.dll"
+          echo "${DML_SHA}  dep-dml.dll" | sha256sum -c -
+          curl -fsSL --retry 3 -o dep-mac.dylib "${DEPS}/libonnxruntime-osx-arm64-${MAC_ORT_V}.dylib"
+          echo "${MAC_DYLIB_SHA}  dep-mac.dylib" | sha256sum -c -
 
       - name: Commit, tag, push
         run: |

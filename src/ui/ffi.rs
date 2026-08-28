@@ -81,6 +81,7 @@ pub const PE_VISION: c_int = 1027;
 pub const PE_AUDIO: c_int = 1036;
 pub const PE_THINKING: c_int = 1037;
 pub const PE_ALIGN: c_int = 1038;
+pub const PE_ALIGN_GPU: c_int = 1039;
 pub const PE_KEY: c_int = 1028;
 pub const PE_KEYHINT: c_int = 1029;
 pub const PE_MAXTURNS: c_int = 1030;

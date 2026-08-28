@@ -104,12 +104,18 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub thinking: bool,
     /// Transcription accounts only: refine word timings on THIS machine with the
-    /// local forced-alignment model after each transcription (CPU inference;
-    /// needs a one-time ~318 MB download, see `crate::align`). Off by default —
-    /// most endpoints' timings are good enough to start with, and not every
-    /// machine wants the download or the extra processing time.
+    /// local forced-alignment model after each transcription (needs a one-time
+    /// download, see `crate::align`). Off by default — most endpoints' timings
+    /// are good enough to start with, and not every machine wants the download
+    /// or the extra processing time.
     #[serde(default)]
     pub align_locally: bool,
+    /// With `align_locally`: run the aligner on the graphics card (DirectML,
+    /// Windows only — measured 7-8x faster than CPU even on a 2016 mid-range
+    /// GPU). Selects the fp16 model (~632 MB) instead of the int8 one; falls
+    /// back to CPU inference when no usable GPU exists.
+    #[serde(default)]
+    pub align_gpu: bool,
 }
 
 impl ProviderConfig {
@@ -527,6 +533,7 @@ fn load_or_seed() -> Store {
             supports_audio: false,
             thinking: false,
             align_locally: false,
+            align_gpu: false,
         }],
         auto_approve: false,
     };

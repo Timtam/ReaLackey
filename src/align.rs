@@ -61,51 +61,99 @@ pub const CANCELLED: &str = "cancelled";
 
 // ---- installed files ---------------------------------------------------------
 
-/// Model file name under `models_dir()`. Named for what it is, not the upstream
-/// "model_int8.onnx", so the directory stays legible when more models arrive.
-pub const MODEL_FILE: &str = "mms300m-align-int8.onnx";
+/// One downloadable file: name under `models_dir()`, source, and its pinned
+/// identity. All URLs are immutable (commit-revision or fixed release assets)
+/// so a checksum mismatch can only mean corruption or tampering, never an
+/// upstream change.
+pub struct DownloadItem {
+    pub url: &'static str,
+    pub file: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+    /// Short human name for progress/errors ("the alignment model").
+    pub label: &'static str,
+}
+
+/// CPU-lane model (int8): the fastest variant for CPU inference. File names say
+/// what the files are, not the upstream "model_int8.onnx", so the directory
+/// stays legible when more models arrive.
 // Pinned to a COMMIT revision, not `main`: HF refs are mutable, and an upstream
 // re-quantization would otherwise turn every download into a full 317 MB fetch
 // followed by a checksum rejection — hostile to exactly the limited-data users
-// this feature caters to. This revision serves the bytes MODEL_SHA256 pins.
-const MODEL_URL: &str = "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/2100fb247d8e43962eef24491597fbeb8b469531/onnx/model_int8.onnx";
-const MODEL_SIZE: u64 = 317_341_664;
-const MODEL_SHA256: &str = "2eb5c3d2f6db2ef476aa7a7e1e5800145973e9064eb5292b1b9b8ada1207712a";
+// this feature caters to. The revision serves the bytes the digests pin.
+const MODEL_INT8: DownloadItem = DownloadItem {
+    url: "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/2100fb247d8e43962eef24491597fbeb8b469531/onnx/model_int8.onnx",
+    file: "mms300m-align-int8.onnx",
+    size: 317_341_664,
+    sha256: "2eb5c3d2f6db2ef476aa7a7e1e5800145973e9064eb5292b1b9b8ada1207712a",
+    label: "the alignment model",
+};
 
-// The ONNX Runtime dynamic library, version-matched to the `ort` crate (rc.13
-// targets 1.28.0). Downloaded from this repo's fixed `align-deps-1` release —
-// flat files repackaged from Microsoft's official archives by the
-// `align-deps.yml` workflow — because the official downloads are zip/tgz
-// archives and shipping an unzipper for one file is not worth it.
+/// GPU-lane model (fp16): DirectML does not accelerate the int8 dynamic-quant
+/// graph (those ops fall back to CPU), so the GPU path uses the fp16 weights.
+/// Measured on a GTX 1060: RTF 0.05 vs 0.36 for int8-on-CPU on the same box.
+const MODEL_FP16: DownloadItem = DownloadItem {
+    url: "https://huggingface.co/onnx-community/mms-300m-1130-forced-aligner-ONNX/resolve/2100fb247d8e43962eef24491597fbeb8b469531/onnx/model_fp16.onnx",
+    file: "mms300m-align-fp16.onnx",
+    size: 631_591_191,
+    sha256: "e98082b382375f3528ec7514e175b5cd0eb77fcc4d4531a7142b9e45a1ce6deb",
+    label: "the alignment model (GPU variant)",
+};
+
+// The ONNX Runtime dynamic libraries, fetched from this repo's fixed
+// `align-deps-1` release — flat files repackaged from Microsoft's official
+// archives by the `align-deps.yml` workflow, because the official downloads are
+// zip/tgz/NuGet archives and shipping an unzipper for one file is not worth it.
+// The FIRST entry is the dylib handed to `ort::init_from`; companions beside it
+// resolve via the loader's altered search path (libloading loads absolute paths
+// with LOAD_WITH_ALTERED_SEARCH_PATH, so DirectML.dll is found next to the
+// runtime, not in System32 where Windows keeps a stale copy).
+//
+// Windows uses the DirectML-ENABLED build (Microsoft.ML.OnnxRuntime.DirectML
+// 1.24.4) for BOTH lanes: it contains the CPU execution provider too, sessions
+// simply don't register the DML EP unless asked, and `ort` rc.13 accepts any
+// runtime with API version >= 17.
 #[cfg(target_os = "windows")]
-pub const RUNTIME_FILE: &str = "onnxruntime.dll";
-#[cfg(target_os = "windows")]
-const RUNTIME_URL: &str =
-    "https://github.com/Timtam/ReaLackey/releases/download/align-deps-1/onnxruntime-win-x64-1.28.0.dll";
-#[cfg(target_os = "windows")]
-const RUNTIME_SIZE: u64 = 15_809_848;
-#[cfg(target_os = "windows")]
-const RUNTIME_SHA256: &str = "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257";
+const RUNTIME_FILES: &[DownloadItem] = &[
+    DownloadItem {
+        url: "https://github.com/Timtam/ReaLackey/releases/download/align-deps-1/onnxruntime-win-x64-dml-1.24.4.dll",
+        file: "onnxruntime.dll",
+        size: 17_328_152,
+        sha256: "e7eedec6a6f26dc39dc948276a75ef6d2bee3fff944d874ceed0bbd3b97bff40",
+        label: "the ONNX Runtime library",
+    },
+    DownloadItem {
+        url: "https://github.com/Timtam/ReaLackey/releases/download/align-deps-1/directml-1.15.4.dll",
+        file: "DirectML.dll",
+        size: 18_527_776,
+        sha256: "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1",
+        label: "the DirectML library",
+    },
+];
 
 #[cfg(target_os = "macos")]
-pub const RUNTIME_FILE: &str = "libonnxruntime.1.28.0.dylib";
-#[cfg(target_os = "macos")]
-const RUNTIME_URL: &str =
-    "https://github.com/Timtam/ReaLackey/releases/download/align-deps-1/libonnxruntime-osx-arm64-1.28.0.dylib";
-#[cfg(target_os = "macos")]
-const RUNTIME_SIZE: u64 = 39_312_136;
-#[cfg(target_os = "macos")]
-const RUNTIME_SHA256: &str = "dc19bbcb2f5c9fb3c68b4f9248aa0a35065ff702c5dbeae75eac54a74da97b6d";
+const RUNTIME_FILES: &[DownloadItem] = &[DownloadItem {
+    url: "https://github.com/Timtam/ReaLackey/releases/download/align-deps-1/libonnxruntime-osx-arm64-1.28.0.dylib",
+    file: "libonnxruntime.1.28.0.dylib",
+    size: 39_312_136,
+    sha256: "dc19bbcb2f5c9fb3c68b4f9248aa0a35065ff702c5dbeae75eac54a74da97b6d",
+    label: "the ONNX Runtime library",
+}];
 
 // Linux builds compile but have no packaged runtime (we don't ship Linux).
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub const RUNTIME_FILE: &str = "libonnxruntime.so";
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const RUNTIME_URL: &str = "";
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const RUNTIME_SIZE: u64 = 0;
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const RUNTIME_SHA256: &str = "";
+const RUNTIME_FILES: &[DownloadItem] = &[];
+
+/// Whether the GPU lane (DirectML) exists on this platform. macOS could grow a
+/// CoreML analog later; today GPU means Windows.
+pub fn gpu_supported() -> bool {
+    cfg!(target_os = "windows")
+}
+
+/// The model for a lane: int8 for CPU, fp16 for GPU.
+fn model_for(gpu: bool) -> &'static DownloadItem {
+    if gpu { &MODEL_FP16 } else { &MODEL_INT8 }
+}
 
 /// Whether local alignment can run on this machine at all. ONNX Runtime stopped
 /// shipping Intel-mac builds, so on macOS the answer is Apple Silicon only —
@@ -147,9 +195,10 @@ pub fn models_dir() -> Option<PathBuf> {
     MODELS_DIR.get().cloned()
 }
 
-/// The two files local alignment needs, verified present.
+/// The files one lane of local alignment needs, verified present.
 pub struct AlignFiles {
     pub model: PathBuf,
+    /// The main ONNX Runtime dylib (companions sit beside it).
     pub runtime: PathBuf,
 }
 
@@ -157,58 +206,50 @@ fn file_ok(path: &PathBuf, size: u64) -> bool {
     std::fs::metadata(path).map(|m| m.len() == size).unwrap_or(false)
 }
 
-/// Both files installed (exact expected sizes — cheap corruption guard; full
-/// SHA-256 verification happens once, at download time)? `None` if anything is
-/// missing, truncated, or the dir was never resolved.
-pub fn installed() -> Option<AlignFiles> {
+/// Everything the lane needs installed (exact expected sizes — cheap corruption
+/// guard; full SHA-256 verification happens once, at download time)? `None` if
+/// anything is missing, truncated, or the dir was never resolved.
+pub fn installed(gpu: bool) -> Option<AlignFiles> {
     let dir = models_dir()?;
-    let model = dir.join(MODEL_FILE);
-    let runtime = dir.join(RUNTIME_FILE);
-    (file_ok(&model, MODEL_SIZE) && file_ok(&runtime, RUNTIME_SIZE))
-        .then_some(AlignFiles { model, runtime })
+    let m = model_for(gpu);
+    let model = dir.join(m.file);
+    if !file_ok(&model, m.size) || RUNTIME_FILES.is_empty() {
+        return None;
+    }
+    for r in RUNTIME_FILES {
+        if !file_ok(&dir.join(r.file), r.size) {
+            return None;
+        }
+    }
+    Some(AlignFiles {
+        model,
+        runtime: dir.join(RUNTIME_FILES[0].file),
+    })
 }
 
-/// One file the downloader must fetch.
-pub struct DownloadItem {
-    pub url: &'static str,
-    pub file: &'static str,
-    pub size: u64,
-    pub sha256: &'static str,
-    /// Short human name for progress/errors ("the alignment model").
-    pub label: &'static str,
-}
-
-/// What still needs downloading (already-valid files are skipped, so a bundled
-/// install downloads nothing and a broken/partial install fetches only the rest).
-pub fn download_items() -> Vec<DownloadItem> {
+/// What the lane still needs downloading (already-valid files are skipped, so a
+/// bundled install downloads nothing, a broken/partial install fetches only the
+/// rest, and switching lanes fetches only the other model).
+pub fn download_items(gpu: bool) -> Vec<&'static DownloadItem> {
     let Some(dir) = models_dir() else {
         return Vec::new();
     };
-    let mut items = Vec::new();
-    if !file_ok(&dir.join(RUNTIME_FILE), RUNTIME_SIZE) {
-        items.push(DownloadItem {
-            url: RUNTIME_URL,
-            file: RUNTIME_FILE,
-            size: RUNTIME_SIZE,
-            sha256: RUNTIME_SHA256,
-            label: "the ONNX Runtime library",
-        });
+    let mut items: Vec<&'static DownloadItem> = Vec::new();
+    for r in RUNTIME_FILES {
+        if !file_ok(&dir.join(r.file), r.size) {
+            items.push(r);
+        }
     }
-    if !file_ok(&dir.join(MODEL_FILE), MODEL_SIZE) {
-        items.push(DownloadItem {
-            url: MODEL_URL,
-            file: MODEL_FILE,
-            size: MODEL_SIZE,
-            sha256: MODEL_SHA256,
-            label: "the alignment model",
-        });
+    let m = model_for(gpu);
+    if !file_ok(&dir.join(m.file), m.size) {
+        items.push(m);
     }
     items
 }
 
-/// Rough total download size, for the consent prompt ("about 318 MB").
-pub fn download_megabytes() -> u64 {
-    download_items().iter().map(|i| i.size).sum::<u64>() / 1_000_000
+/// Rough total download size for a lane, for the consent prompt.
+pub fn download_megabytes(gpu: bool) -> u64 {
+    download_items(gpu).iter().map(|i| i.size).sum::<u64>() / 1_000_000
 }
 
 // ---- the engine --------------------------------------------------------------
@@ -252,10 +293,25 @@ impl Engine {
     /// Load the runtime + model. Fails cleanly (never panics): a missing or
     /// wrong-versioned dylib, or an unreadable model, must degrade to
     /// "transcription without refinement", not take the worker down.
-    pub fn load(files: &AlignFiles) -> Result<Self, String> {
+    ///
+    /// `gpu` registers the DirectML execution provider WITHOUT error-on-failure:
+    /// on a machine whose GPU can't serve it (no DX12 device, broken driver) the
+    /// session silently runs on the CPU instead — slower (the fp16 model on CPU
+    /// trails int8), but working beats a hard failure the user can't fix.
+    pub fn load(files: &AlignFiles, gpu: bool) -> Result<Self, String> {
         ensure_ort(&files.runtime)?;
-        let session = ort::session::Session::builder()
-            .and_then(|mut b| b.commit_from_file(&files.model))
+        let mut builder = ort::session::Session::builder()
+            .map_err(|e| format!("could not start an inference session: {e}"))?;
+        #[cfg(target_os = "windows")]
+        if gpu {
+            builder = builder
+                .with_execution_providers([ort::ep::DirectML::default().build()])
+                .map_err(|e| format!("could not configure the GPU provider: {e}"))?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = gpu;
+        let session = builder
+            .commit_from_file(&files.model)
             .map_err(|e| format!("could not load the alignment model: {e}"))?;
         Ok(Self { session })
     }
@@ -565,15 +621,22 @@ mod tests {
     fn load() -> Option<(Engine, Clip)> {
         let dylib = std::env::var("ALIGN_ORT_DYLIB").ok()?;
         let model = std::env::var("ALIGN_MODEL").ok()?;
-        let wav = std::env::var("PARO16").ok()?;
-        let words_path = std::env::var("PARO_WORDS").ok()?;
         let t0 = Instant::now();
-        let engine = Engine::load(&AlignFiles {
-            model: model.into(),
-            runtime: dylib.into(),
-        })
+        let engine = Engine::load(
+            &AlignFiles {
+                model: model.into(),
+                runtime: dylib.into(),
+            },
+            false,
+        )
         .expect("load engine");
         eprintln!("model load: {:.1}s", t0.elapsed().as_secs_f64());
+        Some((engine, load_clip()?))
+    }
+
+    fn load_clip() -> Option<Clip> {
+        let wav = std::env::var("PARO16").ok()?;
+        let words_path = std::env::var("PARO_WORDS").ok()?;
         let bytes = std::fs::read(&wav).expect("read wav");
         let (samples, ch, sr) = crate::dsp::parse_wav(&bytes).expect("parse wav");
         assert_eq!(ch, 1, "probe expects mono");
@@ -591,7 +654,7 @@ mod tests {
                 ))
             })
             .collect();
-        Some((engine, Clip { samples, words }))
+        Some(Clip { samples, words })
     }
 
     /// End-to-end over the production path: refine the full clip's words,
@@ -602,6 +665,39 @@ mod tests {
             eprintln!("set ALIGN_ORT_DYLIB / ALIGN_MODEL / PARO16 / PARO_WORDS to run the probe");
             return;
         };
+        run_probe(&mut engine, &clip);
+    }
+
+    /// The GPU variant: same probe through the production `Engine::load(_, true)`
+    /// path. Point ALIGN_ORT_DYLIB at a DML-ENABLED onnxruntime.dll (the
+    /// Microsoft.ML.OnnxRuntime.DirectML NuGet build, with DirectML.dll beside
+    /// it) and ALIGN_MODEL at the fp16 model — DML does not accelerate the int8
+    /// dynamic-quant graph. Note the production path falls back to CPU silently
+    /// if the GPU can't serve; a suspiciously CPU-like RTF means exactly that.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn align_probe_directml() {
+        if std::env::var("ALIGN_EP").as_deref() != Ok("directml") {
+            eprintln!("set ALIGN_EP=directml (plus the probe env vars) to run the GPU probe");
+            return;
+        }
+        let dylib = std::env::var("ALIGN_ORT_DYLIB").expect("ALIGN_ORT_DYLIB");
+        let model = std::env::var("ALIGN_MODEL").expect("ALIGN_MODEL");
+        let t0 = Instant::now();
+        let mut engine = Engine::load(
+            &AlignFiles {
+                model: model.into(),
+                runtime: dylib.into(),
+            },
+            true,
+        )
+        .expect("load GPU engine");
+        eprintln!("model load: {:.1}s", t0.elapsed().as_secs_f64());
+        let clip = load_clip().expect("PARO16 / PARO_WORDS");
+        run_probe(&mut engine, &clip);
+    }
+
+    fn run_probe(engine: &mut Engine, clip: &Clip) {
         let mut words: Vec<Word> = clip
             .words
             .iter()

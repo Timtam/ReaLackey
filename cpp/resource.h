@@ -43,6 +43,7 @@
 #define ID_PE_AUDIO          1036   // "Supports audio (listening)" checkbox
 #define ID_PE_THINKING       1037   // "Extended thinking (reasoning)" checkbox (Anthropic)
 #define ID_PE_ALIGN          1038   // "Refine word timings locally" checkbox (transcription)
+#define ID_PE_ALIGN_GPU      1039   // "Use the graphics card" checkbox (transcription, Windows)
 
 // Prompt presets: reusable prompt bodies inserted into the chat composer.
 // List dialog (add / edit / delete; no reorder).

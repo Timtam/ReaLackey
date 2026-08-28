@@ -64,9 +64,10 @@ pub fn transcribe(output: TranscribeOutput) {
 
 /// Download the local alignment files (provider settings enabled the feature and
 /// the files are missing). Handed to the worker: a large streamed HTTP download.
-pub fn download_align_model() {
+/// `gpu` picks the lane (fp16 model for DirectML vs int8 for CPU).
+pub fn download_align_model(gpu: bool) {
     if let Some(tx) = TASK_TX.get() {
-        let _ = tx.send(MainTask::DownloadAlignModel);
+        let _ = tx.send(MainTask::DownloadAlignModel { gpu });
     }
 }
 
