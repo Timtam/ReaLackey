@@ -233,7 +233,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A SemVer pre-release (any version with a "-", e.g. 0.4.0-beta.1) is
+          # published as a GitHub prerelease so it never becomes "latest" — the
+          # README's install link points at releases/latest, and testers opting
+          # into a beta must not become every new user's default download.
+          PRE=""
+          case "${{ inputs.version }}" in
+            *-*) PRE="--prerelease" ;;
+          esac
           gh release create "v${{ inputs.version }}" \
             --title "ReaLackey v${{ inputs.version }}" \
             --notes-file release-notes.md \
+            $PRE \
             dist/*
