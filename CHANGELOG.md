@@ -10,6 +10,8 @@ into a versioned heading and attaches its entries to the GitHub release — see
 
 ## [Unreleased]
 
+## [0.4.0-beta.1] - 2026-09-19
+
 ### Added
 
 - **Take envelopes.** The assistant can now read and edit the automation lanes
