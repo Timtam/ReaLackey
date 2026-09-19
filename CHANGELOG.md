@@ -29,16 +29,6 @@ into a versioned heading and attaches its entries to the GitHub release — see
   asymmetry where the assistant could list a take FX's parameters but only ever
   change them on tracks. Both confirmation-gated and undo-wrapped.
 
-- **Cut-by-text editor: a whole-clip diagnostic report.** The editor's **Report**
-  button copies a per-word table to the clipboard — transcript span, measured span,
-  the drift between them, the gap to the next word, and, for each edge the analysis
-  could **not** measure, *why*. Previously a boundary that fell back to the
-  transcript printed a drift of `+0.000`, which is exactly what a perfect
-  measurement prints, so the two were indistinguishable; unmeasured edges now show
-  `--` and a cause. The header summarises causes across the clip and lists runs of
-  consecutive unmeasured words, because one word the detector cannot see also breaks
-  its neighbours.
-
 - **Speech-to-text (transcription)** — a new provider *type* alongside chat. The
   **Providers dialog is now tabbed by role** (Chat / Transcription); on the
   **Transcription** tab, **Add → "OpenAI Whisper"** (or **"Local Whisper server"**)
@@ -55,6 +45,7 @@ into a versioned heading and attaches its entries to the GitHub release — see
   (a numbered variant is used instead); the result is spoken and its path announced.
   A **progress dialog** (progress bar + Cancel) shows while a transcription action
   runs, so sighted users get visible progress and can cancel part-way through.
+
 - **Clear the conversation** — a **Clear** button next to Send empties the chat and
   the assistant's memory of it. Handy when switching to a different provider: without
   it the next message re-sends the whole previous conversation to the new model, which
@@ -62,10 +53,7 @@ into a versioned heading and attaches its entries to the GitHub release — see
   should look (a reasoning block or a tool call the new one won't accept). The button
   is reachable by Tab and announced; it does nothing mid-reply, so it can't cut a
   message off half-written.
-- **Keyboard shortcuts in the cut-by-text editor** — a **Keys** button in the editor's
-  header expands the full list (sentence and word navigation, selection, remove,
-  undo/redo, playback, and how to leave the transcript), so the keys are discoverable
-  without leaving the editor or hunting through documentation.
+
 - **Advanced mode (auto-approve edits)**: a toggle that lets the assistant apply
   changes **without asking for confirmation each time**. Flip it from **Extensions
   → ReaLackey → "Advanced mode (auto-approve edits)"** (the menu item shows the
@@ -73,6 +61,7 @@ into a versioned heading and attaches its entries to the GitHub release — see
   a key. Off by default; the state persists. The `RAAI_CONFIRM` environment
   variable still overrides it. (Edits remain undoable in REAPER, and each tool the
   assistant runs is still announced — you're just not prompted per change.)
+
 - **Cut by text** — edit audio the way modern video editors do: transcribe an
   item, then cut it down to a shortened transcript. Ask the assistant to "cut out
   the part where I fumble the intro" (or give it the transcript with the unwanted
@@ -86,6 +75,7 @@ into a versioned heading and attaches its entries to the GitHub release — see
   before it runs and is fully undoable. There's also a lower-level
   **`remove_item_time_ranges`** the assistant can use to cut explicit time ranges
   out of an item (e.g. "remove 12s–15s") without transcribing.
+
 - **Cut-by-text editor** — a keyboard-driven editor for cutting by text yourself,
   built accessibility-first. Bind **"ReaLackey: Cut selected item by text"** (or run
   it from **Extensions → ReaLackey → "Cut selected item by text…"**, or ask the
@@ -100,6 +90,32 @@ into a versioned heading and attaches its entries to the GitHub release — see
   previews the edited result. **Confirm** cuts exactly what you removed, as a single
   undo point. Deletion-only for now (moving text is a later step); needs the HTML
   pane (Windows/macOS) and a word-timestamp model (`whisper-1` or local Whisper).
+  A **Keys** button in the editor's header expands the full shortcut list, so
+  the keys are discoverable without leaving the editor; a **Report** button
+  copies a whole-clip, per-word diagnostic table to the clipboard — transcript
+  span, measured span, the drift between them, the gap to the next word, and,
+  for each edge the analysis could **not** measure, *why* — with a header that
+  summarises causes across the clip.
+
+- **Local word-timing refinement (optional)** — cut-by-text is only as precise
+  as each word's timestamps, and plain Whisper endpoints are often 50-200 ms
+  off: the difference between a clean cut and a clipped consonant. A new
+  per-provider setting on the Transcription tab, **"Refine word timings
+  locally"**, re-times every word on your own machine with a forced-alignment
+  model after each transcription — no audio leaves your computer for this step.
+  Off by default; enabling it offers a one-time download (~350 MB: the model
+  plus the ONNX Runtime libraries) with progress and Cancel, every file checked
+  against pinned digests. On Windows, **"Use the graphics card for
+  refinement"** runs the aligner via DirectML on any DirectX-12 GPU — measured
+  7-8x faster than the CPU even on a 2016 GTX 1060 — using a higher-precision
+  model (~670 MB download) and falling back to the CPU when no usable GPU
+  exists. For machines where a large download is not an option, each release
+  now also ships **`realackey-<version>-with-models-<platform>.zip`** with the
+  CPU set pre-bundled: merge its folders into the REAPER resource path and
+  nothing needs downloading. macOS: Apple Silicon only (ONNX Runtime no longer
+  provides Intel-mac builds); elsewhere transcription simply runs without
+  refinement. The alignment model (Meta AI's MMS forced aligner) is licensed
+  CC-BY-NC 4.0 — non-commercial use.
 
 - **Templates** — the assistant can now **list**, **load**, and **save** REAPER
   templates. Ask it to list your track and project templates, load one by name (a
@@ -110,6 +126,22 @@ into a versioned heading and attaches its entries to the GitHub release — see
   project as a project template isn't included, since there's no way to do it without
   re-pointing your current project at the template file — use REAPER's File menu for
   that.
+
+- **Perplexity (Agent API)** provider (Add → "Perplexity (Agent API, web-grounded)").
+  Unlike Perplexity's plain Sonar endpoint — which can't call tools and so can't
+  drive REAPER — the Agent API speaks the OpenAI **Responses** protocol with
+  client-side function calling, so the assistant can control REAPER *and* ground
+  its answers on live web results (`web_search`) in one loop. It's multi-provider:
+  pick a strong agentic model by id (`openai/gpt-5.1`, `anthropic/claude-…`, or
+  `sonar-…`) — the Model field is free-text (the Agent API has no model list to
+  fetch). Fixed endpoint, needs a Perplexity API key; web grounding is always on.
+
+- **oMLX** provider preset (Add → "oMLX (local, Apple Silicon)"). oMLX is a native
+  MLX inference server for Apple Silicon (continuous batching, SSD KV cache) that's
+  faster than Ollama on a Mac. It exposes an OpenAI-compatible endpoint, so it uses
+  the existing adapter — the preset just points at `http://localhost:8000/v1`; pick
+  your model with **Fetch models…**. (Any oMLX instance already worked via the
+  generic "OpenAI-compatible" provider; this is just one-click setup.)
 
 ### Changed
 
@@ -160,23 +192,6 @@ into a versioned heading and attaches its entries to the GitHub release — see
   same aria-live channel the copy confirmation uses — reliable on VoiceOver and
   NVDA alike — and it announces the message's actual text, so navigating to an
   assistant message now reads the response rather than just "Assistant".
-
-### Added
-
-- **Perplexity (Agent API)** provider (Add → "Perplexity (Agent API, web-grounded)").
-  Unlike Perplexity's plain Sonar endpoint — which can't call tools and so can't
-  drive REAPER — the Agent API speaks the OpenAI **Responses** protocol with
-  client-side function calling, so the assistant can control REAPER *and* ground
-  its answers on live web results (`web_search`) in one loop. It's multi-provider:
-  pick a strong agentic model by id (`openai/gpt-5.1`, `anthropic/claude-…`, or
-  `sonar-…`) — the Model field is free-text (the Agent API has no model list to
-  fetch). Fixed endpoint, needs a Perplexity API key; web grounding is always on.
-- **oMLX** provider preset (Add → "oMLX (local, Apple Silicon)"). oMLX is a native
-  MLX inference server for Apple Silicon (continuous batching, SSD KV cache) that's
-  faster than Ollama on a Mac. It exposes an OpenAI-compatible endpoint, so it uses
-  the existing adapter — the preset just points at `http://localhost:8000/v1`; pick
-  your model with **Fetch models…**. (Any oMLX instance already worked via the
-  generic "OpenAI-compatible" provider; this is just one-click setup.)
 
 ## [0.3.1] - 2026-07-17
 
