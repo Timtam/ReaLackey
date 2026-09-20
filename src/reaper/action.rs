@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 
 use reaper_medium::{
     AcceleratorPosition, CommandId, Hmenu, HookCommand, HookCustomMenu, MenuHookFlag,
-    OwnedGaccelRegister, ReaperSession, ReaperStr, TranslateAccel, TranslateAccelArgs,
-    TranslateAccelResult,
+    OwnedGaccelRegister, ReaperSession, ReaperStr, ToggleAction, ToggleActionResult,
+    TranslateAccel, TranslateAccelArgs, TranslateAccelResult,
 };
 
 use crate::ai::protocol::TranscribeOutput;
@@ -103,6 +103,26 @@ impl TranslateAccel for AccelHook {
     }
 }
 
+/// Reports the on/off state of our toggleable commands. REAPER queries this
+/// whenever it needs the state — drawing the Extensions-menu checkmark, the
+/// Actions list's State column, toolbar button states — so the display can
+/// never go stale, unlike state baked into a menu label at build time.
+struct ToggleState;
+
+impl ToggleAction for ToggleState {
+    fn call(command_id: CommandId) -> ToggleActionResult {
+        if CMD_AUTOAPPROVE.get().copied() == Some(command_id.get()) {
+            if crate::providers::registry::auto_approve() {
+                ToggleActionResult::On
+            } else {
+                ToggleActionResult::Off
+            }
+        } else {
+            ToggleActionResult::NotRelevant
+        }
+    }
+}
+
 /// Adds a "ReaLackey" submenu (holding all our entries) to REAPER's
 /// Extensions menu, wired to the same command ids as the actions.
 struct ExtMenu;
@@ -128,14 +148,16 @@ impl HookCustomMenu for ExtMenu {
             ui::ffi::add_menu_item(submenu, "Prompt presets\u{2026}", id as i32);
         }
         if let Some(id) = CMD_AUTOAPPROVE.get().copied() {
-            // Label carries the current state (read by the screen reader on menu
-            // open) — the menu-item API here has no separate checkmark flag.
-            let label = if crate::providers::registry::auto_approve() {
-                "Advanced mode (auto-approve edits): on"
-            } else {
-                "Advanced mode (auto-approve edits): off"
-            };
-            ui::ffi::add_menu_item(submenu, label, id as i32);
+            // Plain label: the on/off state is reported through the
+            // `toggleaction` hook (ToggleState below) and REAPER draws it as a
+            // native menu checkmark, which screen readers announce as
+            // "checked". The state used to live in the label TEXT — but macOS
+            // builds its Cocoa menu once and re-fires this menu hook rarely if
+            // ever, so the label froze at the startup state and always read
+            // "off" (live mac report). The checkmark is queried when the menu
+            // opens, on both platforms, and the Actions list's State column
+            // shows on/off for free.
+            ui::ffi::add_menu_item(submenu, "Advanced mode (auto-approve edits)", id as i32);
         }
         if let Some(id) = CMD_TRANSCRIBE_NOTES.get().copied() {
             ui::ffi::add_menu_item(submenu, "Transcribe selected item \u{2192} notes", id as i32);
@@ -242,5 +264,8 @@ pub fn register(session: &mut ReaperSession) -> Result<(), Box<dyn Error>> {
     // Mirror the actions into REAPER's Extensions menu.
     session.reaper().add_extensions_main_menu();
     session.plugin_register_add_hook_custom_menu::<ExtMenu>()?;
+    // On/off state provider for toggleable commands (menu checkmark, Actions
+    // list, toolbars) — queried live, so it can't go stale on any platform.
+    session.plugin_register_add_toggle_action::<ToggleState>()?;
     Ok(())
 }

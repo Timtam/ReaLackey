@@ -581,6 +581,12 @@ extern "C" void ui_set_callbacks(on_submit_cb on_submit,
 extern "C" void ui_show(void* parent_hwnd) {
   if (g_dlg) {
     ShowWindow(g_dlg, SW_SHOW);
+    // NOTE (macOS): on SWELL, SetForegroundWindow IS SetFocus(g_dlg) — it makes
+    // the window key AND the (empty) dialog content view the first responder,
+    // stealing the keyboard from the WKWebView subview on EVERY show. The Rust
+    // side repairs that: ensure_created() re-asserts the webview as first
+    // responder after each show (see output.rs), mirroring what the WM_SETFOCUS
+    // -> MoveFocus plumbing does on Windows.
     SetForegroundWindow(g_dlg);
     return;
   }

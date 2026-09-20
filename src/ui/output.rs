@@ -224,6 +224,18 @@ impl Output {
     /// Open the cut-by-text editor modal with its JSON payload (words + audio).
     fn open_cut_editor(&self, payload_json: &str) {
         if self.active() {
+            // macOS: re-assert the WKWebView as first responder NOW, not just at
+            // webview creation. The editor opens right after the transcription
+            // progress dialog closed, and that close can hand key status and the
+            // first-responder slot elsewhere; the JS `G.focus()` inside
+            // openCutEditor only moves DOM focus, which is invisible to Cocoa —
+            // without a real first responder every arrow key falls through the
+            // responder chain to REAPER's global keyboard section and "throws
+            // the user back into the REAPER window" (live mac report).
+            #[cfg(target_os = "macos")]
+            if let Some(wv) = &self.webview {
+                let _ = wv.focus();
+            }
             self.call_js("openCutEditor", payload_json);
         }
     }
@@ -245,6 +257,21 @@ pub fn ensure_created() {
     ffi::install_destroy_cb();
     let already = STATE.with(|c| c.borrow().active());
     if already {
+        // macOS: re-assert the WKWebView as first responder on EVERY show, not
+        // just at creation. ui_show()'s SetForegroundWindow is SetFocus on
+        // SWELL — it hands first-responder status to the (empty) dialog view
+        // each time the pane is shown, and a first responder that isn't the
+        // webview means keystrokes bubble out of the dialog into REAPER's
+        // keyboard section (arrows ran main-section actions: the cut-by-text
+        // editor "threw the user back into the REAPER window", live mac
+        // report). This is the mac mirror of the Windows WM_SETFOCUS ->
+        // MoveFocus plumbing, which restores web-content focus per activation.
+        #[cfg(target_os = "macos")]
+        STATE.with(|c| {
+            if let Some(wv) = &c.borrow().webview {
+                let _ = wv.focus();
+            }
+        });
         return;
     }
     #[cfg(webview)]
