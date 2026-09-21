@@ -236,12 +236,16 @@ impl Output {
             if let Some(wv) = &self.webview {
                 let _ = wv.focus();
             }
+            // From here until close, the macOS accelerator arm routes the
+            // editing keys host-side (ffi::set_editor_open + editor_host_key).
+            ffi::set_editor_open(true);
             self.call_js("openCutEditor", payload_json);
         }
     }
 
     /// Close the cut-by-text editor modal.
     fn close_cut_editor(&self) {
+        ffi::set_editor_open(false);
         if self.active() {
             self.eval("closeCutEditor();");
         }
@@ -344,6 +348,7 @@ pub fn on_destroy() {
     // rebuild re-pings ui:ready when its page reloads).
     WEBVIEW_ACTIVE.store(false, Ordering::Release);
     WEBVIEW_READY.store(false, Ordering::Release);
+    ffi::set_editor_open(false); // the accel arm must stop claiming editor keys
     crate::ui::bridge::cancel_editor();
     #[cfg(webview)]
     {
@@ -417,6 +422,19 @@ pub fn send_preview(json: &str) {
     STATE.with(|c| c.borrow().call_js("cutPreviewSegments", json));
 }
 /// Close the cut-by-text editor modal (main thread).
+/// Inject a host-routed editor key (macOS accelerator arm) into the page.
+/// Main thread only, like every other eval.
+pub fn editor_host_key(key: &str, shift: bool) {
+    STATE.with(|c| {
+        let out = c.borrow();
+        if out.active() {
+            // serde_json string-escapes the key name for the JS literal.
+            let k = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+            out.eval(&format!("editorHostKey({k},{shift});"));
+        }
+    });
+}
+
 pub fn close_cut_editor() {
     STATE.with(|c| c.borrow().close_cut_editor());
 }
@@ -1063,6 +1081,31 @@ document.addEventListener('keydown',function(e){
   // word (the host's indices are load-bearing).
   function keepFlags(){ var k=[]; st.words.forEach(function(w){ var v=!w.rm; for(var m=0;m<(w.n||1);m++) k.push(v); }); return k; }
   function confirmCut(){ var keep=keepFlags(); try{ if(window.ipc) window.ipc.postMessage(JSON.stringify({t:'cut:save',keep:keep})); }catch(e){} closeCutEditor(); }
+
+  // Host-routed keys (macOS): while the editor is open, REAPER's accelerator
+  // hook EATS the editing keys and the host injects them here, so nothing
+  // depends on WKWebView keyboard focus (two blind fixes bet on key delivery
+  // and lost; the hook receiving these keys is the one proven link). The key is
+  // re-dispatched as a synthetic keydown so the listener below remains the
+  // single source of key behavior; a focused button gets its default
+  // activation by hand, because synthetic events run listeners, not defaults.
+  // Repeat detection is by timing: the hook's MSG doesn't carry it, and
+  // fast=!repeat is what keeps a held arrow from machine-gunning audio.
+  var _hkLast=0,_hkKey='';
+  window.editorHostKey=function(k,shift){
+    var open=$('cutModal');
+    if(!st||!open||open.hidden) return;
+    var a=document.activeElement;
+    if(a&&a!==G&&open.contains(a)&&a.tagName==='BUTTON'){
+      if(k===' '){ a.click(); return; }
+      if(k==='Escape'){ requestCancel(); return; }
+      if(G)G.focus(); // arrows and the rest belong to the grid
+    } else if(G&&a!==G){ G.focus(); }
+    var now=Date.now(),rep=(_hkKey===k&&now-_hkLast<160);
+    _hkKey=k;_hkLast=now;
+    document.dispatchEvent(new KeyboardEvent('keydown',
+      {key:k,shiftKey:!!shift,repeat:rep,cancelable:true,bubbles:true}));
+  };
 
   document.addEventListener('keydown',function(e){
     if(!st) return; var m=$('cutModal'); if(!m||m.hidden) return;

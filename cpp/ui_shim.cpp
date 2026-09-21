@@ -700,6 +700,12 @@ extern "C" void ui_set_webview_active(int active) {
   layout_controls(g_dlg);
 }
 
+// Whether the cut-by-text editor modal is open (set from Rust). Drives the
+// macOS host-side key routing in ui_translate_accel; irrelevant on Windows,
+// where WebView2 delivers keys to the page itself.
+static int g_editor_open = 0;
+extern "C" void ui_set_editor_open(int open) { g_editor_open = open ? 1 : 0; }
+
 // Keyboard router for REAPER's accelerator queue (registered via plugin_register
 // "accelerator"). Two jobs, both only for keystrokes aimed at OUR window:
 //   1. Stop REAPER from swallowing them as global shortcuts (so typing in the
@@ -746,6 +752,27 @@ extern "C" int ui_translate_accel(void* msgp) {
   bool ours = msg->hwnd == g_dlg || IsChild(g_dlg, msg->hwnd) ||
               fg == g_dlg || (fg && IsChild(g_dlg, fg));
   if (!ours) return 0; // not our window — let REAPER handle it
+  // While the cut-by-text editor is open, its editing keys are routed HOST-side:
+  // the hook eats them and Rust drives the editor by JS injection. Two blind mac
+  // fixes bet on WKWebView key DELIVERY (first responder + the -10 raw path) and
+  // arrows still never reached the page; this path does not depend on either —
+  // the hook receiving these keys is the one link the original bug PROVED works.
+  // Only modifier-less (plus Shift, for selection) editing keys are claimed, so
+  // Cmd-shortcuts and plain typing keep the raw-event path below.
+  if (g_editor_open && msg->message == WM_KEYDOWN) {
+    int vk = (int)msg->wParam;
+    bool editor_vk =
+        vk == VK_LEFT || vk == VK_UP || vk == VK_RIGHT || vk == VK_DOWN ||
+        vk == VK_HOME || vk == VK_END || vk == VK_SPACE || vk == VK_DELETE ||
+        vk == VK_BACK || vk == VK_ESCAPE;
+    bool mods = (GetAsyncKeyState(VK_CONTROL) & 0x8000) ||
+                (GetAsyncKeyState(VK_MENU) & 0x8000) ||
+                (GetAsyncKeyState(VK_LWIN) & 0x8000);
+    if (editor_vk && !mods) {
+      // 2 = "editor key, eaten — Rust dispatches it"; 3 = same with Shift held.
+      return (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 3 : 2;
+    }
+  }
   // -10 = "process event raw" (macOS): hand the original NSEvent back to Cocoa's
   // normal flow (keyWindow performKeyEquivalent: -> responder chain -> menu) so the
   // WKWebView does its OWN native editing — Cmd+C/V/X/A, arrows, typing. Returning

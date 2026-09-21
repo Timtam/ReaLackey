@@ -137,6 +137,9 @@ pub fn on_webview_message(json: &str) {
         // Cut-by-text editor: the user confirmed (with the per-word keep flags) or
         // cancelled. Hand the outcome to the worker awaiting it.
         Some("cut:save") => {
+            // The modal closed itself client-side: stop the mac accel arm from
+            // claiming editor keys.
+            crate::ui::ffi::set_editor_open(false);
             let keep: Vec<bool> = v
                 .get("keep")
                 .and_then(|k| k.as_array())
@@ -144,7 +147,10 @@ pub fn on_webview_message(json: &str) {
                 .unwrap_or_default();
             resolve_editor(EditorResult::Save { keep });
         }
-        Some("cut:cancel") => resolve_editor(EditorResult::Cancel),
+        Some("cut:cancel") => {
+            crate::ui::ffi::set_editor_open(false); // see cut:save above
+            resolve_editor(EditorResult::Cancel);
+        }
         // "Clear" in the composer: drop the worker's history AND the visible log.
         Some("chat:clear") => {
             if let Some(tx) = TASK_TX.get() {

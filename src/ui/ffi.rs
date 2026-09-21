@@ -28,6 +28,7 @@ extern "C" {
     fn ui_output_bounds(x: *mut c_int, y: *mut c_int, w: *mut c_int, h: *mut c_int) -> c_int;
     fn ui_set_webview_active(active: c_int);
     fn ui_translate_accel(msg: *mut c_void) -> c_int;
+    fn ui_set_editor_open(open: c_int);
     fn ui_set_resize_cb(on_resize: extern "C" fn());
     fn ui_set_destroy_cb(on_destroy: extern "C" fn());
     fn ui_enable_webview_tabstop();
@@ -197,6 +198,12 @@ pub fn output_bounds() -> Option<(i32, i32, i32, i32)> {
 /// Hand the whole window to the webview (hide all native controls, fill client).
 pub fn set_webview_active(active: bool) {
     unsafe { ui_set_webview_active(active as c_int) }
+}
+
+/// Tell the shim whether the cut-by-text editor modal is open — on macOS its
+/// accelerator arm then routes the editing keys host-side (see ui_translate_accel).
+pub fn set_editor_open(open: bool) {
+    unsafe { ui_set_editor_open(open as c_int) }
 }
 
 /// Route a keystroke aimed at our window (via REAPER's accelerator queue).

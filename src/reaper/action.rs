@@ -92,6 +92,17 @@ impl TranslateAccel for AccelHook {
         match ui::ffi::translate_accel(&mut msg as *mut _ as *mut c_void) {
             1 => TranslateAccelResult::Eat,
             -1 => TranslateAccelResult::PassOnToWindow,
+            // macOS, cut-by-text editor open: the shim claimed an editing key
+            // (2 = plain, 3 = Shift held). Eat it and drive the editor by JS
+            // injection — this never depends on WKWebView keyboard focus, the
+            // lane that kept failing on live mac tests. Runs on the main
+            // thread, where eval is safe.
+            r @ (2 | 3) => {
+                if let Some(name) = editor_key_name(msg.wParam as u32) {
+                    crate::ui::output::editor_host_key(name, r == 3);
+                }
+                TranslateAccelResult::Eat
+            }
             // macOS: hand the raw NSEvent back to Cocoa so the WKWebView handles
             // native editing itself (Cmd+C/V/X/A, arrows, typing) instead of REAPER
             // swallowing it (e.g. Cmd+V hitting REAPER's Edit > Paste).
@@ -101,6 +112,24 @@ impl TranslateAccel for AccelHook {
             _ => TranslateAccelResult::NotOurWindow,
         }
     }
+}
+
+/// The DOM `KeyboardEvent.key` name for a host-routed editor key's VK code —
+/// exactly the set the shim claims while the editor is open.
+fn editor_key_name(vk: u32) -> Option<&'static str> {
+    Some(match vk {
+        0x25 => "ArrowLeft",
+        0x26 => "ArrowUp",
+        0x27 => "ArrowRight",
+        0x28 => "ArrowDown",
+        0x24 => "Home",
+        0x23 => "End",
+        0x20 => " ",
+        0x2E => "Delete",
+        0x08 => "Backspace",
+        0x1B => "Escape",
+        _ => return None,
+    })
 }
 
 /// Reports the on/off state of our toggleable commands. REAPER queries this
