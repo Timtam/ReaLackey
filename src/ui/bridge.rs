@@ -96,6 +96,15 @@ pub fn on_webview_message(json: &str) {
             }
         }
         Some("cancel") => cancel(),
+        // The cut-by-text editor's announcements: spoken through the ONE spoken
+        // channel (OSARA when present, the page's aria-live region otherwise).
+        // Runs on the main thread (wry dispatches IPC there), where speak() and
+        // OSARA are safe to call.
+        Some("say") => {
+            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                crate::ui::output::speak(text);
+            }
+        }
         // A link was clicked in the chat: open it in the user's default browser
         // instead of navigating the pane away from the conversation.
         Some("openurl") => {

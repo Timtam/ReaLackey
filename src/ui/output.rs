@@ -839,7 +839,21 @@ document.addEventListener('keydown',function(e){
   var MODES=['both','audio','spoken'];
   var cancelArmed=false,cancelTimer=null;
   function $(id){return document.getElementById(id);}
-  function announce(t){ if(window.liveAnnounce) liveAnnounce(t); }
+  // Editor announcements go through the HOST's single spoken channel (OSARA
+  // when present, aria-live only as the no-OSARA fallback) instead of writing
+  // the in-page live region directly. Two reasons: it restores the app's
+  // one-spoken-channel doctrine inside the editor, and it takes VoiceOver's
+  // WebKit live-region machinery out of the hot path — a live mac report had
+  // REAPER FREEZE after a couple of deletes, whose only output is exactly this
+  // announcement; OSARA speaks natively and focus-independently. The visible
+  // footer mirror (showSaid) stays in-page either way.
+  function announce(t){
+    if(!t) return;
+    try{
+      if(window.ipc){ showSaid(t); window.ipc.postMessage(JSON.stringify({t:'say',text:t})); return; }
+    }catch(e){}
+    if(window.liveAnnounce) liveAnnounce(t);
+  }
   function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   // Strip PUNCTUATION for announcements, not "everything non-ASCII": the old
   // [^A-Za-z0-9'] deleted umlauts and every non-Latin letter, so the screen
