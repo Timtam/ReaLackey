@@ -15,6 +15,9 @@ ASSET="reaper_realackey.dylib"
 
 # Prefer the rustup toolchain so a Homebrew (or other) rustc on PATH doesn't
 # shadow it and break the target-specific builds.
+# Note for macOS 27+: requires rustc 1.99+ (run `rustup update stable`). Older
+# compilers emit Mach-O binaries with unaligned LINKEDIT string tables that
+# dyld on macOS 27 rejects.
 if command -v rustup >/dev/null 2>&1; then
   export PATH="$(dirname "$(rustup which cargo)"):$PATH"
 fi
