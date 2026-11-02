@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Local macOS build helper: produce a UNIVERSAL (Apple Silicon + Intel) dylib with
-# the name REAPER expects (reaper_realackey.dylib), ad-hoc signed so it loads. A
-# plain `cargo build` only makes a single-arch, lib-prefixed dylib for the host.
+# Local macOS build helper: produce a dylib with the name REAPER expects
+# (reaper_realackey.dylib), ad-hoc signed so it loads. Builds an ARM64-only
+# dylib on macOS 27 and above, or a universal (ARM + Intel) dylib on older
+# versions. A plain `cargo build` only makes a single-arch, lib-prefixed dylib
+# for the host.
 #
 # This is the local counterpart to the release pipeline
 # (.github/scripts/build-macos-universal.sh), which additionally Developer-ID
@@ -33,22 +35,32 @@ if [ ! -d "vendor/WDL/WDL/swell" ]; then
 fi
 command -v php >/dev/null 2>&1 || echo "warning: php not on PATH; build.rs needs it for SWELL resgen" >&2
 
-echo "Adding macOS targets…"
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-echo "Building aarch64 (Apple Silicon)…"
-cargo build --release --target aarch64-apple-darwin
-echo "Building x86_64 (Intel)…"
-cargo build --release --target x86_64-apple-darwin
-
-echo "Merging into a universal binary: target/release/$ASSET"
 mkdir -p target/release
-lipo -create -output "target/release/$ASSET" \
-  target/aarch64-apple-darwin/release/libreaper_realackey.dylib \
-  target/x86_64-apple-darwin/release/libreaper_realackey.dylib
 
-# lipo drops the linker's ad-hoc signature and arm64 refuses to load an unsigned
-# binary, so re-sign ad-hoc. (Not notarization — the release build does that.)
+MACOS_MAJOR=$(sw_vers -productVersion | cut -d. -f1)
+
+if [ "$MACOS_MAJOR" -ge 27 ]; then
+  echo "macOS $MACOS_MAJOR detected (>= 27): building ARM64 only…"
+  rustup target add aarch64-apple-darwin
+  echo "Building aarch64 (Apple Silicon)…"
+  cargo build --release --target aarch64-apple-darwin
+  cp target/aarch64-apple-darwin/release/libreaper_realackey.dylib "target/release/$ASSET"
+else
+  echo "macOS $MACOS_MAJOR detected (< 27): building universal binary (ARM + Intel)…"
+  echo "Adding macOS targets…"
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin
+  echo "Building aarch64 (Apple Silicon)…"
+  cargo build --release --target aarch64-apple-darwin
+  echo "Building x86_64 (Intel)…"
+  cargo build --release --target x86_64-apple-darwin
+
+  echo "Merging into a universal binary: target/release/$ASSET"
+  lipo -create -output "target/release/$ASSET" \
+    target/aarch64-apple-darwin/release/libreaper_realackey.dylib \
+    target/x86_64-apple-darwin/release/libreaper_realackey.dylib
+fi
+
+# Ensure the final dylib is ad-hoc signed so it loads on Apple Silicon
 codesign --force --sign - "target/release/$ASSET"
 
 echo "== architectures =="
