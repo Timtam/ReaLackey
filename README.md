@@ -197,15 +197,15 @@ install differs). `reaper-rs` is pulled from git and pinned to one rev.
 **macOS** (via SWELL): additionally needs a WDL checkout at `vendor/WDL`
 (`git clone https://github.com/justinfrankel/WDL vendor/WDL`) and **PHP** on
 `PATH` (for `swell_resgen.php`). A plain `cargo build` only makes a single-arch,
-`lib`-prefixed dylib for the host; to build the **universal** binary REAPER wants
-(`reaper_realackey.dylib` — Apple Silicon + Intel, ad-hoc signed so it loads), run
-the helper:
+`lib`-prefixed dylib for the host; to build the binary REAPER expects
+(`reaper_realackey.dylib` — ARM64 on macOS 27+, or universal for earlier
+versions, ad-hoc signed so it loads), run the helper:
 
 ```sh
 ./build-macos.sh       # -> target/release/reaper_realackey.dylib
 ```
 
-It just wraps two `cargo build --target …` runs, `lipo`, and an ad-hoc `codesign`
+It wraps the cargo build (plus `lipo` on < macOS 27) and an ad-hoc `codesign`
 (set `LIBCLANG_PATH` yourself if it isn't found). Copy the result into REAPER's
 `UserPlugins`. Releases are additionally Developer-ID signed + notarized — see
 [`docs/macos-notarization.md`](docs/macos-notarization.md).
